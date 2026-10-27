@@ -886,7 +886,15 @@ app.whenReady().then(() => {
 	maybeStart();
 });
 
+// Tray-app semantics: closing every window (config included) must not kill
+// the host - the tray keeps it alive. Also makes any mystery exit observable:
+// a real quit now only comes from the tray Quit item (logged below).
+app.on("window-all-closed", () => {
+	console.log("[host] all windows closed - staying alive in the tray");
+});
+
 app.on("before-quit", () => {
+	console.log("[host] before-quit (tray Quit or explicit termination)");
 	for (const [context, inst] of instances) sendWillDisappear(context, inst);
 	for (const child of nativeChildren.values()) {
 		try { child.kill(); } catch { /* already gone */ }
