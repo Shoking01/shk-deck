@@ -1,60 +1,35 @@
-// REA RD MVP host - device client (T7)
-// Connects to the official Mirabox StreamDock WebSocket SDK server, waits for
-// deviceDidConnect, paints a test image on key 1, and logs key events.
-//
+// REA RD MVP host - standalone device loop test (T7)
+// Connects to the SDK server, paints a test image on key 1, logs key events.
 // Start the SDK server first (see host/README.md):
 //   StreamDockWebsocketSDK.exe -oem 293V3:0x0200:0x3000
-const WebSocket = require("ws");
 const fs = require("fs");
 const path = require("path");
+const { DeviceClient } = require("./device-client");
 
-const SDK_URL = process.env.SDK_URL || "ws://127.0.0.1:9002";
-let devicePath = null;
+const device = new DeviceClient();
 let keyEvents = 0;
 
-const ws = new WebSocket(SDK_URL);
+device.on("server-connect", () => console.log(`[device] connected to SDK server at ${device.url}`));
 
-function send(obj) {
-	ws.send(JSON.stringify(obj));
-}
-
-ws.on("open", () => {
-	console.log(`[device] connected to SDK server at ${SDK_URL}`);
-});
-
-ws.on("message", (data) => {
-	let msg;
-	try { msg = JSON.parse(data.toString()); } catch (e) { return; }
-	switch (msg.event) {
-		case "deviceDidConnect": {
-			devicePath = msg.path;
-			console.log(`[device] deviceDidConnect raw: ${JSON.stringify(msg)}`);
-			try {
-				const img = fs.readFileSync(path.join(__dirname, "test-image.png"));
-				const imgData = "data:image/png;base64," + img.toString("base64");
-				send({ event: "setKeyImgData", path: devicePath, payload: { keyIndex: 1, imgData: imgData } });
-				send({ event: "refresh", path: devicePath, payload: {} });
-				console.log("[device] test image sent to key 1");
-			} catch (e) {
-				console.log(`[device] could not load test-image.png: ${e.message}`);
-			}
-			send({ event: "read", path: devicePath, payload: {} });
-			console.log("[device] listening for key events (read started)");
-			break;
-		}
-		case "read": {
-			keyEvents += 1;
-			console.log(`[device] key #${keyEvents}: ${JSON.stringify(msg.payload)}`);
-			break;
-		}
-		case "deviceDidDisconnect":
-			console.log("[device] deviceDidDisconnect");
-			devicePath = null;
-			break;
-		default:
-			console.log(`[device] ${msg.event} ${JSON.stringify(msg.payload || {}).slice(0, 120)}`);
+device.on("device-connect", (payload) => {
+	const p = payload || {};
+	console.log(`[device] deviceDidConnect raw: ${JSON.stringify(p)}`);
+	try {
+		const img = fs.readFileSync(path.join(__dirname, "test-image.png"));
+		device.setKeyImage(1, "data:image/png;base64," + img.toString("base64"));
+		console.log("[device] test image sent to key 1");
+	} catch (e) {
+		console.log(`[device] could not load test-image.png: ${e.message}`);
 	}
+	device.startRead();
+	console.log("[device] listening for key events (read started)");
 });
 
-ws.on("error", (e) => console.log(`[device] ws error: ${e.message}`));
-ws.on("close", () => console.log("[device] connection closed"));
+device.on("key", (payload) => {
+	keyEvents += 1;
+	console.log(`[device] key #${keyEvents}: ${JSON.stringify(payload)}`);
+});
+
+device.on("device-disconnect", () => console.log("[device] deviceDidDisconnect"));
+device.on("error", (e) => console.log(`[device] ws error: ${e.message}`));
+device.on("server-close", () => console.log("[device] connection closed"));

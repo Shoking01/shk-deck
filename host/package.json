@@ -3,11 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "description": "REA RD custom StreamDock MVP host",
-  "main": "device.js",
+  "main": "main.js",
   "scripts": {
+    "start": "electron .",
     "device": "node device.js"
   },
   "dependencies": {
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0"
   }
 }
