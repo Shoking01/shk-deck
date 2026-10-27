@@ -64,7 +64,7 @@ Plugin -> host (observed shapes): `context`-scoped actions send `{event, context
 | `logMessage` | static | `{event, payload}` |
 | `sendToPropertyInspector` | static | `{event, action, context, payload}` |
 | `switchToProfile` | static | profile switch request; payload shape unverified [inferred] |
-| `setBackground` / `stopBackground` | static | StreamDock extension (device background layer); shape unverified [inferred] |
+| `setBackgroundImgData` | static | VERIFIED live (exe strings + probe): `{event, path: <base64 device path as delivered by deviceDidConnect>, payload: { image: <base64 PNG> }}`; SDK scales to the background layer (800x480 accepted). Payload key `imgData` is rejected with misleading 'invalid imgData'; raw (non-base64) path -> 'device not found'. `setTemporaryBackgroundImgData` exists but is M18/N4Pro-only per binary strings. |
 | `requestSensorsData` | static | StreamDock extension (hardware sensors); shape unverified [inferred] |
 | `registrationScreenSaverEvent` | static | StreamDock extension; shape unverified [inferred] |
 
@@ -81,7 +81,7 @@ PI pages are HTML loaded by the host (they read connection params and connect to
 ## 7. Known gaps (to close during Fase 1)
 
 1. `connect-args` were dropped by probe v0.1 (mirror socket opened after host injection). Fixed in probe v0.2 (message buffering); re-capture on next Stream Station restart confirms the injected-call timing.
-2. Payload shapes for the StreamDock extensions (`setBackground`, `stopBackground`, `requestSensorsData`, `switchToProfile`, `registrationScreenSaverEvent`) — extract from plugin source or capture a plugin using them.
+2. Payload shapes for the StreamDock extensions (`requestSensorsData`, `switchToProfile`, `registrationScreenSaverEvent`) - extract from plugin source or capture a plugin using them. `setBackgroundImgData` is now VERIFIED (see vocabulary table).
 3. Property inspector registration handshake.
 4. Key image size/format constraints per device (SS550V3: 5x3; side screen resolution).
 5. Multi-action (`isInMultiAction:true`) semantics.
