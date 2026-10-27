@@ -220,6 +220,7 @@ function handlePluginMessage(ws, msg) {
 			const inst = instances.get(msg.context);
 			if (!inst) { console.log(`[host] setImage for unknown context ${msg.context}`); break; }
 			const idx = keyIndex(inst.column, inst.row);
+			if (lastImageByKey.get(idx) === msg.payload.image) break; // identical repaint: skip the device write
 			device.setKeyImage(idx, msg.payload.image);
 			// Throttled logging: per-second redraws (clock) flood the log and hide
 			// everything else; log the first paint per key, then every 50th.
@@ -612,6 +613,10 @@ ipcMain.handle("reard:clear", (_event, payload) => {
 		return { ok: false, error: e.message };
 	}
 });
+
+// 2D-only workload (canvas + images): hardware acceleration only adds a GPU
+// process, GPU disk-cache errors, and battery drain. Disable before ready.
+app.disableHardwareAcceleration();
 
 app.whenReady().then(() => {
 	appReady = true;
