@@ -55,7 +55,9 @@ struct Profile {
 struct Instance {
     column: usize,
     row: usize,
+    // Kept in the shape so the profile parse stays honest about its fields.
     #[serde(default)]
+    #[allow(dead_code)]
     action: String,
 }
 
@@ -229,7 +231,7 @@ impl eframe::App for DeckApp {
                     if custom_button(ui, "Guardar", Btn::Primary) {
                         // Spike: no persistence, the flash would go here.
                     }
-                    if custom_button(ui, "Quitar", Btn::Danger) {}
+                    if custom_button(ui, "Quitar", Btn::Primary) {}
                     if custom_button(ui, "Cancelar", Btn::Ghost) {
                         self.selected = None;
                     }
@@ -264,7 +266,7 @@ impl DeckApp {
         }
         let selected = self.selected == Some(idx);
         let assigned = self.assigned_keys.contains(&idx);
-        let t = ui.ctx().animate_bool_with_time(ui.id().with(("cell", idx)), resp.hovered(), 0.08);
+        let t = ui.ctx().animate_bool_with_time(ui.scope_id().with(("cell", idx)), resp.hovered(), 0.08);
 
         let painter = ui.painter_at(rect);
         // Backing tile: dark surface that brightens on hover, or the real key
@@ -306,6 +308,9 @@ impl DeckApp {
 
 // ---------- Hand-painted widget layer (the v2 spike point) ----------
 
+// Widget-library surface for v2: variants stay available even when the mock
+// panel does not use all of them yet.
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum Btn {
     Primary,
@@ -321,7 +326,7 @@ fn custom_button(ui: &mut egui::Ui, label: &str, variant: Btn) -> bool {
     let galley = ui.painter().layout_no_wrap(label.to_string(), font.clone(), TEXT);
     let size = Vec2::new(galley.rect.width() + 32.0, galley.rect.height() + 16.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let id = ui.id().with(("btn", label));
+    let id = ui.scope_id().with(("btn", label));
     let t_h = ui.ctx().animate_bool_with_time(id.with("h"), resp.hovered(), 0.08);
     let t_p = ui.ctx().animate_bool_with_time(id.with("p"), resp.is_pointer_button_down_on(), 0.06);
 
@@ -347,7 +352,7 @@ fn custom_button(ui: &mut egui::Ui, label: &str, variant: Btn) -> bool {
 /// Returns Some(choice) when the user picks an option.
 fn combo_field(ui: &mut egui::Ui, id_salt: &str, selected: &str, options: &[&str]) -> Option<String> {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(240.0, 30.0), Sense::click());
-    let t = ui.ctx().animate_bool_with_time(ui.id().with((id_salt, "hover")), resp.hovered(), 0.08);
+    let t = ui.ctx().animate_bool_with_time(ui.scope_id().with((id_salt, "hover")), resp.hovered(), 0.08);
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, CornerRadius::same(8), SURFACE_2);
     painter.rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, mix(BORDER, ACCENT, t)), egui::StrokeKind::Inside);
@@ -373,7 +378,7 @@ fn combo_field(ui: &mut egui::Ui, id_salt: &str, selected: &str, options: &[&str
         .show(|ui| {
             for opt in options {
                 let (r, rr) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::click());
-                let ht = ui.ctx().animate_bool_with_time(ui.id().with(("opt", opt)), rr.hovered(), 0.06);
+                let ht = ui.ctx().animate_bool_with_time(ui.scope_id().with(("opt", opt)), rr.hovered(), 0.06);
                 let p = ui.painter_at(r);
                 if *opt == selected {
                     p.rect_filled(r, CornerRadius::same(6), Color32::from_rgba_unmultiplied(ACCENT.r(), ACCENT.g(), ACCENT.b(), 38));
