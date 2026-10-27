@@ -56,6 +56,7 @@ const socketByPlugin = new Map(); // plugin uuid -> WebSocket
 const instances = new Map(); // context -> { plugin, action, column, row, settings, titleColor }
 const setImageLogCount = new Map(); // key index -> paint count, throttles setImage logging
 const lastImageByKey = new Map(); // key index -> last image the owning context sent; used to repaint after a device reconnect
+const titleByKey = new Map(); // key index -> active setTitle text, composited over the key image
 const windows = new Map(); // plugin uuid -> BrowserWindow
 
 function makeContext() {
@@ -146,6 +147,64 @@ function sendWillDisappear(context, inst) {
 	});
 }
 
+// setTitle layer: Mirabox plugins deliver all their text (weather status,
+// temperatures) through setTitle, but the device only accepts images, so the
+// title is composited over the key's last image in a hidden renderer page.
+const KEY_PX = 126; // SS550V3 key resolution, measured from plugin PNG dumps
+let titleRendererWin = null;
+let titleRendererReady = null;
+function renderTitle(baseImg, title) {
+	if (!titleRendererReady) {
+		titleRendererWin = new BrowserWindow({
+			show: false,
+			webPreferences: { offscreen: true, backgroundThrottling: false },
+		});
+		titleRendererReady = titleRendererWin.loadURL("about:blank");
+	}
+	const renderFn = function (imgUrl, text, w, h) {
+		return new Promise((resolve) => {
+			const c = document.createElement("canvas");
+			c.width = w;
+			c.height = h;
+			const ctx = c.getContext("2d");
+			const draw = () => {
+				if (imgUrl) ctx.drawImage(img, 0, 0, w, h);
+				let size = Math.round(w * 0.22);
+				const font = (s) => `bold ${s}px "Segoe UI", Arial, sans-serif`;
+				ctx.font = font(size);
+				while (ctx.measureText(text).width > w * 0.9 && size > 8) {
+					size -= 2;
+					ctx.font = font(size);
+				}
+				ctx.textAlign = "center";
+				ctx.textBaseline = "middle";
+				ctx.lineWidth = Math.max(2, Math.round(w * 0.04));
+				ctx.strokeStyle = "rgba(0,0,0,0.85)";
+				ctx.strokeText(text, w / 2, h / 2);
+				ctx.fillStyle = "#ffffff";
+				ctx.fillText(text, w / 2, h / 2);
+				resolve(c.toDataURL("image/png").split(",")[1]);
+			};
+			if (imgUrl) {
+				const img = new Image();
+				img.onload = draw;
+				img.onerror = draw;
+				img.src = imgUrl;
+			} else draw();
+		});
+	};
+	const expr = `(${renderFn.toString()})(${JSON.stringify(baseImg || null)}, ${JSON.stringify(title)}, ${KEY_PX}, ${KEY_PX})`;
+	return titleRendererReady.then(() => titleRendererWin.webContents.executeJavaScript(expr));
+}
+
+function applyTitleLayer(idx) {
+	// Fire-and-forget compositing: draw the cached title over the cached image
+	// and push the result to the device.
+	renderTitle(lastImageByKey.get(idx), titleByKey.get(idx))
+		.then((img) => { if (img) device.setKeyImage(idx, img); })
+		.catch((e) => console.log(`[host] title render failed: ${e.message}`));
+}
+
 function handlePluginMessage(ws, msg) {
 	switch (msg.event) {
 		case "registerPlugin":
@@ -167,6 +226,7 @@ function handlePluginMessage(ws, msg) {
 			const n = (setImageLogCount.get(idx) || 0) + 1;
 			setImageLogCount.set(idx, n);
 			lastImageByKey.set(idx, msg.payload.image);
+			if (titleByKey.has(idx)) applyTitleLayer(idx); // re-composite the active title over the new image
 			if (n === 1 || n % 50 === 0) {
 				console.log(`[host] setImage -> key ${idx} #${n} (${msg.payload.image.length} chars)`);
 			}
@@ -178,9 +238,22 @@ function handlePluginMessage(ws, msg) {
 			}
 			break;
 		}
-		case "setTitle":
-			console.log(`[host] setTitle (not rendered in MVP): ${JSON.stringify(msg.payload).slice(0, 100)}`);
+		case "setTitle": {
+			const inst = instances.get(msg.context);
+			if (!inst) { console.log(`[host] setTitle for unknown context ${msg.context}`); break; }
+			const idx = keyIndex(inst.column, inst.row);
+			const title = msg.payload && msg.payload.title != null ? String(msg.payload.title) : "";
+			console.log(`[host] setTitle -> key ${idx}: "${title}"`);
+			if (title === "") {
+				titleByKey.delete(idx);
+				const base = lastImageByKey.get(idx);
+				if (base) device.setKeyImage(idx, base); // empty title clears the text layer
+			} else {
+				titleByKey.set(idx, title);
+				applyTitleLayer(idx);
+			}
 			break;
+		}
 		case "setSettings": {
 			const inst = instances.get(msg.context);
 			if (inst) inst.settings = msg.payload.settings || {};
@@ -295,6 +368,9 @@ function applyProfileChange(newInstances) {
 		if (changedKeys.has(`${inst.column},${inst.row}`)) {
 			sendWillDisappear(context, inst);
 			instances.delete(context);
+			const droppedIdx = keyIndex(inst.column, inst.row);
+			titleByKey.delete(droppedIdx);
+			lastImageByKey.delete(droppedIdx);
 			console.log(`[host] willDisappear + dropped context ${context} @ (${inst.column},${inst.row})`);
 		}
 	}
@@ -447,7 +523,10 @@ device.on("device-connect", (payload) => {
 	if (isReconnect && lastImageByKey.size) {
 		// Re-enumeration clears the device key memory; static plugins (calendar)
 		// never repaint on their own, so restore every live key from cache.
-		for (const [idx, img] of lastImageByKey) device.setKeyImage(idx, img);
+		for (const [idx, img] of lastImageByKey) {
+			device.setKeyImage(idx, img);
+			if (titleByKey.has(idx)) applyTitleLayer(idx);
+		}
 		console.log(`[host] repainted ${lastImageByKey.size} key(s) after device reconnect`);
 	}
 });
