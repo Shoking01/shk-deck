@@ -28,8 +28,7 @@ ws.on("message", (data) => {
 	switch (msg.event) {
 		case "deviceDidConnect": {
 			devicePath = msg.path;
-			const p = msg.payload || {};
-			console.log(`[device] deviceDidConnect type=${p.type} vid=0x${(p.vendorID || 0).toString(16)} pid=0x${(p.productID || 0).toString(16)} product="${p.product}" serial=${p.serialNumber}`);
+			console.log(`[device] deviceDidConnect raw: ${JSON.stringify(msg)}`);
 			try {
 				const img = fs.readFileSync(path.join(__dirname, "test-image.png"));
 				const imgData = "data:image/png;base64," + img.toString("base64");
