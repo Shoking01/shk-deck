@@ -1,0 +1,11 @@
+# Dependencies
+node_modules/
+
+# Vendored third-party binaries (downloaded, not committed)
+third_party/
+
+# Local captures with device identifiers
+probe/listener/probe-capture.jsonl
+
+# Logs and caches
+*.log

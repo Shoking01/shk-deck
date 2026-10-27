@@ -1,0 +1,26 @@
+{
+  "SDKVersion": 1,
+  "Author": "REA RD",
+  "Name": "REA Protocol Probe",
+  "Icon": "image/ico.png",
+  "CodePath": "plugin/index.html",
+  "Description": "Captures all host-plugin WebSocket traffic for the REA RD host project. Delete this folder to uninstall.",
+  "Category": "REA RD",
+  "CategoryIcon": "image/ico.png",
+  "Version": "0.1.0",
+  "URL": "",
+  "OS": { "Platform": "windows", "MinimumVersion": "7" },
+  "Software": { "MinimumVersion": "2.9" },
+  "Actions": [
+    {
+      "Name": "Probe Action",
+      "UUID": "com.reard.probe.probeAction",
+      "Icon": "image/ico.png",
+      "States": [
+        { "Image": "image/ico.png", "ShowTitle": false }
+      ],
+      "SupportedInMultiActions": false,
+      "Tooltip": "Generates protocol traffic for capture."
+    }
+  ]
+}

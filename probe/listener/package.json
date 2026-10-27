@@ -1,0 +1,13 @@
+{
+  "name": "rea-probe-listener",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local listener that records mirrored StreamDock host-plugin WebSocket traffic.",
+  "main": "listener.js",
+  "scripts": {
+    "start": "node listener.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
