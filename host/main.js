@@ -183,7 +183,7 @@ function sendWillDisappear(context, inst) {
 const KEY_PX = 126; // SS550V3 key resolution, measured from plugin PNG dumps
 let titleRendererWin = null;
 let titleRendererReady = null;
-function renderTitle(baseImg, title) {
+function ensureTitleRenderer() {
 	if (!titleRendererReady) {
 		titleRendererWin = new BrowserWindow({
 			show: false,
@@ -191,6 +191,10 @@ function renderTitle(baseImg, title) {
 		});
 		titleRendererReady = titleRendererWin.loadURL("about:blank");
 	}
+	return titleRendererReady;
+}
+function renderTitle(baseImg, title) {
+	ensureTitleRenderer();
 	const renderFn = function (imgUrl, text, w, h) {
 		return new Promise((resolve) => {
 			const c = document.createElement("canvas");
@@ -235,6 +239,44 @@ function applyTitleLayer(idx) {
 		.catch((e) => console.log(`[host] title render failed: ${e.message}`));
 }
 
+let blankKeyImagePromise = null;
+function getBlankKeyImage() {
+	// One shared 126x126 solid black PNG, rendered once in the hidden page.
+	if (!blankKeyImagePromise) {
+		const blankFn = function (w, h) {
+			const c = document.createElement("canvas");
+			c.width = w;
+			c.height = h;
+			const ctx = c.getContext("2d");
+			ctx.fillStyle = "#000000";
+			ctx.fillRect(0, 0, w, h);
+			return c.toDataURL("image/png").split(",")[1];
+		};
+		blankKeyImagePromise = ensureTitleRenderer().then(() =>
+			titleRendererWin.webContents.executeJavaScript(`(${blankFn.toString()})(${KEY_PX}, ${KEY_PX})`));
+	}
+	return blankKeyImagePromise;
+}
+
+function paintAllKeys() {
+	// Own the whole key surface: assigned keys repaint from cache, unassigned
+	// keys go black. Without this, keys the host never paints keep showing
+	// whatever the device last held (Stream Station's layout, its home
+	// background showing through, stale images after re-enumeration).
+	for (let idx = 1; idx <= COLUMNS * ROWS; idx++) {
+		const cached = lastImageByKey.get(idx);
+		if (cached) {
+			device.setKeyImage(idx, cached);
+			if (titleByKey.has(idx)) applyTitleLayer(idx);
+		} else {
+			getBlankKeyImage()
+				.then((img) => device.setKeyImage(idx, img))
+				.catch((e) => console.log(`[host] blank key paint failed: ${e.message}`));
+		}
+	}
+	console.log(`[host] painted all ${COLUMNS * ROWS} keys (${lastImageByKey.size} from cache, rest blank)`);
+}
+
 function handlePluginMessage(ws, msg) {
 	switch (msg.event) {
 		case "registerPlugin": {
@@ -254,6 +296,12 @@ function handlePluginMessage(ws, msg) {
 		case "setImage": {
 			const inst = instances.get(msg.context);
 			if (!inst) { console.log(`[host] setImage for unknown context ${msg.context}`); break; }
+			if (!msg.payload || typeof msg.payload.image !== "string" || !msg.payload.image) {
+				// Native plugins send an empty first frame before their data
+				// pipeline warms up; forwarding it just noise on the HID bus.
+				console.log(`[host] setImage with empty image from ${inst.plugin}, ignored`);
+				break;
+			}
 			const idx = keyIndex(inst.column, inst.row);
 			if (lastImageByKey.get(idx) === msg.payload.image) break; // identical repaint: skip the device write
 			device.setKeyImage(idx, msg.payload.image);
@@ -555,6 +603,8 @@ function maybeStart() {
 			try { launchPlugin(pluginUuid); }
 			catch (e) { console.log(`[host] launch failed for ${pluginUuid}: ${e.message}`); }
 		}
+		try { paintAllKeys(); } // blank every key we do not own before plugins paint theirs
+		catch (e) { console.log(`[host] paintAllKeys failed: ${e.message}`); }
 		openConfigWindow();
 	}
 }
@@ -588,13 +638,9 @@ device.on("device-connect", (payload) => {
 	deviceConnected = true;
 	maybeStart();
 	if (isReconnect && lastImageByKey.size) {
-		// Re-enumeration clears the device key memory; static plugins (calendar)
-		// never repaint on their own, so restore every live key from cache.
-		for (const [idx, img] of lastImageByKey) {
-			device.setKeyImage(idx, img);
-			if (titleByKey.has(idx)) applyTitleLayer(idx);
-		}
-		console.log(`[host] repainted ${lastImageByKey.size} key(s) after device reconnect`);
+		// Re-enumeration clears the device key memory; repaint every key from
+		// cache and blank the rest (covers static plugins and leftovers).
+		paintAllKeys();
 	}
 });
 device.on("key", (p) => {

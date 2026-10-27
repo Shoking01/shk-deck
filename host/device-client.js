@@ -10,10 +10,25 @@ class DeviceClient extends EventEmitter {
 		this.url = url;
 		this.devicePath = null;
 		this.deviceInfo = null;
-		this.ws = new WebSocket(url);
+		this.closedByUs = false;
+		this._connect();
+	}
+
+	_connect() {
+		this.ws = new WebSocket(this.url);
 		this.ws.on("open", () => this.emit("server-connect"));
 		this.ws.on("error", (e) => this.emit("error", e));
-		this.ws.on("close", () => this.emit("server-close"));
+		this.ws.on("close", () => {
+			this.emit("server-close");
+			// The SDK server can stall a handshake (e.g. after an abrupt client
+			// death) or be restarted on its own; without a retry the host sits
+			// silently dead forever. Reconnect until it answers.
+			if (!this.closedByUs) {
+				setTimeout(() => {
+					if (!this.closedByUs) this._connect();
+				}, 2000);
+			}
+		});
 		this.ws.on("message", (data) => {
 			let msg;
 			try { msg = JSON.parse(data.toString()); } catch { return; }
