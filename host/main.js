@@ -435,7 +435,10 @@ wss.on("connection", (ws) => {
 
 device.on("server-connect", () => console.log(`[host] SDK server at ${device.url}`));
 device.on("device-connect", (payload) => {
-	const isReconnect = deviceConnected; // a device-connect after the first one means the USB device re-enumerated
+	// started flips true at the first maybeStart and never resets, so on any
+	// later device-connect it means the USB device re-enumerated. (deviceConnected
+	// is cleared by device-disconnect, so it is always false here.)
+	const isReconnect = started;
 	deviceId = (payload && payload.SerialNumber) || "SS550V3";
 	console.log(`[host] device connected: ${JSON.stringify(payload)}`);
 	device.startRead();
