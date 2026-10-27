@@ -7,6 +7,10 @@ contextBridge.exposeInMainWorld("reard", {
 	getProfile: () => ipcRenderer.invoke("reard:getProfile"),
 	assign: (payload) => ipcRenderer.invoke("reard:assign", payload),
 	clear: (payload) => ipcRenderer.invoke("reard:clear", payload),
+	// Live key previews: { images: {keyIndex: base64}, titles: {keyIndex: text} }
+	getKeyImages: () => ipcRenderer.invoke("reard:getKeyImages"),
+	// Device status for the header badge.
+	getStatus: () => ipcRenderer.invoke("reard:getStatus"),
 	// Main pushes { instances } after every successful profile change.
 	onProfileChanged: (callback) => {
 		const listener = (_event, data) => callback(data);

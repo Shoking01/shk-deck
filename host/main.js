@@ -700,6 +700,22 @@ ipcMain.handle("reard:listPlugins", () => scanInstalledPlugins());
 
 ipcMain.handle("reard:getProfile", () => ({ instances: profileInstances }));
 
+// Live previews for the config grid: the exact images/titles the device shows.
+ipcMain.handle("reard:getKeyImages", () => {
+	const images = {};
+	for (const [idx, img] of lastImageByKey) images[idx] = img;
+	const titles = {};
+	for (const [idx, t] of titleByKey) titles[idx] = t;
+	return { images, titles };
+});
+
+ipcMain.handle("reard:getStatus", () => ({
+	connected: deviceConnected,
+	type: "SS550V3",
+	columns: COLUMNS,
+	rows: ROWS,
+}));
+
 ipcMain.handle("reard:assign", (_event, payload) => {
 	try {
 		const p = payload || {};

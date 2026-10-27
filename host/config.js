@@ -1,26 +1,38 @@
-// REA RD config UI renderer (T12/S10) - plain DOM, no frameworks, no CDN.
+// REA RD config UI renderer - plain DOM, no frameworks, no CDN.
+// Deck replica grid with live key previews + a persistent details panel.
 const COLUMNS = 5;
 const ROWS = 3;
+const PREVIEW_POLL_MS = 2000;
 
 let plugins = [];
 let profile = { instances: [] };
 let selected = null; // { column, row } | null
+let keyImages = {}; // keyIndex -> base64 PNG (as sent by plugins)
+let keyTitles = {}; // keyIndex -> current title text
 
 const grid = document.getElementById("grid");
-const panel = document.getElementById("panel");
 const panelTitle = document.getElementById("panel-title");
+const panelSubtitle = document.getElementById("panel-subtitle");
+const panelEmpty = document.getElementById("panel-empty");
 const assignFields = document.getElementById("assign-fields");
+const panelButtons = document.getElementById("panel-buttons");
 const panelError = document.getElementById("panel-error");
 const pluginSelect = document.getElementById("plugin-select");
 const actionSelect = document.getElementById("action-select");
 const settingsInput = document.getElementById("settings-input");
 const titleColorInput = document.getElementById("titlecolor-input");
-const assignBtn = document.getElementById("assign-btn");
+const saveBtn = document.getElementById("save-btn");
 const removeBtn = document.getElementById("remove-btn");
 const cancelBtn = document.getElementById("cancel-btn");
+const deviceBadge = document.getElementById("device-badge");
+const deviceText = document.getElementById("device-text");
 
 function instanceAt(column, row) {
 	return profile.instances.find((i) => i.column === column && i.row === row) || null;
+}
+
+function findPlugin(uuid) {
+	return plugins.find((p) => p.uuid === uuid) || null;
 }
 
 function actionLabel(actionUuid) {
@@ -31,25 +43,107 @@ function actionLabel(actionUuid) {
 	return actionUuid; // fall back to the raw uuid when not in the scanned list
 }
 
+// Plugin images arrive either as raw base64 or as full data URLs.
+function asDataUrl(img) {
+	if (!img) return null;
+	return img.startsWith("data:") ? img : `data:image/png;base64,${img}`;
+}
+
 function renderGrid() {
 	grid.textContent = "";
 	for (let row = 0; row < ROWS; row++) {
 		for (let column = 0; column < COLUMNS; column++) {
+			const idx = row * COLUMNS + column + 1; // 1-based row-major, device order
 			const inst = instanceAt(column, row);
+			const isSelected = selected && selected.column === column && selected.row === row;
 			const cell = document.createElement("div");
-			cell.className = "cell" + (inst ? " assigned" : "") +
-				(selected && selected.column === column && selected.row === row ? " selected" : "");
+			cell.className = "cell" + (inst ? " assigned" : " empty") + (isSelected ? " selected" : "");
+			cell.setAttribute("role", "option");
+			cell.setAttribute("aria-selected", String(!!isSelected));
+			cell.tabIndex = 0;
+			const preview = asDataUrl(keyImages[idx]);
+			if (preview) cell.style.backgroundImage = `url("${preview}")`;
 			const coords = document.createElement("span");
 			coords.className = "coords";
-			coords.textContent = `(${column},${row})`;
-			const name = document.createElement("span");
-			name.className = "action";
-			name.textContent = inst ? actionLabel(inst.action) : "empty";
-			cell.append(coords, name);
-			cell.addEventListener("click", () => openPanel(column, row));
+			coords.textContent = `${column + 1},${row + 1}`;
+			cell.appendChild(coords);
+			if (keyTitles[idx]) {
+				const t = document.createElement("span");
+				t.className = "key-title";
+				t.textContent = keyTitles[idx];
+				cell.appendChild(t);
+			} else if (inst) {
+				const label = document.createElement("span");
+				label.className = "key-label";
+				label.textContent = actionLabel(inst.action);
+				cell.appendChild(label);
+			}
+			cell.title = inst
+				? `${actionLabel(inst.action)} - ${findPlugin(inst.plugin)?.name || inst.plugin}`
+				: "Empty key";
+			const open = () => openPanel(column, row);
+			cell.addEventListener("click", open);
+			cell.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") open(); });
 			grid.appendChild(cell);
 		}
 	}
+}
+
+function showPanelError(message) {
+	panelError.textContent = message || "";
+}
+
+function validateSettingsInput() {
+	const value = settingsInput.value.trim() || "{}";
+	try {
+		const parsed = JSON.parse(value);
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+			settingsInput.classList.add("invalid");
+			return null;
+		}
+		settingsInput.classList.remove("invalid");
+		return parsed;
+	} catch {
+		settingsInput.classList.add("invalid");
+		return null;
+	}
+}
+
+function openPanel(column, row) {
+	selected = { column, row };
+	const inst = instanceAt(column, row);
+	panelEmpty.classList.add("hidden");
+	assignFields.classList.remove("hidden");
+	panelButtons.classList.remove("hidden");
+	showPanelError("");
+	if (inst) {
+		const plugin = findPlugin(inst.plugin);
+		panelTitle.textContent = `Key ${column + 1},${row + 1}`;
+		panelSubtitle.textContent = `${actionLabel(inst.action)} - ${plugin ? plugin.name : inst.plugin}`;
+		saveBtn.textContent = "Save changes";
+		removeBtn.style.display = "inline-block";
+	} else {
+		panelTitle.textContent = `Key ${column + 1},${row + 1}`;
+		panelSubtitle.textContent = "Empty - assign an action";
+		saveBtn.textContent = "Assign";
+		removeBtn.style.display = "none";
+	}
+	settingsInput.value = JSON.stringify((inst && inst.settings) || {}, null, 2);
+	validateSettingsInput();
+	titleColorInput.value = (inst && inst.titleColor) || "#ffffff";
+	if (inst && inst.plugin && pluginSelect.value !== inst.plugin) pluginSelect.value = inst.plugin;
+	fillActionSelect();
+	if (inst) actionSelect.value = inst.action;
+	renderGrid();
+}
+
+function closePanel() {
+	selected = null;
+	panelEmpty.classList.remove("hidden");
+	assignFields.classList.add("hidden");
+	panelButtons.classList.add("hidden");
+	showPanelError("");
+	renderGrid();
 }
 
 // Plugin select: one option per installed plugin, labeled by display name.
@@ -59,13 +153,13 @@ function fillPluginSelect() {
 		if (!p.actions.length) continue; // nothing assignable in this bundle
 		const opt = document.createElement("option");
 		opt.value = p.uuid;
-		opt.textContent = p.name;
+		opt.textContent = p.name + (p.native ? "  [native]" : "");
 		pluginSelect.appendChild(opt);
 	}
 	fillActionSelect();
 }
 
-// Action select for the chosen plugin, grouped under its display name.
+// Action select for the chosen plugin; raw uuid only in the tooltip.
 function fillActionSelect() {
 	actionSelect.textContent = "";
 	const plugin = plugins.find((p) => p.uuid === pluginSelect.value);
@@ -75,37 +169,14 @@ function fillActionSelect() {
 	for (const a of plugin.actions) {
 		const opt = document.createElement("option");
 		opt.value = a.uuid;
-		opt.textContent = `${a.name} (${a.uuid})`;
+		opt.textContent = a.name;
+		opt.title = a.uuid;
 		group.appendChild(opt);
 	}
 	actionSelect.appendChild(group);
 }
 
-function showPanelError(message) {
-	panelError.textContent = message || "";
-}
-
-function openPanel(column, row) {
-	selected = { column, row };
-	const inst = instanceAt(column, row);
-	panelTitle.textContent = `Key (${column},${row})` + (inst ? ` - ${actionLabel(inst.action)}` : " - empty");
-	assignFields.style.display = inst ? "none" : "block";
-	assignBtn.style.display = inst ? "none" : "inline-block";
-	removeBtn.style.display = inst ? "inline-block" : "none";
-	showPanelError("");
-	settingsInput.value = JSON.stringify((inst && inst.settings) || {});
-	titleColorInput.value = (inst && inst.titleColor) || "#ffffff";
-	panel.classList.remove("hidden");
-	renderGrid();
-}
-
-function hidePanel() {
-	selected = null;
-	panel.classList.add("hidden");
-	renderGrid();
-}
-
-assignBtn.addEventListener("click", async () => {
+saveBtn.addEventListener("click", async () => {
 	if (!selected) return;
 	const pluginUuid = pluginSelect.value;
 	const actionUuid = actionSelect.value;
@@ -113,15 +184,9 @@ assignBtn.addEventListener("click", async () => {
 		showPanelError("Pick a plugin and an action.");
 		return;
 	}
-	let settings;
-	try {
-		settings = JSON.parse(settingsInput.value || "{}");
-	} catch (e) {
-		showPanelError(`Settings is not valid JSON: ${e.message}`);
-		return;
-	}
-	if (settings === null || typeof settings !== "object" || Array.isArray(settings)) {
-		showPanelError("Settings must be a JSON object.");
+	const settings = validateSettingsInput();
+	if (settings === null) {
+		showPanelError("Settings is not a valid JSON object.");
 		return;
 	}
 	const titleColor = titleColorInput.value.trim() || "#ffffff";
@@ -137,7 +202,7 @@ assignBtn.addEventListener("click", async () => {
 		showPanelError(res.error || "Assign failed.");
 		return;
 	}
-	hidePanel();
+	showPanelError("");
 });
 
 removeBtn.addEventListener("click", async () => {
@@ -147,22 +212,45 @@ removeBtn.addEventListener("click", async () => {
 		showPanelError(res.error || "Remove failed.");
 		return;
 	}
-	hidePanel();
+	closePanel();
 });
 
-cancelBtn.addEventListener("click", hidePanel);
-
+cancelBtn.addEventListener("click", closePanel);
 pluginSelect.addEventListener("change", fillActionSelect);
+settingsInput.addEventListener("input", validateSettingsInput);
+
+function refreshStatus() {
+	window.reard.getStatus().then((s) => {
+		deviceBadge.classList.toggle("connected", !!s.connected);
+		deviceText.textContent = s.connected ? `${s.type} - connected` : `${s.type} - disconnected`;
+	}).catch(() => {});
+}
+
+function refreshPreviews() {
+	window.reard.getKeyImages().then((data) => {
+		keyImages = data.images || {};
+		keyTitles = data.titles || {};
+		renderGrid();
+	}).catch(() => {});
+}
 
 // Register the push listener before the initial loads so no change is missed.
 window.reard.onProfileChanged((data) => {
 	profile = data;
-	hidePanel();
+	if (selected && !instanceAt(selected.column, selected.row)) {
+		// The selected key was cleared elsewhere; keep it selected as empty.
+	}
+	renderGrid();
+	if (selected) openPanel(selected.column, selected.row);
+	refreshPreviews();
 });
 
 (async function init() {
 	plugins = await window.reard.listPlugins();
 	profile = await window.reard.getProfile();
 	fillPluginSelect();
+	refreshStatus();
+	refreshPreviews();
 	renderGrid();
+	setInterval(() => { refreshPreviews(); refreshStatus(); }, PREVIEW_POLL_MS);
 })();
