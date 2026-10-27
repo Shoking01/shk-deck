@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>REA RD - Config</title>
+<style>
+	:root { color-scheme: dark; }
+	* { box-sizing: border-box; }
+	body {
+		margin: 0; padding: 16px;
+		font-family: "Segoe UI", system-ui, sans-serif;
+		background: #1e1f24; color: #e8e8e8;
+	}
+	h1 { font-size: 16px; margin: 0 0 6px; }
+	.hint { font-size: 12px; color: #9a9aa2; margin: 0 0 12px; }
+	.grid {
+		display: grid;
+		grid-template-columns: repeat(5, 1fr);
+		gap: 8px;
+		max-width: 660px;
+	}
+	.cell {
+		border: 1px solid #3a3b42; border-radius: 8px;
+		background: #26272e; min-height: 84px;
+		padding: 6px 8px; cursor: pointer;
+		display: flex; flex-direction: column; gap: 4px;
+		user-select: none;
+	}
+	.cell:hover { border-color: #6b6d7a; }
+	.cell.assigned { background: #2c3b2e; border-color: #3f6b45; }
+	.cell.selected { outline: 2px solid #4f8cff; }
+	.coords { font-size: 11px; color: #9a9aa2; }
+	.action { font-size: 12px; overflow-wrap: anywhere; }
+	.panel {
+		margin-top: 14px; max-width: 660px;
+		border: 1px solid #3a3b42; border-radius: 8px;
+		background: #26272e; padding: 12px;
+	}
+	.panel.hidden { display: none; }
+	.panel h2 { font-size: 14px; margin: 0 0 10px; }
+	.field { display: block; margin-bottom: 10px; font-size: 12px; }
+	.field select, .field textarea, .field input {
+		display: block; width: 100%; margin-top: 4px;
+		background: #1b1c21; color: #e8e8e8;
+		border: 1px solid #3a3b42; border-radius: 4px;
+		padding: 6px; font-size: 12px; font-family: inherit;
+	}
+	.field textarea { min-height: 64px; font-family: Consolas, monospace; }
+	.buttons { display: flex; gap: 8px; }
+	button {
+		background: #2f4fd8; color: #ffffff; border: 0; border-radius: 4px;
+		padding: 8px 14px; font-size: 12px; cursor: pointer;
+	}
+	button.secondary { background: #3a3b42; }
+	button.danger { background: #a33a3a; }
+	.error { color: #ff7b7b; font-size: 12px; min-height: 16px; margin: 6px 0; }
+</style>
+</head>
+<body>
+<h1>REA RD - Key assignment</h1>
+<p class="hint">Click a key to assign or remove a plugin action. Changes apply live and persist to profile.json.</p>
+<div id="grid" class="grid"></div>
+<div id="panel" class="panel hidden">
+	<h2 id="panel-title"></h2>
+	<div id="assign-fields">
+		<label class="field">Plugin
+			<select id="plugin-select"></select>
+		</label>
+		<label class="field">Action
+			<select id="action-select"></select>
+		</label>
+		<label class="field">Settings (JSON)
+			<textarea id="settings-input">{}</textarea>
+		</label>
+		<label class="field">Title color
+			<input id="titlecolor-input" type="text" value="#ffffff" spellcheck="false">
+		</label>
+	</div>
+	<div id="panel-error" class="error"></div>
+	<div class="buttons">
+		<button id="assign-btn">Assign</button>
+		<button id="remove-btn" class="danger">Remove</button>
+		<button id="cancel-btn" class="secondary">Cancel</button>
+	</div>
+</div>
+<script src="config.js"></script>
+</body>
+</html>
