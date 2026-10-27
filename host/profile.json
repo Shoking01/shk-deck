@@ -1,0 +1,20 @@
+{
+  "instances": [
+    {
+      "plugin": "com.mirabox.streamdock.time",
+      "action": "com.mirabox.streamdock.time.action1",
+      "column": 0,
+      "row": 0,
+      "settings": { "zone": "system", "theme": "theme1", "select": "0", "title": "" },
+      "titleColor": "#000000"
+    },
+    {
+      "plugin": "com.mirabox.streamdock.calendar",
+      "action": "com.mirabox.streamdock.calendar.action1",
+      "column": 1,
+      "row": 0,
+      "settings": {},
+      "titleColor": "#ffffff"
+    }
+  ]
+}

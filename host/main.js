@@ -1,9 +1,12 @@
-// REA RD MVP host - Electron main process (T8)
-// Runs one real .sdPlugin (JS/HTML type) in a hidden Chromium page using the
-// captured StreamDock launch contract, and bridges device <-> plugin.
+// REA RD MVP host - Electron main process (T8/T10)
+// Runs real .sdPlugin plugins in hidden Chromium pages using the captured
+// StreamDock launch contract, and bridges device <-> plugins.
 //
 //   StreamDockWebsocketSDK.exe -oem 293V3:0x0200:0x3000   (device server, :9002)
 //   npm start                                              (this host)
+//
+// Fase 2: N instances from a profile file (host/profile.json), one page per
+// distinct plugin, targeted event routing, willDisappear on shutdown.
 const { app, BrowserWindow } = require("electron");
 const { WebSocketServer } = require("ws");
 const fs = require("fs");
@@ -12,27 +15,37 @@ const crypto = require("crypto");
 const { DeviceClient } = require("./device-client");
 
 const PLUGINS_DIR = path.join(process.env.APPDATA, "HotSpot", "StreamDock", "plugins");
+const PROFILE_PATH = path.join(__dirname, "profile.json");
 const COLUMNS = 5;
 const ROWS = 3;
 
-// MVP instance profile: one action placed at (0,0). A real profile editor comes later.
-// Settings mirror what the plugin's property inspector would persist (zone/theme/select).
-const INSTANCE = {
-	plugin: "com.mirabox.streamdock.time",
-	action: "com.mirabox.streamdock.time.action1", // World Time
-	column: 0,
-	row: 0,
-	settings: { zone: "system", theme: "theme1", select: "0", title: "" },
-	titleColor: "#000000",
-};
+// ---- Profile (S9) ----------------------------------------------------------
+// instances: [{ plugin, action, column, row, settings?, titleColor? }, ...]
+let profileInstances = [];
+try {
+	profileInstances = JSON.parse(fs.readFileSync(PROFILE_PATH, "utf8")).instances || [];
+	console.log(`[host] profile: ${profileInstances.length} instance(s)`);
+} catch (e) {
+	console.log(`[host] no profile.json (${e.message}) - starting with an empty profile`);
+}
 
+// One page per distinct plugin bundle.
+const pluginsToLaunch = [...new Set(profileInstances.map((i) => i.plugin))];
+const instancesByPlugin = new Map();
+for (const inst of profileInstances) {
+	if (!instancesByPlugin.has(inst.plugin)) instancesByPlugin.set(inst.plugin, []);
+	instancesByPlugin.get(inst.plugin).push(inst);
+}
+
+// ---- State -----------------------------------------------------------------
 let pluginPort = null;
 let deviceId = null;
 let appReady = false;
 let deviceConnected = false;
 const device = new DeviceClient();
-const pluginSockets = new Set(); // connected plugin pages (MVP: one)
-const instances = new Map(); // context -> { action, column, row, settings }
+const socketByPlugin = new Map(); // plugin uuid -> WebSocket
+const instances = new Map(); // context -> { plugin, action, column, row, settings, titleColor }
+const windows = new Map(); // plugin uuid -> BrowserWindow
 
 function makeContext() {
 	const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -45,10 +58,9 @@ function keyIndex(column, row) {
 	return row * COLUMNS + column + 1; // 1-based, row-major (verified against device events)
 }
 
-function sendToPlugin(msg) {
-	for (const ws of pluginSockets) {
-		if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
-	}
+function sendToPlugin(pluginUuid, msg) {
+	const ws = socketByPlugin.get(pluginUuid);
+	if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 }
 
 function buildRegisterInfo(pluginUuid) {
@@ -65,27 +77,31 @@ function buildRegisterInfo(pluginUuid) {
 	};
 }
 
+function willAppearPayload(inst) {
+	return {
+		coordinates: { column: inst.column, row: inst.row },
+		isInMultiAction: false,
+		settings: { ...(inst.settings || {}) },
+		state: 0,
+	};
+}
+
 function sendWillAppear(inst) {
 	const context = makeContext();
 	instances.set(context, { ...inst, settings: { ...(inst.settings || {}) } });
-	sendToPlugin({
+	sendToPlugin(inst.plugin, {
 		action: inst.action,
 		context,
 		device: deviceId,
 		event: "willAppear",
-		payload: {
-			coordinates: { column: inst.column, row: inst.row },
-			isInMultiAction: false,
-			settings: { ...(inst.settings || {}) },
-			state: 0,
-		},
+		payload: willAppearPayload(inst),
 	});
 	console.log(`[host] willAppear -> ${inst.action} context=${context} @ (${inst.column},${inst.row})`);
 	sendTitleParameters(inst, context);
 }
 
 function sendTitleParameters(inst, context) {
-	sendToPlugin({
+	sendToPlugin(inst.plugin, {
 		action: inst.action,
 		context,
 		device: deviceId,
@@ -106,15 +122,25 @@ function sendTitleParameters(inst, context) {
 			},
 		},
 	});
-	console.log(`[host] titleParametersDidChange -> titleColor=${inst.titleColor || "#ffffff"}`);
+	console.log(`[host] titleParametersDidChange -> ${inst.action} titleColor=${inst.titleColor || "#ffffff"}`);
+}
+
+function sendWillDisappear(context, inst) {
+	sendToPlugin(inst.plugin, {
+		action: inst.action,
+		context,
+		device: deviceId,
+		event: "willDisappear",
+		payload: willAppearPayload(inst),
+	});
 }
 
 function handlePluginMessage(ws, msg) {
 	switch (msg.event) {
 		case "registerPlugin":
-			pluginSockets.add(ws);
+			socketByPlugin.set(msg.uuid, ws);
 			console.log(`[host] plugin registered: ${JSON.stringify(msg).slice(0, 200)}`);
-			sendWillAppear(INSTANCE);
+			for (const inst of instancesByPlugin.get(msg.uuid) || []) sendWillAppear(inst);
 			break;
 		case "setImage": {
 			const inst = instances.get(msg.context);
@@ -122,9 +148,9 @@ function handlePluginMessage(ws, msg) {
 			const idx = keyIndex(inst.column, inst.row);
 			device.setKeyImage(idx, msg.payload.image);
 			console.log(`[host] setImage -> key ${idx} prefix=${msg.payload.image.slice(0, 30)} (${msg.payload.image.length} chars)`);
-			try { // DEBUG: dump the exact image the plugin sent, for inspection
+			try { // DEBUG: dump the exact image the plugin sent, per key, for inspection
 				const b64 = msg.payload.image.replace(/^data:image\/\w+;base64,/, "");
-				fs.writeFileSync(path.join(__dirname, "last-setImage.png"), Buffer.from(b64, "base64"));
+				fs.writeFileSync(path.join(__dirname, `last-setImage-key${idx}.png`), Buffer.from(b64, "base64"));
 			} catch (e) {
 				console.log(`[host] image dump failed: ${e.message}`);
 			}
@@ -155,11 +181,10 @@ function handlePluginMessage(ws, msg) {
 	}
 }
 
-function launchPlugin() {
-	const dir = path.join(PLUGINS_DIR, `${INSTANCE.plugin}.sdPlugin`);
+function launchPlugin(pluginUuid) {
+	if (windows.has(pluginUuid)) return; // one page per plugin bundle
+	const dir = path.join(PLUGINS_DIR, `${pluginUuid}.sdPlugin`);
 	const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
-	// Mirabox manifests have no top-level UUID; the plugin uuid is manifest.Name.
-	const pluginUuid = INSTANCE.plugin; // real bundle uuid; manifest.Name is a display name
 	const codePath = path.join(dir, manifest.CodePath);
 	console.log(`[host] launching plugin ${pluginUuid} (${codePath})`);
 
@@ -169,10 +194,12 @@ function launchPlugin() {
 			contextIsolation: false,
 			nodeIntegration: false,
 			sandbox: false,
+			preload: path.join(__dirname, "preload.js"),
 			webSecurity: false, // file:// workers and cross-file loads, MVP only
 			backgroundThrottling: false, // hidden window must keep ticking
 		},
 	});
+	windows.set(pluginUuid, win);
 	win.webContents.on("console-message", (_e, _level, message) => {
 		console.log(`[plugin-console] ${message}`);
 	});
@@ -180,13 +207,15 @@ function launchPlugin() {
 		const infoLiteral = JSON.stringify(JSON.stringify(buildRegisterInfo(pluginUuid)));
 		const call = `connectElgatoStreamDeckSocket(${pluginPort}, ${JSON.stringify(pluginUuid)}, "registerPlugin", ${infoLiteral});`;
 		win.webContents.executeJavaScript(call);
-		console.log("[host] connect call injected");
+		console.log(`[host] connect call injected -> ${pluginUuid}`);
 	});
 	win.loadFile(codePath);
 }
 
 function maybeStart() {
-	if (appReady && deviceConnected) launchPlugin();
+	if (appReady && deviceConnected) {
+		for (const pluginUuid of pluginsToLaunch) launchPlugin(pluginUuid);
+	}
 }
 
 // Device + plugin-server wiring lives at module level: the SDK server may
@@ -201,7 +230,9 @@ wss.on("connection", (ws) => {
 		try { msg = JSON.parse(data.toString()); } catch { return; }
 		handlePluginMessage(ws, msg);
 	});
-	ws.on("close", () => pluginSockets.delete(ws));
+	ws.on("close", () => {
+		for (const [uuid, s] of socketByPlugin) if (s === ws) socketByPlugin.delete(uuid);
+	});
 });
 
 device.on("server-connect", () => console.log(`[host] SDK server at ${device.url}`));
@@ -218,7 +249,7 @@ device.on("key", (p) => {
 	const row = Math.floor((keyId - 1) / COLUMNS);
 	for (const [context, inst] of instances) {
 		if (inst.column === column && inst.row === row) {
-			sendToPlugin({
+			sendToPlugin(inst.plugin, {
 				action: inst.action,
 				context,
 				device: deviceId,
@@ -245,4 +276,8 @@ device.on("error", (e) => console.log(`[host] device ws error: ${e.message}`));
 app.whenReady().then(() => {
 	appReady = true;
 	maybeStart();
+});
+
+app.on("before-quit", () => {
+	for (const [context, inst] of instances) sendWillDisappear(context, inst);
 });
