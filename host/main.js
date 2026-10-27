@@ -14,6 +14,15 @@ const path = require("path");
 const crypto = require("crypto");
 const { DeviceClient } = require("./device-client");
 
+// Mirror console.log into host/host.log: the stdout capture (shell pipe) can
+// die mid-session while the host keeps running; the file always has the story.
+const logFile = fs.createWriteStream(path.join(__dirname, "host.log"), { flags: "a" });
+const origConsoleLog = console.log.bind(console);
+console.log = (...args) => {
+	origConsoleLog(...args);
+	logFile.write(`${new Date().toISOString()} ${args.join(" ")}\n`);
+};
+
 const PLUGINS_DIR = path.join(process.env.APPDATA, "HotSpot", "StreamDock", "plugins");
 const PROFILE_PATH = path.join(__dirname, "profile.json");
 const COLUMNS = 5;
@@ -46,6 +55,7 @@ const device = new DeviceClient();
 const socketByPlugin = new Map(); // plugin uuid -> WebSocket
 const instances = new Map(); // context -> { plugin, action, column, row, settings, titleColor }
 const setImageLogCount = new Map(); // key index -> paint count, throttles setImage logging
+const lastImageByKey = new Map(); // key index -> last image the owning context sent; used to repaint after a device reconnect
 const windows = new Map(); // plugin uuid -> BrowserWindow
 
 function makeContext() {
@@ -66,7 +76,7 @@ function sendToPlugin(pluginUuid, msg) {
 
 function buildRegisterInfo(pluginUuid) {
 	return {
-		application: { language: "es_ES", platform: "windows", version: "2.9.0" },
+		application: { language: "es", platform: "windows", version: "2.9.0" },
 		plugin: { uuid: pluginUuid },
 		deviceType: 0,
 		devices: [{
@@ -156,6 +166,7 @@ function handlePluginMessage(ws, msg) {
 			// everything else; log the first paint per key, then every 50th.
 			const n = (setImageLogCount.get(idx) || 0) + 1;
 			setImageLogCount.set(idx, n);
+			lastImageByKey.set(idx, msg.payload.image);
 			if (n === 1 || n % 50 === 0) {
 				console.log(`[host] setImage -> key ${idx} #${n} (${msg.payload.image.length} chars)`);
 			}
@@ -393,8 +404,10 @@ function validCoordinates(p) {
 	return null;
 }
 
+let started = false;
 function maybeStart() {
-	if (appReady && deviceConnected) {
+	if (appReady && deviceConnected && !started) {
+		started = true;
 		for (const pluginUuid of pluginsToLaunch) {
 			try { launchPlugin(pluginUuid); }
 			catch (e) { console.log(`[host] launch failed for ${pluginUuid}: ${e.message}`); }
@@ -422,11 +435,18 @@ wss.on("connection", (ws) => {
 
 device.on("server-connect", () => console.log(`[host] SDK server at ${device.url}`));
 device.on("device-connect", (payload) => {
+	const isReconnect = deviceConnected; // a device-connect after the first one means the USB device re-enumerated
 	deviceId = (payload && payload.SerialNumber) || "SS550V3";
 	console.log(`[host] device connected: ${JSON.stringify(payload)}`);
 	device.startRead();
 	deviceConnected = true;
 	maybeStart();
+	if (isReconnect && lastImageByKey.size) {
+		// Re-enumeration clears the device key memory; static plugins (calendar)
+		// never repaint on their own, so restore every live key from cache.
+		for (const [idx, img] of lastImageByKey) device.setKeyImage(idx, img);
+		console.log(`[host] repainted ${lastImageByKey.size} key(s) after device reconnect`);
+	}
 });
 device.on("key", (p) => {
 	const keyId = p.keyId;
