@@ -7,7 +7,7 @@
 //
 // Fase 2: N instances from a profile file (host/profile.json), one page per
 // distinct plugin, targeted event routing, willDisappear on shutdown.
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require("electron");
 const { WebSocketServer } = require("ws");
 const fs = require("fs");
 const path = require("path");
@@ -304,7 +304,29 @@ function openConfigWindow() {
 		},
 	});
 	configWindow.on("closed", () => { configWindow = null; });
+	configWindow.webContents.on("console-message", (_e, _level, message) => {
+		console.log(`[config-console] ${message}`);
+	});
 	configWindow.loadFile(path.join(__dirname, "config.html"));
+}
+
+// ---- Tray (reopen path for the config window) -------------------------------
+// Self-generated 16x16 icon (no third-party assets). Left click reopens the
+// config window; the context menu offers the same plus Quit.
+const TRAY_ICON = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAIklEQVR4nGPQ0An6TwlmoJoBNW7fSMKjBowaMFwNGLDcCABMAT8/H2LMPwAAAABJRU5ErkJggg==";
+let tray = null;
+
+function createTray() {
+	if (tray) return;
+	tray = new Tray(nativeImage.createFromDataURL(`data:image/png;base64,${TRAY_ICON}`));
+	tray.setToolTip("REA RD - StreamDock host");
+	tray.on("click", () => openConfigWindow());
+	tray.setContextMenu(Menu.buildFromTemplate([
+		{ label: "Open config", click: () => openConfigWindow() },
+		{ type: "separator" },
+		{ label: "Quit", click: () => app.quit() },
+	]));
+	console.log("[host] tray created (click = open config)");
 }
 
 // Scan PLUGINS_DIR for *.sdPlugin bundles: uuid = directory name minus suffix,
@@ -465,6 +487,7 @@ ipcMain.handle("reard:clear", (_event, payload) => {
 
 app.whenReady().then(() => {
 	appReady = true;
+	createTray();
 	maybeStart();
 });
 
