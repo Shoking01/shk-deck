@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="es">
 <head>
 <meta charset="utf-8">
 <title>REA RD - Config</title>
@@ -19,6 +19,9 @@
 		--ok: #3fbf6f;
 	}
 	* { box-sizing: border-box; }
+	/* The original UI was missing this rule: placeholder, fields and buttons all
+	   showed at once on load. One class, everything toggles cleanly. */
+	.hidden { display: none !important; }
 	body {
 		margin: 0; padding: 0;
 		font-family: "Segoe UI", system-ui, sans-serif;
@@ -26,7 +29,7 @@
 		background: var(--bg); color: var(--text);
 	}
 	button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible,
-	.cell:focus-visible {
+	summary:focus-visible, .cell:focus-visible {
 		outline: 2px solid var(--accent); outline-offset: 2px;
 	}
 
@@ -79,12 +82,6 @@
 	.cell:active { transform: scale(0.97); }
 	.cell.assigned { border-color: #3d5a86; }
 	.cell.selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(79, 140, 255, 0.35); }
-	.cell .coords {
-		position: absolute; top: 5px; left: 6px;
-		font-size: 10px; color: var(--muted);
-		background: rgba(10, 11, 14, 0.55); border-radius: 4px;
-		padding: 1px 5px;
-	}
 	.cell .key-title {
 		position: absolute; left: 0; right: 0; bottom: 0;
 		padding: 3px 6px;
@@ -110,7 +107,7 @@
 
 	/* Details panel */
 	aside {
-		flex: 1 1 auto; min-width: 320px; max-width: 420px;
+		flex: 1 1 auto; min-width: 320px; max-width: 440px;
 		border: 1px solid var(--border); border-radius: 12px;
 		background: var(--surface); padding: 16px;
 	}
@@ -132,6 +129,23 @@
 	.field .invalid { border-color: var(--danger); }
 	.app-row { display: flex; gap: 6px; }
 	.app-row input { flex: 1 1 auto; min-width: 0; }
+	/* Collapsible advanced section keeps raw JSON out of sight by default. */
+	details.advanced { margin-bottom: 12px; }
+	details.advanced summary {
+		font-size: 12px; color: var(--muted); cursor: pointer;
+		padding: 4px 0; user-select: none;
+	}
+	details.advanced summary:hover { color: var(--text); }
+	details.advanced[open] summary { margin-bottom: 8px; }
+	.color-row { display: flex; align-items: center; gap: 8px; }
+	.color-row input[type="color"] {
+		width: 42px; height: 30px; padding: 2px;
+		background: var(--surface-2); border: 1px solid var(--border);
+		border-radius: 6px; cursor: pointer;
+	}
+	.color-row code {
+		font-size: 12px; color: var(--muted); font-family: Consolas, monospace;
+	}
 	.meta-row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
 	.chip {
 		font-size: 11px; color: var(--text);
@@ -146,6 +160,7 @@
 		font-family: inherit;
 	}
 	button:hover { background: var(--accent); }
+	button:disabled { opacity: 0.7; cursor: default; }
 	button.secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); font-weight: 400; }
 	button.secondary:hover { border-color: var(--border-strong); }
 	button.danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); font-weight: 400; }
@@ -160,44 +175,47 @@
 </header>
 <main>
 	<section class="deck-section">
-		<p class="section-label">Deck 5×3 — click a key to configure</p>
-		<div id="grid" class="grid" role="listbox" aria-label="Deck keys"></div>
+		<p class="section-label">Toca una tecla para configurarla</p>
+		<div id="grid" class="grid" role="listbox" aria-label="Teclas del deck"></div>
 	</section>
 	<aside id="panel" aria-live="polite">
-		<h2 id="panel-title">Key details</h2>
+		<h2 id="panel-title">Configuración</h2>
 		<p id="panel-subtitle" class="subtitle"></p>
-		<div id="panel-empty" class="placeholder hidden">Select a key on the deck to assign an action or edit it.</div>
+		<div id="panel-empty" class="placeholder hidden">Elige una tecla del deck para asignarle una acción.</div>
 		<div id="assign-fields" class="hidden">
-			<label class="field"><span>Plugin</span>
-				<select id="plugin-select"></select>
-			</label>
-			<label class="field"><span>Action</span>
+			<label class="field"><span>Acción</span>
 				<select id="action-select"></select>
 			</label>
-			<label class="field" id="settings-field"><span>Settings (JSON)</span>
-				<textarea id="settings-input" spellcheck="false">{}</textarea>
-			</label>
 			<div id="app-fields" class="hidden">
-				<label class="field"><span>Application</span>
+				<label class="field"><span>Aplicación</span>
 					<div class="app-row">
-						<input id="app-path-input" type="text" list="apps-datalist" placeholder="Type to search installed apps..." spellcheck="false">
-						<button id="app-browse-btn" class="secondary" type="button">Browse...</button>
+						<input id="app-path-input" type="text" list="apps-datalist" placeholder="Escribe para buscar apps instaladas..." spellcheck="false">
+						<button id="app-browse-btn" class="secondary" type="button">Explorar...</button>
 					</div>
 					<datalist id="apps-datalist"></datalist>
 				</label>
-				<label class="field"><span>Arguments (optional)</span>
-					<input id="app-args-input" type="text" placeholder="e.g. --profile-name Work" spellcheck="false">
+				<label class="field"><span>Argumentos (opcional)</span>
+					<input id="app-args-input" type="text" placeholder="p. ej. --profile-name Work" spellcheck="false">
 				</label>
 			</div>
-			<label class="field"><span>Title color</span>
-				<input id="titlecolor-input" type="text" value="#ffffff" spellcheck="false">
+			<details id="advanced-details" class="advanced">
+				<summary>Ajustes avanzados (JSON)</summary>
+				<label class="field" id="settings-field"><span>Ajustes (JSON)</span>
+					<textarea id="settings-input" spellcheck="false">{}</textarea>
+				</label>
+			</details>
+			<label class="field"><span>Color del título</span>
+				<div class="color-row">
+					<input id="titlecolor-input" type="color" value="#ffffff">
+					<code id="titlecolor-hex">#ffffff</code>
+				</div>
 			</label>
 		</div>
 		<div id="panel-error" class="error" role="alert"></div>
 		<div id="panel-buttons" class="buttons hidden">
-			<button id="save-btn">Assign</button>
-			<button id="remove-btn" class="danger">Remove</button>
-			<button id="cancel-btn" class="secondary">Cancel</button>
+			<button id="save-btn">Guardar</button>
+			<button id="remove-btn" class="danger">Quitar</button>
+			<button id="cancel-btn" class="secondary">Cancelar</button>
 		</div>
 	</aside>
 </main>

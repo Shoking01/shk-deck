@@ -543,8 +543,13 @@ function applyProfileChange(newInstances) {
 function openConfigWindow() {
 	if (configWindow && !configWindow.isDestroyed()) return;
 	configWindow = new BrowserWindow({
-		width: 700,
-		height: 520,
+		// Sized to the actual content: deck 5x96px + panel ~440px + paddings.
+		// The old 700x520 squeezed the panel below its 320px minimum.
+		width: 980,
+		height: 640,
+		useContentSize: true,
+		minWidth: 920,
+		minHeight: 560,
 		title: "REA RD - Config",
 		show: true,
 		webPreferences: {

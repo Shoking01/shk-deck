@@ -1,5 +1,6 @@
 // REA RD config UI renderer - plain DOM, no frameworks, no CDN.
 // Deck replica grid with live key previews + a persistent details panel.
+// Copy is Spanish on purpose: this panel is the user's own configurator.
 const COLUMNS = 5;
 const ROWS = 3;
 const PREVIEW_POLL_MS = 2000;
@@ -11,6 +12,7 @@ let keyImages = {}; // keyIndex -> base64 PNG (as sent by plugins)
 let keyTitles = {}; // keyIndex -> current title text
 let editorMode = "json"; // "json" = raw settings textarea, "app" = app picker
 let appsLoaded = false; // Start Menu app list fetched once, cached in the datalist
+let saveFlashTimer = null; // "Guardado" feedback timeout
 
 const grid = document.getElementById("grid");
 const panelTitle = document.getElementById("panel-title");
@@ -19,8 +21,8 @@ const panelEmpty = document.getElementById("panel-empty");
 const assignFields = document.getElementById("assign-fields");
 const panelButtons = document.getElementById("panel-buttons");
 const panelError = document.getElementById("panel-error");
-const pluginSelect = document.getElementById("plugin-select");
 const actionSelect = document.getElementById("action-select");
+const advancedDetails = document.getElementById("advanced-details");
 const settingsInput = document.getElementById("settings-input");
 const settingsField = document.getElementById("settings-field");
 const appFields = document.getElementById("app-fields");
@@ -29,6 +31,7 @@ const appArgsInput = document.getElementById("app-args-input");
 const appBrowseBtn = document.getElementById("app-browse-btn");
 const appsDatalist = document.getElementById("apps-datalist");
 const titleColorInput = document.getElementById("titlecolor-input");
+const titleColorHex = document.getElementById("titlecolor-hex");
 const saveBtn = document.getElementById("save-btn");
 const removeBtn = document.getElementById("remove-btn");
 const cancelBtn = document.getElementById("cancel-btn");
@@ -71,10 +74,6 @@ function renderGrid() {
 			cell.tabIndex = 0;
 			const preview = asDataUrl(keyImages[idx]);
 			if (preview) cell.style.backgroundImage = `url("${preview}")`;
-			const coords = document.createElement("span");
-			coords.className = "coords";
-			coords.textContent = `${column + 1},${row + 1}`;
-			cell.appendChild(coords);
 			if (keyTitles[idx]) {
 				const t = document.createElement("span");
 				t.className = "key-title";
@@ -87,8 +86,8 @@ function renderGrid() {
 				cell.appendChild(label);
 			}
 			cell.title = inst
-				? `${actionLabel(inst.action)} - ${findPlugin(inst.plugin)?.name || inst.plugin}`
-				: "Empty key";
+				? `Tecla ${idx}: ${actionLabel(inst.action)} - ${findPlugin(inst.plugin)?.name || inst.plugin}`
+				: `Tecla ${idx} vacía - clic para asignar`;
 			const open = () => openPanel(column, row);
 			cell.addEventListener("click", open);
 			cell.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") open(); });
@@ -117,23 +116,23 @@ function validateSettingsInput() {
 	}
 }
 
-// Which settings editor the selected action wants. Actions may declare
-// "REARDSettingsEditor": "app" in their manifest entry; everything else keeps
-// the raw JSON textarea.
+// The action the user picked, together with the plugin bundle that provides it.
+// Actions may declare "REARDSettingsEditor": "app" in their manifest entry;
+// everything else keeps the raw JSON textarea under "Ajustes avanzados".
 function selectedActionMeta() {
 	const actionUuid = actionSelect.value;
 	for (const p of plugins) {
 		const found = p.actions.find((a) => a.uuid === actionUuid);
-		if (found) return found;
+		if (found) return { plugin: p, action: found };
 	}
 	return null;
 }
 
 function updateEditorMode(inst) {
 	const meta = selectedActionMeta();
-	const mode = meta && meta.settingsEditor === "app" ? "app" : "json";
+	const mode = meta && meta.action.settingsEditor === "app" ? "app" : "json";
 	editorMode = mode;
-	settingsField.classList.toggle("hidden", mode === "app");
+	advancedDetails.classList.toggle("hidden", mode === "app");
 	appFields.classList.toggle("hidden", mode !== "app");
 	if (mode === "app") {
 		const s = (inst && inst.settings) || {};
@@ -183,27 +182,25 @@ function resolveAppInput(text) {
 
 function openPanel(column, row) {
 	selected = { column, row };
+	const idx = row * COLUMNS + column + 1;
 	const inst = instanceAt(column, row);
 	panelEmpty.classList.add("hidden");
 	assignFields.classList.remove("hidden");
 	panelButtons.classList.remove("hidden");
 	showPanelError("");
+	panelTitle.textContent = `Tecla ${idx}`;
 	if (inst) {
 		const plugin = findPlugin(inst.plugin);
-		panelTitle.textContent = `Key ${column + 1},${row + 1}`;
 		panelSubtitle.textContent = `${actionLabel(inst.action)} - ${plugin ? plugin.name : inst.plugin}`;
-		saveBtn.textContent = "Save changes";
 		removeBtn.style.display = "inline-block";
 	} else {
-		panelTitle.textContent = `Key ${column + 1},${row + 1}`;
-		panelSubtitle.textContent = "Empty - assign an action";
-		saveBtn.textContent = "Assign";
+		panelSubtitle.textContent = "Vacía - elige qué hará esta tecla";
 		removeBtn.style.display = "none";
 	}
-	titleColorInput.value = (inst && inst.titleColor) || "#ffffff";
-	if (inst && inst.plugin && pluginSelect.value !== inst.plugin) pluginSelect.value = inst.plugin;
-	fillActionSelect();
-	if (inst) actionSelect.value = inst.action;
+	const color = (inst && inst.titleColor) || "#ffffff";
+	titleColorInput.value = /^#[0-9a-fA-F]{6}$/.test(color) ? color : "#ffffff";
+	titleColorHex.textContent = titleColorInput.value;
+	actionSelect.value = inst ? inst.action : "";
 	updateEditorMode(inst);
 	renderGrid();
 }
@@ -217,42 +214,36 @@ function closePanel() {
 	renderGrid();
 }
 
-// Plugin select: one option per installed plugin, labeled by display name.
-function fillPluginSelect() {
-	pluginSelect.textContent = "";
-	for (const p of plugins) {
-		if (!p.actions.length) continue; // nothing assignable in this bundle
-		const opt = document.createElement("option");
-		opt.value = p.uuid;
-		opt.textContent = p.name + (p.native ? "  [native]" : "");
-		pluginSelect.appendChild(opt);
-	}
-	fillActionSelect();
-}
-
-// Action select for the chosen plugin; raw uuid only in the tooltip.
+// One "Acción" select grouped by plugin display name - the user picks WHAT the
+// key does without ever seeing a plugin uuid. The plugin comes along with the
+// chosen action (selectedActionMeta).
 function fillActionSelect() {
 	actionSelect.textContent = "";
-	const plugin = plugins.find((p) => p.uuid === pluginSelect.value);
-	if (!plugin) return;
-	const group = document.createElement("optgroup");
-	group.label = plugin.name;
-	for (const a of plugin.actions) {
-		const opt = document.createElement("option");
-		opt.value = a.uuid;
-		opt.textContent = a.name;
-		opt.title = a.uuid;
-		group.appendChild(opt);
+	const placeholder = document.createElement("option");
+	placeholder.value = "";
+	placeholder.textContent = "Elige una acción...";
+	placeholder.disabled = true;
+	actionSelect.appendChild(placeholder);
+	for (const p of plugins) {
+		if (!p.actions.length) continue; // nothing assignable in this bundle
+		const group = document.createElement("optgroup");
+		group.label = p.name;
+		for (const a of p.actions) {
+			const opt = document.createElement("option");
+			opt.value = a.uuid;
+			opt.textContent = a.name;
+			opt.title = a.uuid; // raw uuid only in the tooltip, for diagnostics
+			group.appendChild(opt);
+		}
+		actionSelect.appendChild(group);
 	}
-	actionSelect.appendChild(group);
 }
 
 saveBtn.addEventListener("click", async () => {
 	if (!selected) return;
-	const pluginUuid = pluginSelect.value;
-	const actionUuid = actionSelect.value;
-	if (!pluginUuid || !actionUuid) {
-		showPanelError("Pick a plugin and an action.");
+	const meta = selectedActionMeta();
+	if (!meta) {
+		showPanelError("Elige una acción para esta tecla.");
 		return;
 	}
 	let settings;
@@ -260,7 +251,7 @@ saveBtn.addEventListener("click", async () => {
 		const rawApp = appPathInput.value.trim();
 		const appPath = resolveAppInput(rawApp);
 		if (!appPath) {
-			showPanelError(rawApp ? "Unknown application - pick one from the list or use Browse." : "Pick an application (search or Browse).");
+			showPanelError(rawApp ? "Aplicación desconocida: elige una de la lista o usa Explorar." : "Elige una aplicación (búscala o usa Explorar).");
 			appPathInput.focus();
 			return;
 		}
@@ -271,7 +262,7 @@ saveBtn.addEventListener("click", async () => {
 	} else {
 		settings = validateSettingsInput();
 		if (settings === null) {
-			showPanelError("Settings is not a valid JSON object.");
+			showPanelError("Los ajustes no son un JSON válido.");
 			return;
 		}
 	}
@@ -279,16 +270,24 @@ saveBtn.addEventListener("click", async () => {
 	const res = await window.reard.assign({
 		column: selected.column,
 		row: selected.row,
-		plugin: pluginUuid,
-		action: actionUuid,
+		plugin: meta.plugin.uuid,
+		action: meta.action.uuid,
 		settings,
 		titleColor,
 	});
 	if (!res.ok) {
-		showPanelError(res.error || "Assign failed.");
+		showPanelError(res.error || "No se pudo guardar.");
 		return;
 	}
 	showPanelError("");
+	// Friendly confirmation: flash the button instead of staying silent.
+	saveBtn.textContent = "Guardado ✓";
+	saveBtn.disabled = true;
+	clearTimeout(saveFlashTimer);
+	saveFlashTimer = setTimeout(() => {
+		saveBtn.textContent = "Guardar";
+		saveBtn.disabled = false;
+	}, 1200);
 });
 
 appBrowseBtn.addEventListener("click", async () => {
@@ -300,27 +299,26 @@ removeBtn.addEventListener("click", async () => {
 	if (!selected) return;
 	const res = await window.reard.clear({ column: selected.column, row: selected.row });
 	if (!res.ok) {
-		showPanelError(res.error || "Remove failed.");
+		showPanelError(res.error || "No se pudo quitar.");
 		return;
 	}
 	closePanel();
 });
 
 cancelBtn.addEventListener("click", closePanel);
-pluginSelect.addEventListener("change", () => {
-	fillActionSelect();
-	updateEditorMode(null);
-});
 actionSelect.addEventListener("change", () => {
 	const inst = selected ? instanceAt(selected.column, selected.row) : null;
 	updateEditorMode(inst && inst.action === actionSelect.value ? inst : null);
 });
 settingsInput.addEventListener("input", validateSettingsInput);
+titleColorInput.addEventListener("input", () => {
+	titleColorHex.textContent = titleColorInput.value;
+});
 
 function refreshStatus() {
 	window.reard.getStatus().then((s) => {
 		deviceBadge.classList.toggle("connected", !!s.connected);
-		deviceText.textContent = s.connected ? `${s.type} - connected` : `${s.type} - disconnected`;
+		deviceText.textContent = s.connected ? `${s.type} · conectado` : `${s.type} · sin conexión`;
 	}).catch(() => {});
 }
 
@@ -346,7 +344,7 @@ window.reard.onProfileChanged((data) => {
 (async function init() {
 	plugins = await window.reard.listPlugins();
 	profile = await window.reard.getProfile();
-	fillPluginSelect();
+	fillActionSelect();
 	refreshStatus();
 	refreshPreviews();
 	renderGrid();
