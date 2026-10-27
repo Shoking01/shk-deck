@@ -130,6 +130,8 @@
 		resize: vertical;
 	}
 	.field .invalid { border-color: var(--danger); }
+	.app-row { display: flex; gap: 6px; }
+	.app-row input { flex: 1 1 auto; min-width: 0; }
 	.meta-row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
 	.chip {
 		font-size: 11px; color: var(--text);
@@ -172,9 +174,21 @@
 			<label class="field"><span>Action</span>
 				<select id="action-select"></select>
 			</label>
-			<label class="field"><span>Settings (JSON)</span>
+			<label class="field" id="settings-field"><span>Settings (JSON)</span>
 				<textarea id="settings-input" spellcheck="false">{}</textarea>
 			</label>
+			<div id="app-fields" class="hidden">
+				<label class="field"><span>Application</span>
+					<div class="app-row">
+						<input id="app-path-input" type="text" list="apps-datalist" placeholder="Type to search installed apps..." spellcheck="false">
+						<button id="app-browse-btn" class="secondary" type="button">Browse...</button>
+					</div>
+					<datalist id="apps-datalist"></datalist>
+				</label>
+				<label class="field"><span>Arguments (optional)</span>
+					<input id="app-args-input" type="text" placeholder="e.g. --profile-name Work" spellcheck="false">
+				</label>
+			</div>
 			<label class="field"><span>Title color</span>
 				<input id="titlecolor-input" type="text" value="#ffffff" spellcheck="false">
 			</label>

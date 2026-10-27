@@ -9,6 +9,8 @@ let profile = { instances: [] };
 let selected = null; // { column, row } | null
 let keyImages = {}; // keyIndex -> base64 PNG (as sent by plugins)
 let keyTitles = {}; // keyIndex -> current title text
+let editorMode = "json"; // "json" = raw settings textarea, "app" = app picker
+let appsLoaded = false; // Start Menu app list fetched once, cached in the datalist
 
 const grid = document.getElementById("grid");
 const panelTitle = document.getElementById("panel-title");
@@ -20,6 +22,12 @@ const panelError = document.getElementById("panel-error");
 const pluginSelect = document.getElementById("plugin-select");
 const actionSelect = document.getElementById("action-select");
 const settingsInput = document.getElementById("settings-input");
+const settingsField = document.getElementById("settings-field");
+const appFields = document.getElementById("app-fields");
+const appPathInput = document.getElementById("app-path-input");
+const appArgsInput = document.getElementById("app-args-input");
+const appBrowseBtn = document.getElementById("app-browse-btn");
+const appsDatalist = document.getElementById("apps-datalist");
 const titleColorInput = document.getElementById("titlecolor-input");
 const saveBtn = document.getElementById("save-btn");
 const removeBtn = document.getElementById("remove-btn");
@@ -109,6 +117,50 @@ function validateSettingsInput() {
 	}
 }
 
+// Which settings editor the selected action wants. Actions may declare
+// "REARDSettingsEditor": "app" in their manifest entry; everything else keeps
+// the raw JSON textarea.
+function selectedActionMeta() {
+	const actionUuid = actionSelect.value;
+	for (const p of plugins) {
+		const found = p.actions.find((a) => a.uuid === actionUuid);
+		if (found) return found;
+	}
+	return null;
+}
+
+function updateEditorMode(inst) {
+	const meta = selectedActionMeta();
+	const mode = meta && meta.settingsEditor === "app" ? "app" : "json";
+	editorMode = mode;
+	settingsField.classList.toggle("hidden", mode === "app");
+	appFields.classList.toggle("hidden", mode !== "app");
+	if (mode === "app") {
+		const s = (inst && inst.settings) || {};
+		appPathInput.value = typeof s.path === "string" ? s.path : "";
+		appArgsInput.value = typeof s.args === "string" ? s.args : "";
+		ensureAppsLoaded();
+	} else {
+		settingsInput.value = JSON.stringify((inst && inst.settings) || {}, null, 2);
+		validateSettingsInput();
+	}
+}
+
+// Fetch the installed-app list once and feed the datalist for autocomplete.
+function ensureAppsLoaded() {
+	if (appsLoaded) return;
+	appsLoaded = true;
+	window.reard.listApps().then((apps) => {
+		appsDatalist.textContent = "";
+		for (const app of apps || []) {
+			const opt = document.createElement("option");
+			opt.value = app.path;
+			opt.label = app.name;
+			appsDatalist.appendChild(opt);
+		}
+	}).catch(() => { appsLoaded = false; });
+}
+
 function openPanel(column, row) {
 	selected = { column, row };
 	const inst = instanceAt(column, row);
@@ -128,12 +180,11 @@ function openPanel(column, row) {
 		saveBtn.textContent = "Assign";
 		removeBtn.style.display = "none";
 	}
-	settingsInput.value = JSON.stringify((inst && inst.settings) || {}, null, 2);
-	validateSettingsInput();
 	titleColorInput.value = (inst && inst.titleColor) || "#ffffff";
 	if (inst && inst.plugin && pluginSelect.value !== inst.plugin) pluginSelect.value = inst.plugin;
 	fillActionSelect();
 	if (inst) actionSelect.value = inst.action;
+	updateEditorMode(inst);
 	renderGrid();
 }
 
@@ -184,10 +235,23 @@ saveBtn.addEventListener("click", async () => {
 		showPanelError("Pick a plugin and an action.");
 		return;
 	}
-	const settings = validateSettingsInput();
-	if (settings === null) {
-		showPanelError("Settings is not a valid JSON object.");
-		return;
+	let settings;
+	if (editorMode === "app") {
+		const appPath = appPathInput.value.trim();
+		if (!appPath) {
+			showPanelError("Pick an application (search or Browse).");
+			appPathInput.focus();
+			return;
+		}
+		settings = { path: appPath };
+		const args = appArgsInput.value.trim();
+		if (args) settings.args = args;
+	} else {
+		settings = validateSettingsInput();
+		if (settings === null) {
+			showPanelError("Settings is not a valid JSON object.");
+			return;
+		}
 	}
 	const titleColor = titleColorInput.value.trim() || "#ffffff";
 	const res = await window.reard.assign({
@@ -205,6 +269,11 @@ saveBtn.addEventListener("click", async () => {
 	showPanelError("");
 });
 
+appBrowseBtn.addEventListener("click", async () => {
+	const res = await window.reard.pickApp();
+	if (res && res.ok && res.path) appPathInput.value = res.path;
+});
+
 removeBtn.addEventListener("click", async () => {
 	if (!selected) return;
 	const res = await window.reard.clear({ column: selected.column, row: selected.row });
@@ -216,7 +285,14 @@ removeBtn.addEventListener("click", async () => {
 });
 
 cancelBtn.addEventListener("click", closePanel);
-pluginSelect.addEventListener("change", fillActionSelect);
+pluginSelect.addEventListener("change", () => {
+	fillActionSelect();
+	updateEditorMode(null);
+});
+actionSelect.addEventListener("change", () => {
+	const inst = selected ? instanceAt(selected.column, selected.row) : null;
+	updateEditorMode(inst && inst.action === actionSelect.value ? inst : null);
+});
 settingsInput.addEventListener("input", validateSettingsInput);
 
 function refreshStatus() {

@@ -7,7 +7,7 @@
 //
 // Fase 2: N instances from a profile file (host/profile.json), one page per
 // distinct plugin, targeted event routing, willDisappear on shutdown.
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, dialog } = require("electron");
 const { WebSocketServer } = require("ws");
 const fs = require("fs");
 const path = require("path");
@@ -584,7 +584,7 @@ function scanInstalledPlugins() {
 					name: manifest.Name || uuid,
 					actions: (Array.isArray(manifest.Actions) ? manifest.Actions : [])
 						.filter((a) => a && a.UUID)
-						.map((a) => ({ uuid: a.UUID, name: a.Name || a.UUID })),
+						.map((a) => ({ uuid: a.UUID, name: a.Name || a.UUID, settingsEditor: a.REARDSettingsEditor || null })),
 				});
 			} else if (/\.exe$/i.test(entry)) {
 				// Native bundle: runnable as a child process (S11).
@@ -594,7 +594,7 @@ function scanInstalledPlugins() {
 					native: true,
 					actions: (Array.isArray(manifest.Actions) ? manifest.Actions : [])
 						.filter((a) => a && a.UUID)
-						.map((a) => ({ uuid: a.UUID, name: a.Name || a.UUID })),
+						.map((a) => ({ uuid: a.UUID, name: a.Name || a.UUID, settingsEditor: a.REARDSettingsEditor || null })),
 				});
 			} else {
 				console.log(`[host] skipping plugin ${ent.name}: unsupported entry "${entry || "none"}"`);
@@ -749,6 +749,56 @@ ipcMain.handle("reard-host:launchApp", (_event, payload) => {
 	} catch (e) {
 		return { ok: false, error: e.message };
 	}
+});
+
+// Installed-app list for the config UI's app picker: every .lnk shortcut in
+// both Start Menu "Programs" trees (system-wide + per-user). Launching a .lnk
+// through shell.openPath works, so the shortcut path itself is the stored
+// setting. Deduped by lowercase display name, sorted alphabetically.
+const START_MENU_DIRS = [
+	process.env.PROGRAMDATA ? path.join(process.env.PROGRAMDATA, "Microsoft", "Windows", "Start Menu", "Programs") : null,
+	process.env.APPDATA ? path.join(process.env.APPDATA, "Microsoft", "Windows", "Start Menu", "Programs") : null,
+].filter(Boolean);
+
+function listInstalledApps() {
+	const seen = new Map(); // lowercase name -> { name, path }
+	const walk = (dir, depth) => {
+		if (depth > 5) return;
+		let entries;
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch (e) {
+			return;
+		}
+		for (const ent of entries) {
+			const full = path.join(dir, ent.name);
+			if (ent.isDirectory()) {
+				walk(full, depth + 1);
+			} else if (ent.name.toLowerCase().endsWith(".lnk")) {
+				const name = ent.name.slice(0, -4);
+				const key = name.toLowerCase();
+				if (!seen.has(key)) seen.set(key, { name, path: full });
+			}
+		}
+	};
+	for (const dir of START_MENU_DIRS) walk(dir, 0);
+	return Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+ipcMain.handle("reard:listApps", () => listInstalledApps());
+
+ipcMain.handle("reard:pickApp", async () => {
+	if (!configWindow) return { ok: false, error: "config window not open" };
+	const res = await dialog.showOpenDialog(configWindow, {
+		title: "Choose application",
+		properties: ["openFile"],
+		filters: [
+			{ name: "Applications", extensions: ["exe", "lnk", "bat", "cmd"] },
+			{ name: "All files", extensions: ["*"] },
+		],
+	});
+	if (res.canceled || !res.filePaths.length) return { ok: false };
+	return { ok: true, path: res.filePaths[0] };
 });
 
 ipcMain.handle("reard:assign", (_event, payload) => {

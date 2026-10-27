@@ -11,6 +11,9 @@ contextBridge.exposeInMainWorld("reard", {
 	getKeyImages: () => ipcRenderer.invoke("reard:getKeyImages"),
 	// Device status for the header badge.
 	getStatus: () => ipcRenderer.invoke("reard:getStatus"),
+	// App picker: installed Start Menu shortcuts + a native file dialog.
+	listApps: () => ipcRenderer.invoke("reard:listApps"),
+	pickApp: () => ipcRenderer.invoke("reard:pickApp"),
 	// Main pushes { instances } after every successful profile change.
 	onProfileChanged: (callback) => {
 		const listener = (_event, data) => callback(data);
