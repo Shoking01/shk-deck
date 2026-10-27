@@ -15,11 +15,13 @@ device.on("device-connect", (payload) => {
 	const p = payload || {};
 	console.log(`[device] deviceDidConnect raw: ${JSON.stringify(p)}`);
 	try {
-		const img = fs.readFileSync(path.join(__dirname, "test-image.png"));
+		// Optional CLI arg: send a specific image instead of the default test image.
+		const imgPath = process.argv[2] || path.join(__dirname, "test-image.png");
+		const img = fs.readFileSync(imgPath);
 		device.setKeyImage(1, "data:image/png;base64," + img.toString("base64"));
-		console.log("[device] test image sent to key 1");
+		console.log(`[device] image sent to key 1: ${imgPath} (${img.length} bytes)`);
 	} catch (e) {
-		console.log(`[device] could not load test-image.png: ${e.message}`);
+		console.log(`[device] could not load image: ${e.message}`);
 	}
 	device.startRead();
 	console.log("[device] listening for key events (read started)");

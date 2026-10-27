@@ -9,3 +9,8 @@ probe/listener/probe-capture.jsonl
 
 # Logs and caches
 *.log
+
+# Debug image dumps
+host/last-setImage.png
+host/clock-*.png
+

@@ -16,11 +16,14 @@ const COLUMNS = 5;
 const ROWS = 3;
 
 // MVP instance profile: one action placed at (0,0). A real profile editor comes later.
+// Settings mirror what the plugin's property inspector would persist (zone/theme/select).
 const INSTANCE = {
 	plugin: "com.mirabox.streamdock.time",
 	action: "com.mirabox.streamdock.time.action1", // World Time
 	column: 0,
 	row: 0,
+	settings: { zone: "system", theme: "theme1", select: "0", title: "" },
+	titleColor: "#000000",
 };
 
 let pluginPort = null;
@@ -64,7 +67,7 @@ function buildRegisterInfo(pluginUuid) {
 
 function sendWillAppear(inst) {
 	const context = makeContext();
-	instances.set(context, { ...inst, settings: {} });
+	instances.set(context, { ...inst, settings: { ...(inst.settings || {}) } });
 	sendToPlugin({
 		action: inst.action,
 		context,
@@ -73,11 +76,37 @@ function sendWillAppear(inst) {
 		payload: {
 			coordinates: { column: inst.column, row: inst.row },
 			isInMultiAction: false,
-			settings: {},
+			settings: { ...(inst.settings || {}) },
 			state: 0,
 		},
 	});
 	console.log(`[host] willAppear -> ${inst.action} context=${context} @ (${inst.column},${inst.row})`);
+	sendTitleParameters(inst, context);
+}
+
+function sendTitleParameters(inst, context) {
+	sendToPlugin({
+		action: inst.action,
+		context,
+		device: deviceId,
+		event: "titleParametersDidChange",
+		payload: {
+			coordinates: { column: inst.column, row: inst.row },
+			settings: { ...(inst.settings || {}) },
+			state: 0,
+			title: (inst.settings && inst.settings.title) || "",
+			titleParameters: {
+				fontFamily: "HarmonyOS Sans",
+				fontSize: 8,
+				fontStyle: "Regular",
+				fontUnderline: false,
+				showTitle: false,
+				titleAlignment: "bottom",
+				titleColor: inst.titleColor || "#ffffff",
+			},
+		},
+	});
+	console.log(`[host] titleParametersDidChange -> titleColor=${inst.titleColor || "#ffffff"}`);
 }
 
 function handlePluginMessage(ws, msg) {
@@ -92,7 +121,13 @@ function handlePluginMessage(ws, msg) {
 			if (!inst) { console.log(`[host] setImage for unknown context ${msg.context}`); break; }
 			const idx = keyIndex(inst.column, inst.row);
 			device.setKeyImage(idx, msg.payload.image);
-			console.log(`[host] setImage -> key ${idx} (${msg.payload.image.length} chars)`);
+			console.log(`[host] setImage -> key ${idx} prefix=${msg.payload.image.slice(0, 30)} (${msg.payload.image.length} chars)`);
+			try { // DEBUG: dump the exact image the plugin sent, for inspection
+				const b64 = msg.payload.image.replace(/^data:image\/\w+;base64,/, "");
+				fs.writeFileSync(path.join(__dirname, "last-setImage.png"), Buffer.from(b64, "base64"));
+			} catch (e) {
+				console.log(`[host] image dump failed: ${e.message}`);
+			}
 			break;
 		}
 		case "setTitle":
