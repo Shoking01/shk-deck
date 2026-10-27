@@ -17,4 +17,7 @@ window.addEventListener("unhandledrejection", (e) => {
 
 window.reardHost = {
 	launchApp: (appPath, args) => ipcRenderer.invoke("reard-host:launchApp", { path: appPath, args: args || "" }),
+	// Windows shell icon for an app path (.exe or .lnk) as a PNG data URL, for
+	// plugins that draw the target app's icon on their key face.
+	getAppIcon: (appPath) => ipcRenderer.invoke("reard-host:getAppIcon", { path: appPath }),
 };

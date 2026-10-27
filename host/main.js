@@ -778,6 +778,32 @@ ipcMain.handle("reard-host:launchApp", (_event, payload) => {
 	}
 });
 
+// Plugin bridge: extract the Windows shell icon for an app path (.exe or .lnk)
+// as a PNG data URL so a plugin can draw the real app icon on its key face.
+// For .lnk shortcuts we resolve to the target executable first when possible:
+// the shortcut's own icon is usually fine, but the target's is the one the user
+// recognizes. Errors return { ok:false } instead of throwing so the plugin can
+// log and fall back to its own drawn face.
+ipcMain.handle("reard-host:getAppIcon", async (_event, payload) => {
+	const p = payload || {};
+	if (typeof p.path !== "string" || !p.path.trim()) return { ok: false, error: "missing path" };
+	let target = p.path.trim();
+	try {
+		if (target.toLowerCase().endsWith(".lnk")) {
+			try {
+				const link = shell.readShortcutLink(target);
+				if (link && link.target && fs.existsSync(link.target)) target = link.target;
+			} catch (_e) {
+				// Not a resolvable shortcut - the .lnk's own icon still works.
+			}
+		}
+		const icon = await app.getFileIcon(target, { size: "large" });
+		return { ok: true, dataUrl: icon.toDataURL() };
+	} catch (e) {
+		return { ok: false, error: e.message };
+	}
+});
+
 // Installed-app list for the config UI's app picker: every .lnk shortcut in
 // both Start Menu "Programs" trees (system-wide + per-user). Launching a .lnk
 // through shell.openPath works, so the shortcut path itself is the stored
