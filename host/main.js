@@ -12,6 +12,8 @@ const { WebSocketServer } = require("ws");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { spawn } = require("child_process");
+const os = require("os");
 const { DeviceClient } = require("./device-client");
 
 // Mirror console.log into host/host.log: the stdout capture (shell pipe) can
@@ -57,6 +59,18 @@ const instances = new Map(); // context -> { plugin, action, column, row, settin
 const setImageLogCount = new Map(); // key index -> paint count, throttles setImage logging
 const lastImageByKey = new Map(); // key index -> last image the owning context sent; used to repaint after a device reconnect
 const titleByKey = new Map(); // key index -> active setTitle text, composited over the key image
+const nativeChildren = new Map(); // plugin uuid -> spawned child process (native .exe bundles)
+const nativePluginByToken = new Map(); // launch token -> plugin uuid; native exes register under the argv token
+
+// Stream Station passes a random 32-char uppercase alnum token as -pluginUUID
+// (captured: RI1UY9YF6G4XPN8A1P3O6JW6M08I0993); the exe echoes it back as its
+// registerPlugin uuid, so we map token -> real plugin uuid for routing.
+function makeLaunchToken() {
+	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+	let t = "";
+	for (let i = 0; i < 32; i++) t += chars[crypto.randomInt(chars.length)];
+	return t;
+}
 const windows = new Map(); // plugin uuid -> BrowserWindow
 
 function makeContext() {
@@ -75,10 +89,26 @@ function sendToPlugin(pluginUuid, msg) {
 	if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 }
 
-function buildRegisterInfo(pluginUuid) {
+function buildRegisterInfo(pluginUuid, manifestVersion) {
 	return {
-		application: { language: "es", platform: "windows", version: "2.9.0" },
-		plugin: { uuid: pluginUuid },
+		application: {
+			font: "HarmonyOS Sans",
+			language: "es", // short code: Mirabox plugins fetch ../${$lang}.json
+			platform: "windows",
+			platformVersion: os.release(),
+			version: "2.9",
+		},
+		// Captured from Stream Station's live launch argv (pid 15796); native
+		// exes may read these for overlay drawing.
+		colors: {
+			buttonMouseOverBackgroundColor: "#464646FF",
+			buttonPressedBackgroundColor: "#303030FF",
+			buttonPressedBorderColor: "#646464FF",
+			buttonPressedTextColor: "#969696FF",
+			highlightColor: "#0078FFFF",
+		},
+		devicePixelRatio: 1,
+		plugin: { uuid: pluginUuid, version: manifestVersion || "1.0" },
 		deviceType: 0,
 		devices: [{
 			id: deviceId,
@@ -207,15 +237,20 @@ function applyTitleLayer(idx) {
 
 function handlePluginMessage(ws, msg) {
 	switch (msg.event) {
-		case "registerPlugin":
-			socketByPlugin.set(msg.uuid, ws);
+		case "registerPlugin": {
+			// Native exes register under the -pluginUUID token we passed; resolve
+			// it to the real plugin uuid so routing stays uniform.
+			const realUuid = nativePluginByToken.get(msg.uuid) || msg.uuid;
+			if (realUuid !== msg.uuid) console.log(`[host] native registration ${msg.uuid} -> ${realUuid}`);
+			socketByPlugin.set(realUuid, ws);
 			console.log(`[host] plugin registered: ${JSON.stringify(msg).slice(0, 200)}`);
-			for (const inst of instancesByPlugin.get(msg.uuid) || []) {
+			for (const inst of instancesByPlugin.get(realUuid) || []) {
 				// S10: instances assigned live already have a context when their page
 				// re-registers; only deliver willAppear to instances without one.
 				if (!hasLiveContext(inst)) sendWillAppear(inst);
 			}
 			break;
+		}
 		case "setImage": {
 			const inst = instances.get(msg.context);
 			if (!inst) { console.log(`[host] setImage for unknown context ${msg.context}`); break; }
@@ -278,14 +313,35 @@ function handlePluginMessage(ws, msg) {
 }
 
 function launchPlugin(pluginUuid) {
-	if (windows.has(pluginUuid)) return; // one page per plugin bundle
+	if (windows.has(pluginUuid) || nativeChildren.has(pluginUuid)) return; // one page/process per plugin bundle
 	const dir = path.join(PLUGINS_DIR, `${pluginUuid}.sdPlugin`);
 	const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
-	// Native bundles (e.g. SystemMonitor.exe, CodePathWin) have no HTML page;
-	// refuse them with a clear error instead of crashing the main process.
 	const entry = manifest.CodePath || manifest.CodePathWin || "";
+	if (/\.exe$/i.test(entry)) {
+		// Native plugin: spawn the exe with the argv contract captured live from
+		// Stream Station (pid 15796): -port -pluginUUID -registerEvent -info.
+		const exePath = path.join(dir, entry);
+		const token = makeLaunchToken();
+		nativePluginByToken.set(token, pluginUuid);
+		const info = buildRegisterInfo(pluginUuid, manifest.Version);
+		const args = [
+			"-port", String(pluginPort),
+			"-pluginUUID", token,
+			"-registerEvent", "registerPlugin",
+			"-info", JSON.stringify(info),
+		];
+		console.log(`[host] launching native plugin ${pluginUuid} (${exePath})`);
+		const child = spawn(exePath, args, { cwd: dir, windowsHide: true, stdio: "ignore" });
+		child.on("error", (e) => console.log(`[host] native spawn failed for ${pluginUuid}: ${e.message}`));
+		child.on("exit", (code) => {
+			console.log(`[host] native plugin ${pluginUuid} exited (code ${code === null ? "signal" : code})`);
+			if (nativeChildren.get(pluginUuid) === child) nativeChildren.delete(pluginUuid);
+		});
+		nativeChildren.set(pluginUuid, child);
+		return;
+	}
 	if (!/\.html?$/i.test(entry)) {
-		throw new Error(`plugin ${pluginUuid} has no HTML page (entry "${entry || "none"}"); native plugins are not supported yet`);
+		throw new Error(`plugin ${pluginUuid} has unsupported entry "${entry || "none"}" (neither HTML page nor .exe)`);
 	}
 	const codePath = path.join(dir, entry);
 	console.log(`[host] launching plugin ${pluginUuid} (${codePath})`);
@@ -452,17 +508,27 @@ function scanInstalledPlugins() {
 			// Only HTML-page bundles are runnable by this host; native executables
 			// (CodePathWin pointing at an .exe) stay out of the picker.
 			const entry = manifest.CodePath || manifest.CodePathWin || "";
-			if (!/\.html?$/i.test(entry)) {
-				console.log(`[host] skipping plugin ${ent.name}: no HTML page (native bundle)`);
-				continue;
+			if (/\.html?$/i.test(entry)) {
+				out.push({
+					uuid,
+					name: manifest.Name || uuid,
+					actions: (Array.isArray(manifest.Actions) ? manifest.Actions : [])
+						.filter((a) => a && a.UUID)
+						.map((a) => ({ uuid: a.UUID, name: a.Name || a.UUID })),
+				});
+			} else if (/\.exe$/i.test(entry)) {
+				// Native bundle: runnable as a child process (S11).
+				out.push({
+					uuid,
+					name: manifest.Name || uuid,
+					native: true,
+					actions: (Array.isArray(manifest.Actions) ? manifest.Actions : [])
+						.filter((a) => a && a.UUID)
+						.map((a) => ({ uuid: a.UUID, name: a.Name || a.UUID })),
+				});
+			} else {
+				console.log(`[host] skipping plugin ${ent.name}: unsupported entry "${entry || "none"}"`);
 			}
-			out.push({
-				uuid,
-				name: manifest.Name || uuid,
-				actions: (Array.isArray(manifest.Actions) ? manifest.Actions : [])
-					.filter((a) => a && a.UUID)
-					.map((a) => ({ uuid: a.UUID, name: a.Name || a.UUID })),
-			});
 		} catch (e) {
 			console.log(`[host] skipping plugin ${ent.name}: ${e.message}`);
 		}
@@ -626,4 +692,7 @@ app.whenReady().then(() => {
 
 app.on("before-quit", () => {
 	for (const [context, inst] of instances) sendWillDisappear(context, inst);
+	for (const child of nativeChildren.values()) {
+		try { child.kill(); } catch { /* already gone */ }
+	}
 });
