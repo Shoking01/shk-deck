@@ -16,6 +16,14 @@ const { spawn } = require("child_process");
 const os = require("os");
 const { DeviceClient } = require("./device-client");
 
+// Log instead of the default modal dialog: an uncaught exception in the main
+// process used to freeze the host silently (the dialog blocks the event loop
+// and nobody is watching). Keep running; the failing feature logs its own
+// recovery path.
+process.on("uncaughtException", (e) => {
+	console.log(`[host] uncaught exception: ${(e && e.stack) || e}`);
+});
+
 // Mirror console.log into host/host.log: the stdout capture (shell pipe) can
 // die mid-session while the host keeps running; the file always has the story.
 const logFile = fs.createWriteStream(path.join(__dirname, "host.log"), { flags: "a" });
@@ -239,30 +247,44 @@ function applyTitleLayer(idx) {
 		.catch((e) => console.log(`[host] title render failed: ${e.message}`));
 }
 
+const blankFn = function (w, h) {
+	const c = document.createElement("canvas");
+	c.width = w;
+	c.height = h;
+	const ctx = c.getContext("2d");
+	ctx.fillStyle = "#000000";
+	ctx.fillRect(0, 0, w, h);
+	return c.toDataURL("image/png").split(",")[1];
+};
+
 let blankKeyImagePromise = null;
 function getBlankKeyImage() {
 	// One shared 126x126 solid black PNG, rendered once in the hidden page.
 	if (!blankKeyImagePromise) {
-		const blankFn = function (w, h) {
-			const c = document.createElement("canvas");
-			c.width = w;
-			c.height = h;
-			const ctx = c.getContext("2d");
-			ctx.fillStyle = "#000000";
-			ctx.fillRect(0, 0, w, h);
-			return c.toDataURL("image/png").split(",")[1];
-		};
 		blankKeyImagePromise = ensureTitleRenderer().then(() =>
 			titleRendererWin.webContents.executeJavaScript(`(${blankFn.toString()})(${KEY_PX}, ${KEY_PX})`));
 	}
 	return blankKeyImagePromise;
 }
 
+let blackBackgroundPromise = null;
+function getBlackBackground() {
+	// Solid black device background layer (800x480; the SDK scales it).
+	if (!blackBackgroundPromise) {
+		blackBackgroundPromise = ensureTitleRenderer().then(() =>
+			titleRendererWin.webContents.executeJavaScript(`(${blankFn.toString()})(800, 480)`));
+	}
+	return blackBackgroundPromise;
+}
+
 function paintAllKeys() {
-	// Own the whole key surface: assigned keys repaint from cache, unassigned
-	// keys go black. Without this, keys the host never paints keep showing
-	// whatever the device last held (Stream Station's layout, its home
-	// background showing through, stale images after re-enumeration).
+	// Own the whole device surface: the background layer goes black (the device
+	// keeps whatever background was last stored in it - Stream Station's photo
+	// - forever otherwise), assigned keys repaint from cache, unassigned keys
+	// go black.
+	getBlackBackground()
+		.then((img) => device.setBackgroundImage(img))
+		.catch((e) => console.log(`[host] background paint failed: ${e.message}`));
 	for (let idx = 1; idx <= COLUMNS * ROWS; idx++) {
 		const cached = lastImageByKey.get(idx);
 		if (cached) {

@@ -65,6 +65,14 @@ class DeviceClient extends EventEmitter {
 		this.send({ event: "refresh", path: this.devicePath, payload: {} });
 	}
 
+	setBackgroundImage(imgData) {
+		// Verified live: event setBackgroundImgData, payload key is `image`
+		// (NOT imgData - that yields "invalid imgData"), path is the base64
+		// device path exactly as deviceDidConnect delivered it. The SDK scales
+		// the image to the device's background layer (800x480 black verified).
+		this.send({ event: "setBackgroundImgData", path: this.devicePath, payload: { image: imgData } });
+	}
+
 	startRead() {
 		this.send({ event: "read", path: this.devicePath, payload: {} });
 	}
