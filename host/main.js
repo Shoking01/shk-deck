@@ -7,7 +7,7 @@
 //
 // Fase 2: N instances from a profile file (host/profile.json), one page per
 // distinct plugin, targeted event routing, willDisappear on shutdown.
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require("electron");
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell } = require("electron");
 const { WebSocketServer } = require("ws");
 const fs = require("fs");
 const path = require("path");
@@ -715,6 +715,41 @@ ipcMain.handle("reard:getStatus", () => ({
 	columns: COLUMNS,
 	rows: ROWS,
 }));
+
+// Plugin bridge: launch an application on key press. Every plugin page gets
+// host/preload.js, so any installed plugin can ask the host to spawn a program.
+// Personal-use host: the user installs their own plugins, so the trust boundary
+// is the plugins directory itself. No args -> shell.openPath (handles .lnk,
+// folders, and protocol handlers); args -> a detached spawn that survives
+// host quit (stdio ignored, unref'd).
+ipcMain.handle("reard-host:launchApp", (_event, payload) => {
+	const p = payload || {};
+	if (typeof p.path !== "string" || !p.path.trim()) return { ok: false, error: "missing path" };
+	const appPath = p.path.trim();
+	const args = typeof p.args === "string" ? p.args.trim() : "";
+	try {
+		if (args) {
+			if (!fs.existsSync(appPath)) return { ok: false, error: `file not found: ${appPath}` };
+			const child = spawn(appPath, args.split(/\s+/), {
+				detached: true,
+				stdio: "ignore",
+				cwd: path.dirname(appPath),
+				windowsHide: true,
+			});
+			child.on("error", (e) => console.log(`[host] launchApp spawn error: ${e.message}`));
+			child.unref();
+			console.log(`[host] launchApp spawned: ${appPath} ${args}`);
+			return { ok: true };
+		}
+		shell.openPath(appPath).then((err) => {
+			if (err) console.log(`[host] launchApp openPath failed for ${appPath}: ${err}`);
+			else console.log(`[host] launchApp opened: ${appPath}`);
+		});
+		return { ok: true };
+	} catch (e) {
+		return { ok: false, error: e.message };
+	}
+});
 
 ipcMain.handle("reard:assign", (_event, payload) => {
 	try {
