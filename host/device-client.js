@@ -19,6 +19,7 @@ class DeviceClient extends EventEmitter {
 		this.ws.on("open", () => this.emit("server-connect"));
 		this.ws.on("error", (e) => this.emit("error", e));
 		this.ws.on("close", () => {
+			this._stopReadLoop();
 			this.emit("server-close");
 			// The SDK server can stall a handshake (e.g. after an abrupt client
 			// death) or be restarted on its own; without a retry the host sits
@@ -66,15 +67,33 @@ class DeviceClient extends EventEmitter {
 	}
 
 	setBackgroundImage(imgData) {
-		// Verified live: event setBackgroundImgData, payload key is `image`
-		// (NOT imgData - that yields "invalid imgData"), path is the base64
-		// device path exactly as deviceDidConnect delivered it. The SDK scales
-		// the image to the device's background layer (800x480 black verified).
-		this.send({ event: "setBackgroundImgData", path: this.devicePath, payload: { image: imgData } });
+		// Verified live (one variant per connection): the payload key is
+		// `imgData` (raw base64 or data URL both accepted). The `image` key
+		// makes the SDK fail with the misleading "invalid imgData" error - it
+		// looks up payload.imgData, finds nothing, and blames the image.
+		// Path is the base64 device path exactly as deviceDidConnect delivered
+		// it. The SDK scales the image to the background layer (800x480 black).
+		this.send({ event: "setBackgroundImgData", path: this.devicePath, payload: { imgData } });
 	}
 
 	startRead() {
 		this.send({ event: "read", path: this.devicePath, payload: {} });
+		// The SDK routes device input events to the client that sent `read`
+		// LAST (verified live: a probe that sent `read` and disconnected kept
+		// the binding, so the host stopped receiving key events and the device
+		// fell into its press-toggles-screen state). Re-assert the subscription
+		// periodically so any other client's stale binding is reclaimed.
+		if (this._readInterval) clearInterval(this._readInterval);
+		this._readInterval = setInterval(() => {
+			if (this.devicePath) this.send({ event: "read", path: this.devicePath, payload: {} });
+		}, 5000);
+	}
+
+	_stopReadLoop() {
+		if (this._readInterval) {
+			clearInterval(this._readInterval);
+			this._readInterval = null;
+		}
 	}
 }
 

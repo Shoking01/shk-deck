@@ -277,14 +277,33 @@ function getBlackBackground() {
 	return blackBackgroundPromise;
 }
 
+let backgroundPaintTimers = [];
 function paintAllKeys() {
 	// Own the whole device surface: the background layer goes black (the device
 	// keeps whatever background was last stored in it - Stream Station's photo
 	// - forever otherwise), assigned keys repaint from cache, unassigned keys
 	// go black.
+	//
+	// ORDER MATTERS: the background write lands on the device asynchronously
+	// and covers the key layer, so any key image sent before it commits gets
+	// hidden (verified 2026-10-27: one-shot images sent after boot render and
+	// persist, but boot-time images painted before the background landed were
+	// lost - only per-second repainters like the clock survived). Send the
+	// background first, give the device time to commit it, then paint keys,
+	// with a second sweep in case the commit was slow.
+	for (const t of backgroundPaintTimers) clearTimeout(t);
+	// Background first, immediately; key sweeps only after it has had time to
+	// commit on the device.
 	getBlackBackground()
 		.then((img) => device.setBackgroundImage(img))
 		.catch((e) => console.log(`[host] background paint failed: ${e.message}`));
+	backgroundPaintTimers = [
+		setTimeout(() => paintKeysFromState(), 1500),
+		setTimeout(() => paintKeysFromState(), 4000),
+	];
+}
+
+function paintKeysFromState() {
 	for (let idx = 1; idx <= COLUMNS * ROWS; idx++) {
 		const cached = lastImageByKey.get(idx);
 		if (cached) {
@@ -666,7 +685,15 @@ device.on("device-connect", (payload) => {
 	}
 });
 device.on("key", (p) => {
-	const keyId = p.keyId;
+	console.log(`[host] raw key: keyId=${p.keyId} ${p.keyUpOrKeyDown}`);
+	// Input keyIds are row-major counted from the BOTTOM-left, while key
+	// images (setKeyImgData keyIndex) render top-down (verified 2026-10-27:
+	// physical top-right reports 15, bottom-left 1, bottom-right 5, HI at
+	// top-3rd reports 13). Remap input to display coordinates so plugins see
+	// the key the user actually pressed.
+	const rawRow = Math.floor((p.keyId - 1) / COLUMNS);
+	const col = (p.keyId - 1) % COLUMNS;
+	const keyId = (ROWS - 1 - rawRow) * COLUMNS + col + 1;
 	const column = (keyId - 1) % COLUMNS;
 	const row = Math.floor((keyId - 1) / COLUMNS);
 	for (const [context, inst] of instances) {
