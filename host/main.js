@@ -12,7 +12,7 @@ const { WebSocketServer } = require("ws");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { spawn } = require("child_process");
+const { spawn, execFile } = require("child_process");
 const os = require("os");
 const { DeviceClient } = require("./device-client");
 
@@ -782,8 +782,65 @@ ipcMain.handle("reard-host:launchApp", (_event, payload) => {
 // as a PNG data URL so a plugin can draw the real app icon on its key face.
 // For .lnk shortcuts we resolve to the target executable first when possible:
 // the shortcut's own icon is usually fine, but the target's is the one the user
-// recognizes. Errors return { ok:false } instead of throwing so the plugin can
-// log and fall back to its own drawn face.
+// recognizes. The high-quality path extracts the 256x256 icon resource straight
+// from the executable via user32 PrivateExtractIcons in a short-lived PowerShell
+// child (Electron's app.getFileIcon caps at 48px); if that fails for any reason
+// we fall back to the 48px shell icon. The path travels through an environment
+// variable (never interpolated into the script) and the script itself is passed
+// base64-encoded, so a hostile path cannot inject PowerShell. Results are cached
+// per resolved target: each extraction costs a PowerShell startup (~0.5s).
+const APP_ICON_CACHE = new Map(); // resolved target path -> PNG data URL
+
+const APP_ICON_PS_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class IconX {
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern int PrivateExtractIcons(string lpszFileName, int nIconIndex, int cxIcon, int cyIcon, IntPtr[] phicon, int[] piconid, int nIcons, int flags);
+  [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr hIcon);
+}
+'@
+Add-Type -AssemblyName System.Drawing
+$path = $env:REARD_ICON_PATH
+$handles = New-Object 'System.IntPtr[]' 1
+$ids = New-Object 'System.Int32[]' 1
+$n = [IconX]::PrivateExtractIcons($path, 0, 256, 256, $handles, $ids, 1, 0)
+if ($n -lt 1 -or $handles[0] -eq [IntPtr]::Zero) { exit 2 }
+$icon = [System.Drawing.Icon]::FromHandle($handles[0])
+$bmp = $icon.ToBitmap()
+$ms = New-Object System.IO.MemoryStream
+$bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+$bmp.Dispose(); $icon.Dispose()
+[IconX]::DestroyIcon($handles[0]) | Out-Null
+[Console]::Out.Write([Convert]::ToBase64String($ms.ToArray()))
+`;
+
+function extractIconJumbo(target) {
+	return new Promise((resolve) => {
+		const encoded = Buffer.from(APP_ICON_PS_SCRIPT, "utf16le").toString("base64");
+		execFile(
+			"powershell.exe",
+			["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+			{
+				timeout: 8000,
+				maxBuffer: 8 * 1024 * 1024,
+				windowsHide: true,
+				env: { ...process.env, REARD_ICON_PATH: target },
+			},
+			(err, stdout) => {
+				const b64 = typeof stdout === "string" ? stdout.trim() : "";
+				if (!err && b64.length > 100 && /^[A-Za-z0-9+/=]+$/.test(b64)) {
+					resolve(`data:image/png;base64,${b64}`);
+				} else {
+					resolve(null);
+				}
+			}
+		);
+	});
+}
+
 ipcMain.handle("reard-host:getAppIcon", async (_event, payload) => {
 	const p = payload || {};
 	if (typeof p.path !== "string" || !p.path.trim()) return { ok: false, error: "missing path" };
@@ -797,8 +854,14 @@ ipcMain.handle("reard-host:getAppIcon", async (_event, payload) => {
 				// Not a resolvable shortcut - the .lnk's own icon still works.
 			}
 		}
-		const icon = await app.getFileIcon(target, { size: "large" });
-		return { ok: true, dataUrl: icon.toDataURL() };
+		if (APP_ICON_CACHE.has(target)) return { ok: true, dataUrl: APP_ICON_CACHE.get(target) };
+		let dataUrl = await extractIconJumbo(target);
+		if (!dataUrl) {
+			const icon = await app.getFileIcon(target, { size: "large" });
+			dataUrl = icon.toDataURL();
+		}
+		APP_ICON_CACHE.set(target, dataUrl);
+		return { ok: true, dataUrl };
 	} catch (e) {
 		return { ok: false, error: e.message };
 	}
