@@ -45,6 +45,7 @@ let deviceConnected = false;
 const device = new DeviceClient();
 const socketByPlugin = new Map(); // plugin uuid -> WebSocket
 const instances = new Map(); // context -> { plugin, action, column, row, settings, titleColor }
+const setImageLogCount = new Map(); // key index -> paint count, throttles setImage logging
 const windows = new Map(); // plugin uuid -> BrowserWindow
 
 function makeContext() {
@@ -151,7 +152,13 @@ function handlePluginMessage(ws, msg) {
 			if (!inst) { console.log(`[host] setImage for unknown context ${msg.context}`); break; }
 			const idx = keyIndex(inst.column, inst.row);
 			device.setKeyImage(idx, msg.payload.image);
-			console.log(`[host] setImage -> key ${idx} prefix=${msg.payload.image.slice(0, 30)} (${msg.payload.image.length} chars)`);
+			// Throttled logging: per-second redraws (clock) flood the log and hide
+			// everything else; log the first paint per key, then every 50th.
+			const n = (setImageLogCount.get(idx) || 0) + 1;
+			setImageLogCount.set(idx, n);
+			if (n === 1 || n % 50 === 0) {
+				console.log(`[host] setImage -> key ${idx} #${n} (${msg.payload.image.length} chars)`);
+			}
 			try { // DEBUG: dump the exact image the plugin sent, per key, for inspection
 				const b64 = msg.payload.image.replace(/^data:image\/\w+;base64,/, "");
 				fs.writeFileSync(path.join(__dirname, `last-setImage-key${idx}.png`), Buffer.from(b64, "base64"));
@@ -189,7 +196,13 @@ function launchPlugin(pluginUuid) {
 	if (windows.has(pluginUuid)) return; // one page per plugin bundle
 	const dir = path.join(PLUGINS_DIR, `${pluginUuid}.sdPlugin`);
 	const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
-	const codePath = path.join(dir, manifest.CodePath);
+	// Native bundles (e.g. SystemMonitor.exe, CodePathWin) have no HTML page;
+	// refuse them with a clear error instead of crashing the main process.
+	const entry = manifest.CodePath || manifest.CodePathWin || "";
+	if (!/\.html?$/i.test(entry)) {
+		throw new Error(`plugin ${pluginUuid} has no HTML page (entry "${entry || "none"}"); native plugins are not supported yet`);
+	}
+	const codePath = path.join(dir, entry);
 	console.log(`[host] launching plugin ${pluginUuid} (${codePath})`);
 
 	const win = new BrowserWindow({
@@ -263,6 +276,9 @@ function applyProfileChange(newInstances) {
 	for (const [key, oldInst] of oldByKey) {
 		const newInst = newByKey.get(key);
 		if (!newInst || !sameInstance(oldInst, newInst)) changedKeys.add(key);
+	}
+	for (const key of newByKey.keys()) {
+		if (!oldByKey.has(key)) changedKeys.add(key); // newly assigned keys must launch too
 	}
 	for (const [context, inst] of [...instances]) {
 		if (changedKeys.has(`${inst.column},${inst.row}`)) {
@@ -345,6 +361,13 @@ function scanInstalledPlugins() {
 		const uuid = ent.name.slice(0, -".sdPlugin".length);
 		try {
 			const manifest = JSON.parse(fs.readFileSync(path.join(PLUGINS_DIR, ent.name, "manifest.json"), "utf8"));
+			// Only HTML-page bundles are runnable by this host; native executables
+			// (CodePathWin pointing at an .exe) stay out of the picker.
+			const entry = manifest.CodePath || manifest.CodePathWin || "";
+			if (!/\.html?$/i.test(entry)) {
+				console.log(`[host] skipping plugin ${ent.name}: no HTML page (native bundle)`);
+				continue;
+			}
 			out.push({
 				uuid,
 				name: manifest.Name || uuid,
@@ -372,7 +395,10 @@ function validCoordinates(p) {
 
 function maybeStart() {
 	if (appReady && deviceConnected) {
-		for (const pluginUuid of pluginsToLaunch) launchPlugin(pluginUuid);
+		for (const pluginUuid of pluginsToLaunch) {
+			try { launchPlugin(pluginUuid); }
+			catch (e) { console.log(`[host] launch failed for ${pluginUuid}: ${e.message}`); }
+		}
 		openConfigWindow();
 	}
 }
