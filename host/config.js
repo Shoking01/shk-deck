@@ -147,18 +147,38 @@ function updateEditorMode(inst) {
 }
 
 // Fetch the installed-app list once and feed the datalist for autocomplete.
+// The list shows app NAMES only - full paths made it impossible to tell which
+// entry is which. The chosen name resolves back to its path on save.
+const appNameToPath = new Map(); // lowercase name -> path
 function ensureAppsLoaded() {
 	if (appsLoaded) return;
 	appsLoaded = true;
 	window.reard.listApps().then((apps) => {
 		appsDatalist.textContent = "";
+		appNameToPath.clear();
 		for (const app of apps || []) {
+			appNameToPath.set(app.name.toLowerCase(), app.path);
 			const opt = document.createElement("option");
-			opt.value = app.path;
-			opt.label = app.name;
+			opt.value = app.name;
 			appsDatalist.appendChild(opt);
 		}
 	}).catch(() => { appsLoaded = false; });
+}
+
+// Resolve the app picker input: a bare app name (typed or picked from the
+// list) maps to its installed path; anything that already looks like a path
+// stays as-is. Returns "" for empty input, null for an unresolvable name.
+function resolveAppInput(text) {
+	const value = text.trim();
+	if (!value) return "";
+	if (/[\\/:]/.test(value)) return value; // already a path
+	const key = value.toLowerCase();
+	if (appNameToPath.has(key)) return appNameToPath.get(key);
+	const matches = [];
+	for (const [name, p] of appNameToPath) {
+		if (name.startsWith(key)) matches.push(p);
+	}
+	return matches.length === 1 ? matches[0] : null;
 }
 
 function openPanel(column, row) {
@@ -237,12 +257,14 @@ saveBtn.addEventListener("click", async () => {
 	}
 	let settings;
 	if (editorMode === "app") {
-		const appPath = appPathInput.value.trim();
+		const rawApp = appPathInput.value.trim();
+		const appPath = resolveAppInput(rawApp);
 		if (!appPath) {
-			showPanelError("Pick an application (search or Browse).");
+			showPanelError(rawApp ? "Unknown application - pick one from the list or use Browse." : "Pick an application (search or Browse).");
 			appPathInput.focus();
 			return;
 		}
+		appPathInput.value = appPath; // show the resolved path after saving
 		settings = { path: appPath };
 		const args = appArgsInput.value.trim();
 		if (args) settings.args = args;
