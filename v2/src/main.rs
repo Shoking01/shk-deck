@@ -5,10 +5,11 @@
 //! Electron host used), reads the user's existing profile, and renders the
 //! approved look (egui chassis + hand-painted widget layer).
 //!
-//! Scope of this slice: transport, profile, UI, real key painting.
-//! The HTML plugin runtime (wry) is a later task.
+//! Scope: transport, profile, UI, key painting, and the plugin runtime that
+//! makes the deck live (hidden WebView2 per plugin + SDK1 WebSocket server).
 
 mod device;
+mod plugins;
 mod profile;
 mod widgets;
 
@@ -16,6 +17,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use device::{DeviceEvent, DeviceHandle};
 use eframe::egui;
+use plugins::{PluginRuntime};
 use profile::{COLUMNS, Profile, ROWS, key_index_of};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -31,13 +33,17 @@ struct DeckApp {
     key_textures: BTreeMap<usize, egui::TextureHandle>,
     /// Same dumps as base64, ready to send to the device.
     dump_images: BTreeMap<usize, String>,
+    /// Live frames received from plugins, as raw base64.
+    live_images: BTreeMap<usize, String>,
     selected: Option<usize>,
     device: DeviceHandle,
+    plugins: PluginRuntime,
     sdk_connected: bool,
     device_connected: bool,
     device_label: Option<String>,
     last_error: Option<String>,
     last_key_event: Option<String>,
+    last_plugin_log: Option<String>,
 }
 
 impl DeckApp {
@@ -66,17 +72,22 @@ impl DeckApp {
             }
         }
 
+        let plugins = PluginRuntime::start(&profile);
+
         Self {
             profile,
             key_textures,
             dump_images,
+            live_images: BTreeMap::new(),
             selected: None,
             device: DeviceHandle::spawn(device::SDK_URL),
+            plugins,
             sdk_connected: false,
             device_connected: false,
             device_label: None,
             last_error: None,
             last_key_event: None,
+            last_plugin_log: None,
         }
     }
 
@@ -110,7 +121,14 @@ impl DeckApp {
                     self.device_label = None;
                 }
                 DeviceEvent::Key(payload) => {
-                    self.last_key_event = Some(format!("tecla: {payload}"));
+                    let key_id = payload.get("keyId").and_then(|value| value.as_u64()).unwrap_or(0) as usize;
+                    let event = payload.get("keyUpOrKeyDown").and_then(|value| value.as_str()).unwrap_or("");
+                    self.last_key_event = Some(format!("tecla {key_id} · {event}"));
+                    match event {
+                        "keyDown" => self.plugins.dispatch_key(key_id, "keyDown"),
+                        "keyUp" => self.plugins.dispatch_key(key_id, "keyUp"),
+                        _ => {}
+                    }
                 }
                 DeviceEvent::Error(error) => {
                     if self.last_error.is_none() {
@@ -133,22 +151,88 @@ impl DeckApp {
         }
     }
 
+    fn image_for(&self, idx: usize) -> Option<&String> {
+        self.live_images.get(&idx).or_else(|| self.dump_images.get(&idx))
+    }
+
     fn paint_key(&self, idx: usize) {
-        if let Some(data) = self.dump_images.get(&idx) {
+        if let Some(data) = self.image_for(idx) {
             self.device.set_key(idx as u32, data.clone());
         }
     }
 
     fn paint_all(&self) {
-        for (idx, data) in &self.dump_images {
-            self.device.set_key(*idx as u32, data.clone());
+        for idx in 1..=COLUMNS * ROWS {
+            self.paint_key(idx);
+        }
+        eprintln!("[v2] deck pintada ({} teclas)", COLUMNS * ROWS);
+    }
+
+    fn poll_plugins(&mut self, ctx: &egui::Context) {
+        // Only poll plugin events if WebSocket server is active
+        if let Some(server) = &self.plugins.server {
+            while let Ok(event) = server.events.try_recv() {
+                use plugins::server::PluginEvent;
+                match event {
+                    PluginEvent::Registered { plugin } => {
+                        eprintln!("[v2] plugin listo: {plugin}");
+                    }
+                    PluginEvent::Image { context, image } => {
+                        let Some(key_index) = self.plugins.key_of_context(&context) else { continue };
+                        let data = strip_data_url(&image).to_string();
+                        if self.live_images.get(&key_index) == Some(&data) {
+                            continue;
+                        }
+                        let Some(color) = decode_image(&data) else { continue };
+                        if let Some(texture) = self.key_textures.get_mut(&key_index) {
+                            texture.set(color, egui::TextureOptions::LINEAR);
+                        } else {
+                            let texture = ctx.load_texture(
+                                format!("key-{key_index}"),
+                                color,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            self.key_textures.insert(key_index, texture);
+                        }
+                        self.device.set_key(key_index as u32, data.clone());
+                        self.live_images.insert(key_index, data);
+                    }
+                    PluginEvent::Title { context, title } => {
+                        if let Some(key_index) = self.plugins.key_of_context(&context) {
+                            self.last_plugin_log = Some(format!("título tecla {key_index}: \"{title}\""));
+                        }
+                    }
+                    PluginEvent::Log(message) => {
+                        self.last_plugin_log = Some(message);
+                    }
+                    PluginEvent::Error(error) => {
+                        self.last_plugin_log = Some(error);
+                    }
+                }
+            }
         }
     }
+}
+
+fn strip_data_url(image: &str) -> &str {
+    match image.find("base64,") {
+        Some(index) => &image[index + 7..],
+        None => image,
+    }
+}
+
+fn decode_image(data: &str) -> Option<egui::ColorImage> {
+    let bytes = BASE64.decode(data).ok()?;
+    let image = image::load_from_memory(&bytes).ok()?;
+    let rgba = image.to_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    Some(egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
 }
 
 impl eframe::App for DeckApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_device();
+        self.poll_plugins(ui.ctx());
         // The device thread is event driven; poll its channel a few times a
         // second so the badge and previews stay honest without busy looping.
         ui.ctx().request_repaint_after(Duration::from_millis(250));
@@ -201,13 +285,13 @@ impl eframe::App for DeckApp {
                             }
                         }
                         ui.add_space(14.0);
-                        let has_dump = self.dump_images.contains_key(&idx);
-                        ui.add_enabled_ui(has_dump, |ui| {
+                        let has_image = self.image_for(idx).is_some();
+                        ui.add_enabled_ui(has_image, |ui| {
                             if custom_button(ui, "Probar tecla", Btn::Primary) {
                                 self.paint_key(idx);
                             }
                         });
-                        if !has_dump {
+                        if !has_image {
                             ui.label(egui::RichText::new("Sin imagen de esta tecla todavía.").small().color(MUTED));
                         }
                     }
@@ -232,6 +316,19 @@ impl eframe::App for DeckApp {
                 }
                 if let Some(error) = &self.last_error {
                     ui.label(egui::RichText::new(error).small().color(DANGER));
+                }
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("PLUGINS").small().extra_letter_spacing(1.2).color(MUTED));
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        format!("plugins: {}", 
+                            self.plugins.server.as_ref().map(|s| s.port.to_string()).unwrap_or_else(|| "deshabilitado".to_string())
+                        )
+                    ).small().color(MUTED),
+                );
+                if let Some(log) = &self.last_plugin_log {
+                    ui.label(egui::RichText::new(log).small().color(MUTED));
                 }
                 ui.add_space(6.0);
                 ui.label(
