@@ -2,10 +2,10 @@
 
 **Objective:** grow the API beyond painting buttons: read the physical key
 presses, bind an action to each key, and run it.
-**Branch:** none — this workspace is not under version control, so there are no
-work-unit commits and no pull requests. The feature document and `CHANGELOG.md`
-are the record of this work.
-**Delivery strategy:** single delivery, no chain (no VCS to chain against).
+**Branch:** `main` of the private repository `Shoking01/shk-deck` (it was not
+under version control while this feature was written, so its evidence cites no
+commits). The feature document and `CHANGELOG.md` are the record of this work.
+**Delivery strategy:** single delivery, no chain.
 **Test runner:** `cargo test --workspace` and
 `cargo clippy --workspace --all-targets -- -D warnings` at the repo root;
 `cargo clippy --all-targets -- -D warnings` inside `crates/ss550-gui` (its own

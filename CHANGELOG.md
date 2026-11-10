@@ -7,6 +7,28 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Repository — the workspace is under version control
+- The controller is now `main` of the private repository
+  [`Shoking01/shk-deck`](https://github.com/Shoking01/shk-deck). The repository
+  previously held the older generation — Electron host, WebSocket SDK
+  transport, the `egui` app under `v2/`, probes — and shares no file with this
+  tree.
+- That generation is preserved unchanged in the tag **`archive/reard-v2`** and
+  in the branch history; the imported tree contains only the Rust/HID
+  controller, so `README.md` and the layout now describe what the project
+  actually is.
+- `.gitignore` covers the three workspace roots' `target/` directories: about
+  **9.5 GB** of build output in the working copy (3 GB root + 6.2 GB
+  `crates/ss550-gui` + 262 MB `crates/ss550-tray`) stays out of the repository.
+  85 source files and **875 KB** are tracked.
+- `crates/ss550-driver` and `crates/ss550-protocol` each carried an accidental
+  `.git` directory: zero commits, no remotes, an unborn `master`. They were
+  moved out of the tree (not deleted) so the workspace is one repository
+  instead of three.
+- Added a root `README.md`: what the app does, what is verified on hardware,
+  the crate layout, the three test/clippy commands (one per workspace root) and
+  the hardware-safety rules.
+
 ### GUI — background mode: tray, hidden window, start with Windows
 - Added `crates/ss550-tray`, the only crate in the project allowed to call
   Win32, with the lint exception declared and explained in its `Cargo.toml`.

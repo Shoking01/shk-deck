@@ -3,10 +3,8 @@
 **Objective:** the controller must live in the system tray: no window in the
 way, the deck stays awake, the bound keys keep working, and the app comes
 back only when asked.
-**Branch:** none — this workspace is not under version control, so there are
-no work-unit commits and no pull requests. This document and `CHANGELOG.md`
-are the record.
-**Delivery strategy:** single delivery, no chain (no VCS to chain against).
+**Branch:** `main` of the private repository `Shoking01/shk-deck`.
+**Delivery strategy:** single delivery, no chain.
 **Test runner:** `cargo test --workspace` and
 `cargo clippy --workspace --all-targets -- -D warnings` at the repo root;
 `cargo test --workspace` and `cargo clippy --all-targets -- -D warnings`
