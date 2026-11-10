@@ -68,6 +68,14 @@ messages; the file below is a human summary, not a substitute for
   engine, so a stored binding reads the same on every machine. Found by CI on
   its second run: `action::tests::the_summary_fits_on_a_key_tile` failed on
   Ubuntu and macOS and passed on Windows.
+- The same label is used in the "… exited with code 1" message, so the action
+  runner now shares that function instead of repeating the `file_name()` call.
+- `runner::exit_code_means_something` — the one program whose exit code is not
+  a failure, Explorer — read its argument only inside a `#[cfg(windows)]`
+  block, so the Linux and macOS builds reported an unused variable and CI's
+  `-D warnings` turned it into a build error. The Windows and non-Windows
+  answers are now separate functions, and the non-Windows one says in its
+  comment why it ignores the argument.
 
 ### Repository — every push is built, linted and audited
 - Added `.github/workflows/ci.yml`: `cargo fmt --check` across the three

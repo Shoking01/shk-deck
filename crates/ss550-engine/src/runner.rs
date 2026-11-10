@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use crate::action::Action;
+use crate::action::{file_label, Action};
 use crate::error::ActionError;
 
 /// Keeps a console window from flashing when a console program is launched.
@@ -115,10 +115,7 @@ fn launch(action: &Action) -> Result<Launched, ActionError> {
     })?;
 
     let label = match &action {
-        Action::Launch { program, .. } => program
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| program.display().to_string()),
+        Action::Launch { program, .. } => file_label(program),
         Action::OpenUrl { url } => url.clone(),
     };
 
@@ -130,18 +127,25 @@ fn launch(action: &Action) -> Result<Launched, ActionError> {
 }
 
 /// Whether the exit code of this program can be read as a failure.
+///
+/// Explorer is the one program whose exit code lies: asked to open something it
+/// hands the request to the running instance and leaves with a non-zero status
+/// even when the window opened. Everywhere else an exit code means what it
+/// says.
+#[cfg(windows)]
 fn exit_code_means_something(spec: &CommandSpec) -> bool {
-    #[cfg(windows)]
-    {
-        let name = std::path::Path::new(&spec.program)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if name == "explorer.exe" || name == "explorer" {
-            return false;
-        }
-    }
+    let name = std::path::Path::new(&spec.program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    !(name == "explorer.exe" || name == "explorer")
+}
+
+/// Everywhere else there is no program whose exit code lies, so the argument
+/// is not read.
+#[cfg(not(windows))]
+fn exit_code_means_something(_spec: &CommandSpec) -> bool {
     true
 }
 

@@ -201,7 +201,7 @@ pub fn validate_url(url: &str) -> Result<(), ActionError> {
 ///
 /// A value that is nothing but separators keeps its whole text rather than
 /// disappearing from the tile.
-fn file_label(program: &Path) -> String {
+pub(crate) fn file_label(program: &Path) -> String {
     let text = program.to_string_lossy();
     match text.rsplit(['\\', '/']).find(|segment| !segment.is_empty()) {
         Some(segment) => segment.to_string(),
