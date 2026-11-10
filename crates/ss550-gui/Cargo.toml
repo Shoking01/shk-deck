@@ -1,0 +1,18 @@
+[package]
+name = "ss550-gui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+description = "GPUI Kit desktop UI for the Redragon StreamCraft SS550 controller"
+license = "MIT OR Apache-2.0"
+
+# This crate is its own workspace root so the heavy GPUI dependency tree does
+# not slow down the driver/protocol workspace builds.
+[workspace]
+
+[dependencies]
+ss550-driver = { path = "../ss550-driver" }
+ss550-engine = { path = "../ss550-engine" }
+ss550-tray = { path = "../ss550-tray" }
+gpui-kit = { git = "https://github.com/longbridge/gpui-kit.git", tag = "v0.9.0" }
+raw-window-handle = "0.6"

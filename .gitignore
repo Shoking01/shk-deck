@@ -1,16 +1,19 @@
-# Dependencies
-node_modules/
+# Rust build output. There are three workspace roots (the repository root,
+# crates/ss550-gui and crates/ss550-tray), so this pattern is unanchored on
+# purpose and matches every `target/` directory.
+target/
 
-# Vendored third-party binaries (downloaded, not committed)
-third_party/
+# CodeGraph's local index: machine-specific, rebuilt from the sources.
+.codegraph/
 
-# Local captures with device identifiers
-probe/listener/probe-capture.jsonl
-
-# Logs and caches
+# Editor and OS noise.
+.vscode/
+.idea/
 *.log
+Thumbs.db
 
-# Debug image dumps
-host/last-setImage.png
-host/clock-*.png
-
+# Kept from the previous generation: they may come back with the vendored
+# WebSocket SDK or a Node tool, and a stray 200 MB node_modules is not worth
+# discovering in a diff.
+node_modules/
+third_party/

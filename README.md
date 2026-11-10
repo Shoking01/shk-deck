@@ -1,78 +1,103 @@
-# REA RD v2 — Native Stream Deck Host
+# streamcraft-rs
 
-A lightweight, **WebView2-free** Rust application for the Redragon Stream Craft SS550 / Mirabox StreamDeck.
-
-## Features
-
-- **Pure Rust** (egui UI, no Electron/WebView2)
-- **Low memory**: ~130 MB RAM idle
-- **Fast startup**: < 3 seconds  
-- **Plugin system**: Native `.exe` plugins via `settings.path`
-- **Launcher mode**: Open apps directly from deck keys
-
-## Project Structure
+A native controller for the **Redragon StreamCraft SS550** (15 LCD keys,
+`VID 0x0200 / PID 0x3000`). It replaces the vendor's *Stream Station*: no
+Electron, no WebView2, no WebSocket plugin host, no vendor service. Rust talks
+to the deck over HID directly.
 
 ```
-v2/                   # Main application (Rust)
-├─ Cargo.toml         # Release build
-├─ target/release/
-│  └─ reard_v2.exe    # Built executable
-├─ src/
-│  ├─ main.rs         # UI + device loop
-│  ├─ device.rs       # WebSocket SDK transport
-│  ├─ profile.rs      # Profile JSON loader
-│  ├─ widgets.rs      # hand-painted egui UI
-│  └─ plugins/mod.rs  # Plugin runtime (native launch)
-├─ legacy/
-│  ├─ electron-wrapper/  # Optional HTML support (needs Electron)
-│  └─ examples/            # Plugin templates + docs
-├─ host/last-setImage-key*.png  # Key preview images
-└─ ood/tasks/reard-v2.md # Development log / specs
+protocol ──▶ driver ──▶ engine ──▶ gui (GPUI Kit)
+                          │           │
+                          └───────────┴──▶ tray (Win32)
 ```
 
-## Quick Start
+## What works today — verified on hardware
 
-1. Build the app:
-   ```bash
-   cd v2
-   cargo build --release
-   ```
+| Area | State |
+| --- | --- |
+| Connect, wake, paint keys, clear | done, incl. the deck's boot re-enumeration and the 68.7 s idle reset |
+| Keep the deck awake | 500 ms heartbeat (`keepalive`, throttled to 2 s) |
+| Read key presses | both edges reported, host-side debounce policy |
+| Bind a key to an action | v1 catalogue is exactly **App** and **URL** |
+| Run the action | `.exe` by path, `.lnk` via `explorer`, `.bat`/`.cmd` via `cmd /C call`, URLs by scheme |
+| Background mode | tray icon, X hides the window, deck stays awake, keys keep working |
+| Start with Windows | opt-in, one `HKCU\...\Run` value, off by default |
+| Report a program that dies | watched for 6 s, failure shown in the status line |
 
-2. Start the SDK (required):
-   ```bash
-   cd third_party/websocket-sdk
-   ./StreamDockWebsocketSDK.exe -oem 293V3:0x0200:0x3000
-   ```
+Every launch route above was exercised on the real deck. What is *not* done is
+listed in [`CHANGELOG.md`](CHANGELOG.md#known-limitations--fase-1-close-out):
+profiles, plugin sandbox, hotplug notifications, async transport, fuzzing and
+the udev rules.
 
-3. Run the app:
-   ```bash
-   v2/target/release/reard_v2.exe
-   ```
+## Layout
 
-4. Deck connects automatically and shows static images from `host/last-setImage-key*.png`.
+| Path | What it is |
+| --- | --- |
+| `crates/ss550-protocol` | Pure HID codec. No I/O, no clock, no USB. Golden vectors + proptest |
+| `crates/ss550-driver` | Synchronous `hidapi` transport, caching, reconnect, heartbeat |
+| `crates/ss550-engine` | Bindings, persistence, URL/path validation, action runner |
+| `crates/ss550-gui` | The window (GPUI Kit). Its own workspace root |
+| `crates/ss550-tray` | Tray icon, `ShowWindow` hide/restore, logon entry. Its own workspace root, and the **only** crate allowed to call Win32 |
+| `crates/ss550-probe` | Diagnostics used to reverse-engineer the deck |
+| `docs/protocol/` | Wire format, descriptors, input events, image upload, incidents |
+| `docs/troubleshooting/` | The "backlit but black" runbook — read it before touching USB code |
+| `odd/tasks/` | Feature records: specs, tasks, and the evidence behind every claim |
 
-## Launcher Plugin Setup
+## Build and test
 
-In `host/profile.json`:
+Requires Rust **1.87+** and, for the GUI, a GPU-capable Windows machine.
 
-```json
-{
-  "instances": [
-    {
-      "plugin": "com.inginversa.launcher",
-      "action": "open-brave",
-      "column": 0,
-      "row": 0,
-      "settings": {
-        "path": "C:\\Program Files\\BraveSoftware\\Brave\\Application\\brave.exe"
-      }
-    }
-  ]
-}
+```bash
+# protocol / driver / engine / probe
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+
+# the window (pulls the GPUI tree, several minutes the first time)
+cargo test --workspace --manifest-path crates/ss550-gui/Cargo.toml
+cargo clippy --manifest-path crates/ss550-gui/Cargo.toml --all-targets -- -D warnings
+
+# the tray (Win32 + tray-icon)
+cargo test --manifest-path crates/ss550-tray/Cargo.toml
+cargo clippy --manifest-path crates/ss550-tray/Cargo.toml --all-targets -- -D warnings
 ```
 
-Key layout: 5×3 grid, column 0–4 left→right, row 0–2 bottom→top.
+The three roots are separate workspaces on purpose: the driver/protocol suite
+stays fast and never pays for GPUI's ~800 packages or the Win32 tree.
+
+```bash
+cargo run --manifest-path crates/ss550-gui/Cargo.toml
+cargo run --manifest-path crates/ss550-gui/Cargo.toml -- --hidden   # tray only
+```
+
+## Background mode
+
+The window is a settings panel, not the app. Closing it hides it; the process,
+the HID handle, the poll timer and the heartbeat all keep running, and the
+tray icon is the only way back and the only way out. `START WITH WINDOWS` writes
+one `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value for the current
+user and removes it again. Details in
+[`crates/ss550-gui/README.md`](crates/ss550-gui/README.md#background-mode).
+
+## Hardware safety
+
+Bad packets can leave the deck backlit but black, and from that point no host
+can paint it until it is fully power-cycled. Before sending anything new:
+
+1. Document the command in `docs/protocol/`.
+2. Pin it with a golden vector.
+3. Try it on a **test deck**, never the daily driver.
+
+If it already happened, follow
+[`docs/troubleshooting/deck-stuck.md`](docs/troubleshooting/deck-stuck.md):
+a 5-second replug is not enough, 60 seconds is.
+
+## Previous generation
+
+This repository used to hold an earlier architecture (Electron host, WebSocket
+SDK transport, an `egui` app under `v2/`). It is preserved, unchanged, in the
+tag **`archive/reard-v2`** and in this branch's history; the tree now describes
+only the Rust/HID controller.
 
 ## License
 
-MIT
+MIT OR Apache-2.0.

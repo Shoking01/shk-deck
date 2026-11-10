@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "crates/ss550-driver",
+    "crates/ss550-engine",
+    "crates/ss550-probe",
+    "crates/ss550-protocol",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.87"

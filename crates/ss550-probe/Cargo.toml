@@ -1,0 +1,12 @@
+[package]
+name = "ss550-probe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+description = "One-shot Fase 0 live-device probe harness for the Redragon StreamCraft SS550 (P2/G1 and P1B/G2)"
+license = "MIT"
+
+[dependencies]
+hidapi = "2.6"
+jpeg-encoder = "0.6"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Devices_HumanInterfaceDevice", "Win32_Security", "Win32_System_IO", "Win32_System_Threading"] }
