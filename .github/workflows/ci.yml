@@ -64,12 +64,11 @@ jobs:
           cargo test --workspace --locked
           cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: tray
-        # tray-icon's Linux backend is a GTK/AppIndicator application, which
-        # needs the matching -dev packages and a desktop session to mean
-        # anything. The app ships on Windows today, so the tray is built on
-        # Windows and macOS; the Linux job keeps the driver/protocol suite,
-        # which is the platform-independent part.
-        if: runner.os != 'Linux'
+        # The tray's real behaviour is Win32, and that is what the Windows job
+        # exercises. The crate still builds and tests on Ubuntu and macOS,
+        # where `tray-icon`, `winreg` and `windows` are target-gated and the
+        # crate's own stubs answer `TrayError::Unsupported`; running it there
+        # keeps those stubs compiling instead of rotting.
         run: |
           cargo test --locked --manifest-path crates/ss550-tray/Cargo.toml
           cargo clippy --all-targets --locked --manifest-path crates/ss550-tray/Cargo.toml -- -D warnings

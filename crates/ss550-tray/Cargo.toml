@@ -18,14 +18,17 @@ license = "MIT OR Apache-2.0"
 unsafe_code = "allow"
 
 [dependencies]
-tray-icon = "0.26"
-winreg = "0.55"
-
-[dev-dependencies]
-# The ignored round-trip test restores a logon entry it did not create.
-winreg = "0.55"
 
 [target.'cfg(windows)'.dependencies]
+# The notification-area icon is created by `tray-icon`'s Win32 backend, which
+# builds a hidden window and needs `Win32_UI_WindowsAndMessaging`; every other
+# platform gets the `Unsupported` stub in `tray::other_platform`, so the whole
+# dependency stays out of those builds.
+tray-icon = "0.26"
+# The logon entry lives in HKCU. `winreg` refuses to compile anywhere else,
+# which is the correct signal: the whole feature is Windows-only, and the
+# non-Windows stubs in `autostart` return `TrayError::Unsupported`.
+winreg = "0.55"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -33,3 +36,7 @@ windows = { version = "0.61", features = [
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# The ignored round-trip test restores a logon entry it did not create.
+winreg = "0.55"

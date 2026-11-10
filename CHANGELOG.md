@@ -83,10 +83,19 @@ messages; the file below is a human summary, not a substitute for
   running the protocol/driver/engine/probe suite with `clippy -D warnings`, the
   window built and linted on Windows, and `cargo audit` over all three
   `Cargo.lock` files.
-- The tray is built on Windows and macOS only: `tray-icon`'s Linux backend is a
-  GTK/AppIndicator application that needs the matching `-dev` packages and a
-  desktop session. The Linux job still runs the platform-independent suite, and
-  the job says so in a comment instead of implying a green run on all three.
+- The tray is built and tested on all three platforms. Its real behaviour is
+  Win32, and that is what the Windows job exercises; `tray-icon`, `winreg` and
+  `windows` are now target-gated in `crates/ss550-tray/Cargo.toml`, so the
+  Linux and macOS jobs build the crate's `TrayError::Unsupported` stubs without
+  pulling a GTK tree, and those stubs keep compiling instead of rotting.
+- Fixed: `winreg` was declared unconditionally, and the crate refuses to build
+  anywhere but Windows (`compile_error!`), so the macOS job died before it
+  reached a single test. Declaring a Windows-only dependency for every platform
+  was the bug; `tray-icon` had the same problem with a GTK price tag on Linux,
+  where only the stub is used.
+- Two `install` unit tests read `LOCALAPPDATA` and therefore only mean anything
+  on Windows; they are `#[cfg(windows)]` now, and the copy tests — which run
+  anywhere — are not.
 - Added `.github/dependabot.yml` for the three lock files and the actions
   themselves.
 - `ss550-driver` gained `#![deny(unsafe_code)]`. It calls no `unsafe` — `hidapi`

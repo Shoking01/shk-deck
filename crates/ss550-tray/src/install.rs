@@ -120,6 +120,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(windows)]
     fn the_install_folder_is_a_programs_folder_in_the_user_profile() {
         let dir = install_dir().expect("this test runs on a Windows machine with a profile");
         assert!(dir.ends_with(Path::new("Programs").join(PROGRAM_FOLDER)));
@@ -128,6 +129,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn the_installed_executable_is_named() {
         let exe = installed_executable().expect("the install folder is known");
         assert_eq!(
