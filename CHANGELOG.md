@@ -96,6 +96,10 @@ messages; the file below is a human summary, not a substitute for
 - Two `install` unit tests read `LOCALAPPDATA` and therefore only mean anything
   on Windows; they are `#[cfg(windows)]` now, and the copy tests — which run
   anywhere — are not.
+- Fixed: `TrayMessage::SetTooltip` carries a tooltip that only the Windows
+  icon can show, so the Linux and macOS builds reported a never-read field and
+  `-D warnings` turned it into a build error. The variant now says why the text
+  has no reader there.
 - Added `.github/dependabot.yml` for the three lock files and the actions
   themselves.
 - `ss550-driver` gained `#![deny(unsafe_code)]`. It calls no `unsafe` — `hidapi`

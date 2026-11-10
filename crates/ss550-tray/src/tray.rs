@@ -40,6 +40,11 @@ pub enum TrayCommand {
 #[derive(Debug)]
 enum TrayMessage {
     /// Replace the tooltip of the icon.
+    ///
+    /// Off Windows there is no icon to rename, so nothing reads the text
+    /// there; the message itself still travels, so the API behaves the same
+    /// on every platform.
+    #[cfg_attr(not(windows), allow(dead_code))]
     SetTooltip(String),
 }
 
