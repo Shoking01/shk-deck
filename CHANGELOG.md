@@ -59,6 +59,25 @@ messages; the file below is a human summary, not a substitute for
   the crate layout, the three test/clippy commands (one per workspace root) and
   the hardware-safety rules.
 
+### Dependencies — the bumps Dependabot wanted, applied one at a time
+- Every pull request Dependabot opened was applied by hand instead, one
+  commit per dependency, because they arrived in three overlapping pairs
+  (`winreg`, `windows`, `thiserror`) that contradicted each other, and all of
+  them were built against a `main` that had since changed.
+- `jpeg-encoder` 0.6 → 0.7, `thiserror` 1.0.69 → 2.0.21, `winreg` 0.55 → 0.56
+  and `windows` 0.61 → 0.62. Each one was verified before it was committed:
+  the root workspace's tests and clippy, the tray's tests and clippy for the
+  Windows, Linux and macOS targets. The error messages the user reads do not
+  change, because every format string stays the same.
+- **Both lock files move with every bump.** The workspace has three roots and
+  three lock files, and `ss550-gui` depends on the driver, the engine and the
+  tray by path, so its lock records their dependencies too. Dependabot's pull
+  requests only ever touched one lock file each; merging one of them alone
+  would have left the GUI job failing its `--locked` check.
+- `actions/checkout` 4 → 7 in the workflow. That removes the Node.js 20
+  deprecation warning every run printed; the other actions are already on
+  their newest major version.
+
 ### Removed — the legacy egui example
 - Deleted `crates/ss550-driver/examples/gui.rs` and the `eframe` dev-dependency
   that only it used. The window is GPUI Kit; the egui example was a debug tool
