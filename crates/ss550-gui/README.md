@@ -112,26 +112,39 @@ away without losing the deck.
 
 ### Start with Windows
 
-`START WITH WINDOWS` is **off by default**. Turning it on writes one value,
-`ss550-gui`, under
-`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, for the current user
-only: no installer, no administrator rights, no service. Turning it off removes
-the value again.
-
-The entry runs the executable with `--hidden`, so a logon start opens the
-controller with no window at all — it appears only in the tray. Started by hand
-the window opens as usual.
+`START WITH WINDOWS` is **off by default**. Turning it on copies the running
+executable to a folder of its own and registers *that* copy:
 
 ```text
-# the same thing the switch does, by hand
-ss550-gui.exe --hidden
+%LOCALAPPDATA%\Programs\ss550\ss550-gui.exe
 ```
 
-**Verified live**: the round trip writes, reads back, removes, and tolerates a
-second removal;
-`cargo test -p ss550-tray -- --ignored autostart` runs it against the real key
-(it is ignored because it writes to `HKCU`, and it puts back a pre-existing
-entry).
+The registration is one value, `ss550-gui`, under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, for the current user
+only: no installer, no administrator rights, no service. Turning the switch off
+removes the value; the copied executable stays until you delete the folder,
+which is a complete uninstall.
+
+The copy is the point. Registering `current_exe()` would pin the entry to
+whatever binary happened to be running — usually `target\debug\ss550-gui.exe`,
+which the next `cargo clean` deletes — and Windows would then fail at sign-in
+while the app kept reporting the feature as on.
+
+- The entry runs the installed copy with `--hidden`, so a logon start opens the
+  controller with no window at all: it appears only in the tray.
+- At startup the app reads what Windows would actually start and checks that
+  the file is there. An entry that points at a missing file shows as **off**
+  with a note naming the path, instead of a switch that lies.
+- A failure while installing or registering leaves the switch off and puts the
+  reason in the status line.
+
+**Verified live**: the switch produced
+`"...\AppData\Local\Programs\ss550\ss550-gui.exe" --hidden`, the copy is a
+running application, and the round trip (install, register, read back, detect a
+missing executable, remove, restore) passes as an ignored test:
+`cargo test -p ss550-tray -- --ignored` inside `crates/ss550-tray`. It is
+ignored because it writes to the real `HKCU` key and to `LOCALAPPDATA`, and it
+puts back anything it found there.
 
 ## Connection lifetime
 

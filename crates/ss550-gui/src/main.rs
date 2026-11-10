@@ -34,7 +34,7 @@ use gpui_kit::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use ss550_driver::{ButtonImage, ButtonState, Device, LONG_CONNECT_TIMEOUT};
 use ss550_engine::{Action, ActionRunner, ActionStore, KeyNumber};
-use ss550_tray::{autostart, TrayCommand, TrayHost};
+use ss550_tray::{autostart, install, TrayCommand, TrayHost};
 
 /// Hex colour as GPUI `Hsla`.
 fn color(hex: u32) -> Hsla {
@@ -204,6 +204,8 @@ struct Controller {
     window_handle: AnyWindowHandle,
     /// Whether the controller starts with Windows.
     starts_with_windows: bool,
+    /// Why the sign-in entry does not work, when it is there but broken.
+    autostart_note: Option<String>,
 }
 
 impl Controller {
@@ -262,7 +264,25 @@ impl Controller {
             false
         });
 
-        let starts_with_windows = autostart::is_enabled().unwrap_or(false);
+        // A registration is not the same as a working one: the switch must
+        // never say "on" while Windows would try to start a file that is gone.
+        let (starts_with_windows, autostart_note) = match autostart::sign_in() {
+            Ok(autostart::SignIn::On(_)) => (true, None),
+            Ok(autostart::SignIn::Off) => (false, None),
+            Ok(autostart::SignIn::Broken { executable, .. }) => {
+                let missing = executable
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "a file it cannot name".to_string());
+                (
+                    false,
+                    Some(format!(
+                        "Windows still has a sign-in entry that points at {missing}, which is \
+                         not there. Turn START WITH WINDOWS on again to point it at this copy."
+                    )),
+                )
+            }
+            Err(error) => (false, Some(format!("Windows sign-in entry: {error}"))),
+        };
 
         // Two timers in one loop: key presses are polled fast, everything else
         // runs at the slower maintenance rate.
@@ -320,6 +340,7 @@ impl Controller {
             native,
             window_handle,
             starts_with_windows,
+            autostart_note,
         };
 
         // Look for the deck right away: its settle window starts the moment
@@ -611,28 +632,45 @@ impl Controller {
     }
 
     /// Turns the Windows sign-in entry on or off.
+    ///
+    /// Turning it on copies the running executable into the per-user install
+    /// folder first, so the entry never names a `target` folder that the next
+    /// build will delete.
     fn set_autostart(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        let outcome = if enabled {
+        let outcome: Result<Option<PathBuf>, String> = if enabled {
             std::env::current_exe()
                 .map_err(|error| error.to_string())
-                .and_then(|path| {
-                    autostart::enable(&autostart::command_line(&path, true))
-                        .map_err(|error| error.to_string())
+                .and_then(|running| {
+                    let installed =
+                        install::ensure_installed(&running).map_err(|error| error.to_string())?;
+                    autostart::enable(&autostart::command_line(&installed, true))
+                        .map_err(|error| error.to_string())?;
+                    Ok(Some(installed))
                 })
         } else {
-            autostart::disable().map_err(|error| error.to_string())
+            autostart::disable()
+                .map(|()| None)
+                .map_err(|error| error.to_string())
         };
 
         match outcome {
-            Ok(()) => {
+            Ok(installed) => {
                 self.starts_with_windows = enabled;
-                self.note = if enabled {
-                    "This controller now starts with Windows, hidden in the tray.".into()
-                } else {
-                    "This controller will no longer start with Windows.".into()
+                self.autostart_note = None;
+                self.note = match installed {
+                    Some(path) => format!(
+                        "This controller now starts with Windows from {}.",
+                        path.display()
+                    )
+                    .into(),
+                    None => "This controller will no longer start with Windows.".into(),
                 };
             }
             Err(error) => {
+                // The switch must never claim a state Windows does not have.
+                self.starts_with_windows =
+                    matches!(autostart::sign_in(), Ok(autostart::SignIn::On(_)));
+                self.autostart_note = None;
                 self.note = format!("Windows sign-in entry: {error}").into();
             }
         }
@@ -1131,12 +1169,16 @@ impl Render for Controller {
                     }),
             )
             .child(hint(
-                "Turn this on and Windows starts the controller when you sign in, \
-                 hidden in the tray. It writes one entry under \
-                 HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run, for this \
-                 user only, and removes it again when you turn this off.",
+                "Turn this on and Windows starts the controller when you sign in, hidden in \
+                 the tray. It copies the controller to %LOCALAPPDATA%\\Programs\\ss550, writes \
+                 one entry under HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run, for \
+                 this user only, and removes that entry again when you turn this off.",
                 cx,
             ));
+        let background_section = match &self.autostart_note {
+            Some(note) => background_section.child(hint(note.clone(), cx)),
+            None => background_section,
+        };
 
         let bindings_panel = div()
             .flex()

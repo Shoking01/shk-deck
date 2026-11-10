@@ -7,6 +7,36 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Fixed — "start with Windows" pointed at a build folder
+- The switch registered `std::env::current_exe()`, so turning it on from a
+  development build wrote
+  `"…\crates\ss550-gui\target\debug\ss550-gui.exe" --hidden` into
+  `HKCU\...\Run`. The next `cargo clean`, or moving the folder, broke the logon
+  entry permanently while the switch kept showing **on** and the status line
+  kept saying the controller would start with Windows. A promise the app could
+  not keep, failing silently.
+- Turning the switch on now copies the running executable to
+  `%LOCALAPPDATA%\Programs\ss550\ss550-gui.exe` (new `ss550_tray::install`) and
+  registers that path. No administrator rights, no service; deleting the folder
+  is a complete uninstall. Turning the switch off removes the registration and
+  leaves the copy alone, because toggling a setting is not uninstalling.
+- `autostart::sign_in()` answers what Windows would *actually* start:
+  `Off`, `On(path)`, or `Broken { command, executable }`. `is_enabled()` only
+  says whether a value exists, which is why the old switch could lie.
+- The window reads that state at startup: an entry naming a file that is gone
+  shows as **off**, with a note naming the missing path and telling the user to
+  turn the switch on again to point it at this copy. A failure while installing
+  also leaves the switch off instead of claiming success.
+- `autostart::command_line_executable()` reads the executable out of the command
+  line the app writes, quoted or not, with tests for the quoted path, the
+  unquoted one, an empty value and an unterminated quote.
+- Verified live: the switch produced
+  `"...\AppData\Local\Programs\ss550\ss550-gui.exe" --hidden`, the copied
+  executable starts and responds, and the ignored
+  `installed_autostart_round_trip` test covers install → register → read back →
+  detect a missing executable → remove → restore, cleaning both the registry and
+  `LOCALAPPDATA` afterwards.
+
 ### Repository — the workspace is under version control
 - The controller is now `main` of the private repository
   [`Shoking01/shk-deck`](https://github.com/Shoking01/shk-deck). The repository

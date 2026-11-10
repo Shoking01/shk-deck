@@ -32,6 +32,7 @@
 
 pub mod autostart;
 pub mod icon;
+pub mod install;
 mod tray;
 mod window;
 
@@ -47,6 +48,8 @@ pub enum TrayError {
     Windows(String),
     /// The registry could not be read or written.
     Registry(String),
+    /// The controller could not be copied into its install folder.
+    Install(String),
     /// The tray thread did not come up in time.
     Timeout,
     /// This platform has no notification area.
@@ -60,6 +63,12 @@ impl std::fmt::Display for TrayError {
             TrayError::Windows(message) => write!(formatter, "the window call failed: {message}"),
             TrayError::Registry(message) => {
                 write!(formatter, "the registry call failed: {message}")
+            }
+            TrayError::Install(message) => {
+                write!(
+                    formatter,
+                    "the controller could not be installed: {message}"
+                )
             }
             TrayError::Timeout => write!(formatter, "the tray icon did not start in time"),
             TrayError::Unsupported => write!(formatter, "this platform has no notification area"),

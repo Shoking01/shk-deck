@@ -73,9 +73,10 @@ cargo run --manifest-path crates/ss550-gui/Cargo.toml -- --hidden   # tray only
 
 The window is a settings panel, not the app. Closing it hides it; the process,
 the HID handle, the poll timer and the heartbeat all keep running, and the
-tray icon is the only way back and the only way out. `START WITH WINDOWS` writes
-one `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value for the current
-user and removes it again. Details in
+tray icon is the only way back and the only way out. `START WITH WINDOWS` copies
+the controller to `%LOCALAPPDATA%\Programs\ss550` and registers that copy — never
+a build folder that the next `cargo clean` deletes — then removes the
+registration again when switched off. Details in
 [`crates/ss550-gui/README.md`](crates/ss550-gui/README.md#background-mode).
 
 ## Hardware safety
