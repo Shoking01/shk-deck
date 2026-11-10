@@ -59,6 +59,29 @@ messages; the file below is a human summary, not a substitute for
   the crate layout, the three test/clippy commands (one per workspace root) and
   the hardware-safety rules.
 
+### Repository — every push is built, linted and audited
+- Added `.github/workflows/ci.yml`: `cargo fmt --check` across the three
+  workspace roots, a `windows-latest` / `ubuntu-latest` / `macos-latest` matrix
+  running the protocol/driver/engine/probe suite with `clippy -D warnings`, the
+  window built and linted on Windows, and `cargo audit` over all three
+  `Cargo.lock` files.
+- The tray is built on Windows and macOS only: `tray-icon`'s Linux backend is a
+  GTK/AppIndicator application that needs the matching `-dev` packages and a
+  desktop session. The Linux job still runs the platform-independent suite, and
+  the job says so in a comment instead of implying a green run on all three.
+- Added `.github/dependabot.yml` for the three lock files and the actions
+  themselves.
+- `ss550-driver` gained `#![deny(unsafe_code)]`. It calls no `unsafe` — `hidapi`
+  keeps the FFI inside its own crate — so it was a gap against `AGENTS.md` §2,
+  not a working allowance.
+- Fixed: `crates/ss550-probe/examples/raw_write.rs` called `CreateFileW`,
+  `WriteFile` and friends unconditionally, so examples — which
+  `cargo test --workspace` builds — failed to link on Linux and macOS with
+  `undefined symbol: CreateEventW`. The Win32 body now lives under
+  `#[cfg(windows)]` and other platforms get a `main` that says the probe only
+  runs on Windows. The timeout it measures belongs to `hidapi`'s Windows
+  backend, so there is nothing to port.
+
 ### GUI — background mode: tray, hidden window, start with Windows
 - Added `crates/ss550-tray`, the only crate in the project allowed to call
   Win32, with the lint exception declared and explained in its `Cargo.toml`.
