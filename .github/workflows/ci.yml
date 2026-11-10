@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch makes the older run pointless.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artefacts are useless on a fresh runner and only slow the cache.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      # Three workspace roots, three checks: the GUI and the tray are their own
+      # roots so the heavy dependency trees never enter the root workspace.
+      - name: Every workspace root is formatted
+        run: |
+          cargo fmt --all --check
+          cargo fmt --all --check --manifest-path crates/ss550-gui/Cargo.toml
+          cargo fmt --all --check --manifest-path crates/ss550-tray/Cargo.toml
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # hidapi builds its own C library and needs libudev's headers on Linux.
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            crates/ss550-tray -> target
+      - name: protocol, driver, engine, probe
+        run: |
+          cargo test --workspace --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: tray
+        # tray-icon's Linux backend is a GTK/AppIndicator application, which
+        # needs the matching -dev packages and a desktop session to mean
+        # anything. The app ships on Windows today, so the tray is built on
+        # Windows and macOS; the Linux job keeps the driver/protocol suite,
+        # which is the platform-independent part.
+        if: runner.os != 'Linux'
+        run: |
+          cargo test --locked --manifest-path crates/ss550-tray/Cargo.toml
+          cargo clippy --all-targets --locked --manifest-path crates/ss550-tray/Cargo.toml -- -D warnings
+
+  gui:
+    name: gui (windows)
+    # GPUI brings a whole GPU stack and system libraries of its own. It is
+    # built here on the only platform the app ships on today; when the Linux
+    # or macOS story becomes real, this job grows the matching setup step
+    # instead of pretending a green Windows build proves another platform.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/ss550-gui -> target
+      - name: window
+        run: |
+          cargo test --locked --manifest-path crates/ss550-gui/Cargo.toml
+          cargo clippy --all-targets --locked --manifest-path crates/ss550-gui/Cargo.toml -- -D warnings
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # One lock file per workspace root; auditing only the root would leave
+      # the GPUI tree and the Win32 tree unexamined.
+      - name: No known vulnerability in any lock file
+        run: |
+          cargo audit --file Cargo.lock
+          cargo audit --file crates/ss550-gui/Cargo.lock
+          cargo audit --file crates/ss550-tray/Cargo.lock

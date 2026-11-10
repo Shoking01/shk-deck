@@ -33,6 +33,9 @@
 //! ```
 //!
 
+// `hidapi` keeps the FFI inside its own crate; nothing here needs to call it.
+#![deny(unsafe_code)]
+
 mod connection;
 mod error;
 mod image;

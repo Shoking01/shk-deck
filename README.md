@@ -1,5 +1,7 @@
 # streamcraft-rs
 
+[![CI](https://github.com/Shoking01/shk-deck/actions/workflows/ci.yml/badge.svg)](https://github.com/Shoking01/shk-deck/actions/workflows/ci.yml)
+
 A native controller for the **Redragon StreamCraft SS550** (15 LCD keys,
 `VID 0x0200 / PID 0x3000`). It replaces the vendor's *Stream Station*: no
 Electron, no WebView2, no WebSocket plugin host, no vendor service. Rust talks
