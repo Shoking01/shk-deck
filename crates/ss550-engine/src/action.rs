@@ -1,6 +1,6 @@
 //! The actions a key can perform.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -106,16 +106,16 @@ impl Action {
     ///
     /// let action = Action::OpenUrl { url: "https://twitch.tv/dashboard".to_string() };
     /// assert_eq!(action.summary(), "OPEN twitch.tv");
+    ///
+    /// let action = Action::Launch {
+    ///     program: "C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe".into(),
+    ///     args: Vec::new(),
+    /// };
+    /// assert_eq!(action.summary(), "LAUNCH obs64.exe");
     /// ```
     pub fn summary(&self) -> String {
         match self {
-            Action::Launch { program, .. } => {
-                let name = program
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| program.to_string_lossy().into_owned());
-                format!("LAUNCH {name}")
-            }
+            Action::Launch { program, .. } => format!("LAUNCH {}", file_label(program)),
             Action::OpenUrl { url } => format!("OPEN {}", host_of(url)),
         }
     }
@@ -190,6 +190,23 @@ pub fn validate_url(url: &str) -> Result<(), ActionError> {
     }
 
     Ok(())
+}
+
+/// The last segment of a stored path, whichever separator it uses.
+///
+/// [`Path::file_name`] splits on the host's separator only, so a Windows path
+/// kept in the bindings file renders as one long segment when this crate is
+/// built for another platform. A key tile is display data: the same binding
+/// has to read the same on every machine, so both separators count.
+///
+/// A value that is nothing but separators keeps its whole text rather than
+/// disappearing from the tile.
+fn file_label(program: &Path) -> String {
+    let text = program.to_string_lossy();
+    match text.rsplit(['\\', '/']).find(|segment| !segment.is_empty()) {
+        Some(segment) => segment.to_string(),
+        None => text.into_owned(),
+    }
 }
 
 /// The host part of a URL, for the short label.
@@ -339,5 +356,33 @@ mod tests {
             url: "https://twitch.tv/dashboard".to_string(),
         };
         assert_eq!(url.summary(), "OPEN twitch.tv");
+    }
+
+    #[test]
+    fn a_tile_shows_the_last_segment_of_either_kind_of_path() {
+        // A binding written on Windows is display data everywhere: the label
+        // must not depend on the separator the host happens to recognise.
+        for path in [
+            "C:\\Program Files\\App\\app.exe",
+            "C:/Program Files/App/app.exe",
+            "/usr/local/bin/app.exe",
+            "app.exe",
+            "C:\\Program Files\\App\\app.exe\\",
+        ] {
+            let launch = Action::Launch {
+                program: PathBuf::from(path),
+                args: Vec::new(),
+            };
+            assert_eq!(launch.summary(), "LAUNCH app.exe", "for {path}");
+        }
+    }
+
+    #[test]
+    fn a_tile_never_loses_a_path_that_has_no_segment() {
+        let launch = Action::Launch {
+            program: PathBuf::from("\\\\"),
+            args: Vec::new(),
+        };
+        assert_eq!(launch.summary(), "LAUNCH \\\\");
     }
 }

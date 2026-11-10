@@ -59,6 +59,16 @@ messages; the file below is a human summary, not a substitute for
   the crate layout, the three test/clippy commands (one per workspace root) and
   the hardware-safety rules.
 
+### Fixed — a key tile's label depended on the host OS
+- `Action::summary()` took the program name with `Path::file_name`, which
+  splits on the host's separator only. The Windows build showed
+  `LAUNCH obs64.exe` for `C:\Program Files\obs-studio\bin\64bit\obs64.exe`; the
+  same binding, read on Linux or macOS, showed the whole path crammed onto the
+  tile. The label is display data and now splits on both `\` and `/` in the
+  engine, so a stored binding reads the same on every machine. Found by CI on
+  its second run: `action::tests::the_summary_fits_on_a_key_tile` failed on
+  Ubuntu and macOS and passed on Windows.
+
 ### Repository — every push is built, linted and audited
 - Added `.github/workflows/ci.yml`: `cargo fmt --check` across the three
   workspace roots, a `windows-latest` / `ubuntu-latest` / `macos-latest` matrix
