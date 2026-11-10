@@ -56,8 +56,10 @@ When reverse-engineering with REA MCP:
 4. **Never commit REA session logs containing serial numbers** to public repos
 5. **Correlate REA traces with code:** When implementing `set_button_image()`, link to the REA trace ID in the commit message
 
-### 6. GUI Development (egui)
-- Use `eframe` with `glow` backend
+### 6. GUI Development (GPUI Kit)
+- Use `gpui-kit` (GPUI) for the window. The old `eframe` example under
+  `crates/ss550-driver/examples/` is gone: GPUI owns the main thread, and the
+  notification-area icon lives in `ss550-tray`, not in the UI crate.
 - Target 60fps UI; throttle device updates to 30fps
 - All icons must be pre-processed to device-native format (no runtime conversion in hot path)
 - Support keyboard navigation (Tab order, Enter to confirm)

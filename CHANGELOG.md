@@ -59,6 +59,22 @@ messages; the file below is a human summary, not a substitute for
   the crate layout, the three test/clippy commands (one per workspace root) and
   the hardware-safety rules.
 
+### Removed — the legacy egui example
+- Deleted `crates/ss550-driver/examples/gui.rs` and the `eframe` dev-dependency
+  that only it used. The window is GPUI Kit; the egui example was a debug tool
+  from the generation before it, and the driver no longer needs a second UI
+  stack.
+- The root `Cargo.lock` loses the whole egui/winit tree with it (about 800
+  lines), and `cargo test --workspace` no longer compiles a second GUI stack to
+  run the deck's unit tests.
+- `AGENTS.md` §6 said "GUI Development (egui) — use `eframe` with `glow`
+  backend", which had stopped being true when the window moved to GPUI Kit. It
+  says so now.
+- This also settles Dependabot's `eframe 0.29 → 0.37` pull request, which
+  could not have been merged: eframe 0.37 replaced `eframe::App::update` with
+  `eframe::App::ui`, so the example no longer compiled, and eframe 0.37
+  requires Rust 1.95 against the project's declared MSRV of 1.87.
+
 ### Fixed — a key tile's label depended on the host OS
 - `Action::summary()` took the program name with `Path::file_name`, which
   splits on the host's separator only. The Windows build showed

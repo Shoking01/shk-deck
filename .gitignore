@@ -17,3 +17,7 @@ Thumbs.db
 # discovering in a diff.
 node_modules/
 third_party/
+
+# The tooling's own cache: the skill registry it resolves before a task. It is
+# not project content and it changes on its own.
+.atl/
