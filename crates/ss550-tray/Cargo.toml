@@ -28,7 +28,7 @@ tray-icon = "0.26"
 # The logon entry lives in HKCU. `winreg` refuses to compile anywhere else,
 # which is the correct signal: the whole feature is Windows-only, and the
 # non-Windows stubs in `autostart` return `TrayError::Unsupported`.
-winreg = "0.55"
+winreg = "0.56"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -39,4 +39,4 @@ windows = { version = "0.61", features = [
 
 [target.'cfg(windows)'.dev-dependencies]
 # The ignored round-trip test restores a logon entry it did not create.
-winreg = "0.55"
+winreg = "0.56"
