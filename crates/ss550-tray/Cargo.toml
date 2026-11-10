@@ -29,7 +29,7 @@ tray-icon = "0.26"
 # which is the correct signal: the whole feature is Windows-only, and the
 # non-Windows stubs in `autostart` return `TrayError::Unsupported`.
 winreg = "0.56"
-windows = { version = "0.61", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",

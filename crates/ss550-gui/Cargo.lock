@@ -6443,7 +6443,7 @@ name = "ss550-tray"
 version = "0.1.0"
 dependencies = [
  "tray-icon",
- "windows 0.61.3",
+ "windows 0.62.2",
  "winreg",
 ]
 
