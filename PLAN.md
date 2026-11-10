@@ -1,272 +1,277 @@
-# PLAN.MD — StreamCraft SS550 Native Rust Controller
+# PLAN.md — StreamCraft SS550 Native Rust Controller
 
-## 1. Project Overview
+**Status: 2026-11-10 — v1 works on the real deck. This document is what is
+left to do, not what was once intended.**
 
-**Goal:** Build a native, cross-platform desktop application in Rust to fully control the Redragon StreamCraft SS550 stream controller (15 LCD buttons, 6 profiles), replacing the official "Stream Station" software.
+The controller connects to the SS550, keeps it awake, shows its 15 keys, and
+runs one of two actions when a key is pressed. It lives in the notification
+area, so it behaves like ordinary Stream Deck software: no window in the way,
+the deck never sleeps, the keys never stop working. What is still missing is
+the safety net around new protocol commands, a real release build, and the
+hardware-in-loop proof.
 
-**Why:** The official Redragon software is outdated, Windows/macOS-only, and closed-source. A native Rust app gives us performance, safety, and full control.
+`README.md` is the user-facing truth. This file is the engineering truth: the
+decisions that are locked, the phases as they actually stand, and the order in
+which the remaining work should be done.
 
-**Hardware Target:**
-- Redragon StreamCraft SS550 (USB VID:PID `0200:1000`)
-- Redragon StreamCraft SS550 v3 (USB VID:PID `0200:3000`)
-- 15 LCD buttons, 6 customizable profiles, USB interface
+---
 
-## 2. Tech Stack Decision
+## 1. What this is
 
-| Component | Choice | Rationale |
-|-----------|--------|-----------|
-| Language | Rust (edition 2021, MSRV 1.87+) | Memory safety, performance, ecosystem |
-| GUI Framework | **egui** (primary) | Immediate-mode, cross-platform, rapid iteration, excellent for control-panel style UIs |
-| GUI Alternative | GPUI (fallback) | If native performance or Zed-style UI is needed later; note GPUI is currently macOS/Linux-focused |
-| USB Communication | `nusb` or `rusb` | Modern async USB HID communication |
-| Image Processing | `image`, `imageproc` | Resize/format icons for LCD (typically 72x72 or similar per button) |
-| Async Runtime | `tokio` | Async USB I/O and plugin event loops |
-| Serialization | `serde`, `toml`, `json` | Profile/config persistence |
-| Plugin System | `libloading` (dynamic) or WASM (`wasmtime`) | Extensible actions (OBS, Twitch, etc.) |
+**Goal.** A native, cross-platform desktop application in Rust that fully
+controls the Redragon StreamCraft SS550 (15 LCD keys, 6 profiles), replacing
+the vendor's *Stream Station*.
 
-**Decision: Use egui.** It is the most mature immediate-mode Rust GUI, works on Windows/macOS/Linux, and is ideal for a control-panel application. GPUI can be evaluated in Phase 5 if needed.
+**Why.** The vendor software is outdated, Windows/macOS-only and closed-source.
+A native app gives performance, safety and full control of the device.
 
-## 3. Architecture
+**Hardware target.** Redragon StreamCraft SS550, USB `VID 0x0200 / PID 0x3000`
+(v3), 15 LCD buttons, 6 profiles.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     UI Layer (egui)                          │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────────┐  │
-│  │ Button   │ │ Profile  │ │ Icon     │ │ Plugin        │  │
-│  │ Grid     │ │ Manager  │ │ Editor   │ │ Marketplace   │  │
-│  └──────────┘ └──────────┘ └──────────┘ └───────────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│                   Core Business Logic                        │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────────┐  │
-│  │ Profile  │ │ Action   │ │ Icon     │ │ Event         │  │
-│  │ Engine   │ │ Executor │ │ Renderer │ │ Dispatcher    │  │
-│  └──────────┘ └──────────┘ └──────────┘ └───────────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│                    Hardware Abstraction                      │
-│  ┌────────────────────────────────────────────────────────┐ │
-│  │              SS550 HID Protocol Driver                  │ │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌────────────────┐ │ │
-│  │  │ REA-MCP     │  │ Protocol    │  │ Device         │ │ │
-│  │  │ Analyzer    │  │ Encoder/    │  │ Discovery &    │ │ │
-│  │  │ (passive)   │  │ Decoder     │  │ Hotplug        │ │ │
-│  │  └─────────────┘  └─────────────┘  └────────────────┘ │ │
-│  └────────────────────────────────────────────────────────┘ │
-├─────────────────────────────────────────────────────────────┤
-│                    Plugin System (WASM)                      │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────────┐  │
-│  │ OBS      │ │ Twitch   │ │ System   │ │ Custom        │  │
-│  │ Plugin   │ │ Plugin   │ │ Monitor  │ │ Plugins       │  │
-│  └──────────┘ └──────────┘ └──────────┘ └───────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+---
+
+## 2. Decisions that are locked
+
+These were decided with the code in front of us. Reopening one is a change of
+direction, not a detail.
+
+| Area | Decision | Why |
+| --- | --- | --- |
+| GUI | **GPUI Kit** (`gpui-kit` v0.9.0) | The window is a settings panel, not a game. The old egui example was a debug tool from the previous generation and was deleted (`ff37af8`). |
+| Transport | **`hidapi`, synchronous** | The byte-exact path came first. Async (`nusb`/`tokio`) is deferred and must keep the same `ss550-protocol` bytes. |
+| Tray | **`tray-icon` 0.26 + Win32** | `tray-icon` is purpose-built for the notification area and builds its hidden window on its own thread, so the icon and the controller window never share a message loop. `native-windows-gui` would be a whole GUI toolkit for one icon. |
+| Win32 calls | **Only in `crates/ss550-tray`** | Every other crate keeps `#![deny(unsafe_code)]`. The exception is declared in that crate's `Cargo.toml`, with the reason. |
+| Action catalogue (v1) | **Exactly `Launch { program, args }` and `OpenUrl { url }`** | Every extra kind is a promise to keep. No macros, no key combos, no OBS, no Twitch. |
+| Plugins | **None in v1** | A WASM sandbox only after v1 is stable and the safety net exists. |
+| Workspace layout | **Three roots, three lock files** | The root suite stays fast and never pays for GPUI's ~800 packages or the Win32 tree. |
+| Toolchain | Rust 2021, **MSRV 1.87+**, zero clippy warnings | `eframe` 0.37 needs Rust 1.95; `jpeg-encoder` 0.7, `thiserror` 2.0, `winreg` 0.56 and `windows` 0.62 all fit. |
+
+---
+
+## 3. Architecture as built
+
+```text
+protocol ──▶ driver ──▶ engine ──▶ gui (GPUI Kit)
+                          │           │
+                          └───────────┴──▶ tray (Win32)
 ```
 
-## 4. Phases & Milestones
+| Crate | Owns | Rule |
+| --- | --- | --- |
+| `ss550-protocol` | Pure HID codec. Golden vectors, proptest. | No I/O, no clock, no USB. |
+| `ss550-driver` | `hidapi` transport: connect, keepalive, poll, paint, clear, reconnect, sleep. | All USB access in the project lives here. |
+| `ss550-engine` | `Action` (Launch / OpenUrl), validation, the JSON store, the action runner. | No UI, no USB. |
+| `ss550-gui` | The window. Its own workspace root. | Owns the main thread; the controller entity outlives the window. |
+| `ss550-tray` | Tray icon, `ShowWindow` hide/restore, the logon entry. Its own workspace root. | The only crate allowed to call Win32. |
+| `ss550-probe` | The diagnostics used to reverse-engineer the deck. | Not shipped. |
 
-### Phase 0: Research & Protocol Analysis (Weeks 1–2)
-**Objective:** Fully understand the SS550 USB protocol using REA MCP.
+Dependencies flow one way: `protocol → driver → engine → gui/tray`. No cycles.
 
-| Task | Deliverable |
-|------|-------------|
-| Set up REA MCP environment | Working REA instance with target acquisition |
-| Capture official Stream Station traffic | PCAP/REA session logs of all operations |
-| Document HID report descriptors | `docs/protocol/hid-descriptors.md` |
-| Document button image upload protocol | `docs/protocol/image-upload.md` |
-| Document button press events | `docs/protocol/input-events.md` |
-| Document profile switching | `docs/protocol/profiles.md` |
-| Identify LCD resolution & color format | `docs/protocol/display-specs.md` |
-| Create protocol test harness | Rust CLI tool to send raw packets |
+**Runtime shape.** The window is a settings panel. Closing it hides it
+(`ShowWindow(SW_HIDE)`, close veto, `QuitMode::Explicit`); the process, the HID
+handle, the 50 ms poll timer and the heartbeat all keep running. The tray icon
+is the only way back and the only way out. `START WITH WINDOWS` is off by
+default and registers an installed copy — never a build folder.
 
-**REA MCP Usage:**
-- Use REA to perform dynamic analysis of `StreamStation.exe` (Windows)
-- Hook USB HID APIs (`HidP_SendReport`, `WriteFile` on HID handles)
-- Trace image encoding (likely BMP/JPEG/RAW RGB)
-- Trace button press interrupt reports
-- Build a "protocol dictionary" of commands → responses
+---
 
-**Success Criteria:** Can replicate every basic function (set image, read button press, switch profile) with raw USB packets from a Rust test tool.
+## 4. Phase status
 
-### Phase 1: Core Hardware Driver (Weeks 3–5)
-**Objective:** Production-ready Rust crate for SS550 communication.
+| Phase | Scope | Status |
+| --- | --- | --- |
+| 0 | Research & protocol analysis (REA, descriptors, image upload, input events, display specs) | **done** |
+| 1 | Core driver (`ss550-protocol`, `ss550-driver`, `ss550-probe`) | **done**, with the deferred list in §5 |
+| 2 | Application shell (window, tray, background mode, autostart) | **done** |
+| 3 | Action engine (key press → action) | **done for v1** (`Launch`, `OpenUrl`) |
+| 4 | Icon & asset pipeline | **partial** (solid colour in the UI, JPEG accepted by the driver; no editor, no packs) |
+| 5 | Polish & distribution (release build, installer, updater, onboarding) | **pending** |
 
-> **Status (closed 2026-11-06):** `ss550-protocol` (pure) + `ss550-driver`
-> (sync `hidapi`) + `ss550-probe` live. Wire mathes `mirajazz` byte-exact;
-> protocol coverage **100% lines/functions/regions**. Items below marked
-> `PARTIAL`/`DEFERRED` are explicitly out of the close-out, not silently
-> dropped. See `CHANGELOG.md` and `docs/protocol/CHANGELOG.md` for the
-> honest list. No live driver session on a dedicated test device yet —
-> the probe path is verified, the driver bytes are not yet hardware-certified.
+### Phase 0 — Research & protocol analysis: done
 
-- [x] Create `ss550-protocol` crate: pure protocol encoding/decoding (no I/O)
-- [x] Create `ss550-driver` crate: sync USB I/O via `hidapi` (async `nusb` deferred — see below)
-- [~] Implement device discovery (VID:PID enumeration done; hotplug watcher deferred)
-- [x] Implement firmware version query (`CRT|VER` write + `get_input_report` parse; live parse pending)
-- [x] Implement button image upload (all 15 buttons; probe `--all` live-verified, driver not yet hardware-certified)
-- [ ] Implement button press event stream (interrupt IN endpoint) — deferred, decode unknown
-- [x] Implement brightness control (restore 100 after flush)
-- [ ] Implement profile/page switching — deferred, `insertSettings`/`ICO` path is static-only and unverified
-- [x] Implement sleep/wake display (wake `DIS+LIG0`, sleep `CRT|HAN`)
-- [~] Cross-platform support: Windows builds verified; macOS/Linux CI + udev rules deferred
+`docs/protocol/` holds the wire format, HID descriptors, image upload, input
+events, display specs, the profile path and the incident log. The byte math is
+byte-exact against the `mirajazz` reference implementation, and every documented
+command is covered by unit, doc and property tests.
 
-**Deviations decided at close-out (explicit, not drift):**
-- Transport is synchronous `hidapi`, not async `nusb`/`tokio`. Rationale: minimal
-  risk to land the byte-exact path; async is the Phase 2/deferred item, not a
-  regression. A future async crate must keep the same `ss550-protocol` bytes.
-- Safe-mode (`docs/protocol/verified.md`), simulator, fuzzer, and
-  `INCIDENTS.md` from AGENTS.md are intentionally not created yet — they are
-  gating items before sending the static-only profile path, not before closing
-  the plain-image path.
+### Phase 1 — Core driver: done
 
-**Success Criteria (original):** Integration tests pass on all 3 OSes; can
-render a full 15-button profile with custom images.
-**Status at close-out:** unit/doc/property tests pass (34) on Windows; probe
-`--all` renders 15 keys live; driver live render + multi-OS CI remain open
-and are the entry criteria for Fase 2 hardware work.
+`ss550-protocol` (pure) + `ss550-driver` (sync `hidapi`) + `ss550-probe` are
+live. Verified on the deck: connect, wake, paint, clear, the boot
+re-enumeration, the 68.7 s idle reset, and the 500 ms heartbeat (throttled to
+2 s) that keeps the device awake.
 
-### Phase 2: GUI Application Foundation (Weeks 6–8)
-**Objective:** Working egui application shell.
+Deferred on purpose, not dropped: async transport, hotplug watcher, profile
+push (`ICO`/`ULEND` is static-only), and the safety net of §5.
 
-- [ ] Project scaffolding (`cargo new`, workspace layout)
-- [ ] egui + eframe setup with custom theme (dark, streamer aesthetic)
-- [ ] Device connection status indicator
-- [ ] Virtual SS550 preview (render 15-button grid in UI)
-- [ ] Drag-and-drop icon assignment to virtual buttons
-- [ ] Profile manager (create, rename, delete, switch 6 profiles)
-- [ ] Config persistence (`~/.config/streamcraft-rs/profiles.toml`)
-- [ ] System tray integration (minimize to tray)
+### Phase 2 — Application shell: done
 
-**Success Criteria:** User can visually arrange a profile in the app and see it rendered on the physical device in real-time.
+The window is GPUI Kit and behaves like ordinary Stream Deck software: the X
+button hides it, the tray brings it back, `Quit` ends the process. Every
+control says what it does. The deck keeps working while the window is hidden.
 
-### Phase 3: Action Engine & Plugins (Weeks 9–12)
-**Objective:** Make buttons actually do things.
+### Phase 3 — Action engine: v1 done
 
-- [ ] Action type system: KeyCombo, TextInput, URL, Hotkey, LaunchApp, Multimedia, OBS, Twitch, System
-- [ ] Action executor with OS-level input injection (`enigo` crate)
-- [ ] OBS WebSocket plugin (scene switching, source toggle, streaming control)
-- [ ] Twitch chat integration (send messages, run ads)
-- [ ] System monitoring plugin (CPU/GPU/RAM to LCD as dynamic icons)
-- [ ] Multi-action sequences with delays
-- [ ] WASM plugin sandbox (optional advanced)
+The catalogue is exactly two actions:
 
-**Success Criteria:** All 15 buttons on all 6 profiles can trigger meaningful actions; OBS plugin works live.
+- `Launch { program, args }` — `.exe` by path, `.lnk` through `explorer`,
+  `.bat`/`.cmd` through `cmd /C call`; each argument is its own argv entry, so
+  an argument can never turn into a second command.
+- `OpenUrl { url }` — the scheme is required; a bare string is refused instead
+  of guessed at.
 
-### Phase 4: Icon & Asset Pipeline (Weeks 13–14)
-**Objective:** Rich visual customization.
+Bindings live in `%APPDATA%\ss550\bindings.json` (or `$SS550_CONFIG_DIR`), a
+broken file starts the app with no bindings and says why. A program that dies
+is watched for 6 s and reported in the status line.
 
-- [ ] Icon library browser (built-in packs)
-- [ ] Custom image import (PNG, JPG, SVG → device format)
-- [ ] Icon editor: crop, resize, add text/badges, GIF animation frames
-- [ ] GIF → animated button support (if protocol allows frame streaming)
-- [ ] Icon pack import/export (`.ss550pack` format)
+### Phase 4 — Icon & asset pipeline: partial
 
-**Success Criteria:** Users can create professional-looking button layouts in under 5 minutes.
+The driver takes solid colours and JPEG images (`ButtonImage::from_jpeg`). The
+UI paints the two colours it offers and clears keys. What does not exist yet:
+an icon browser, an editor, packs, import/export, and per-profile artwork.
 
-### Phase 5: Polish & Distribution (Weeks 15–16)
-**Objective:** Production release.
+### Phase 5 — Distribution: pending
 
-- [ ] Auto-updater (Tauri-style or custom)
-- [ ] Installer packages (MSI, DMG, AppImage/deb)
-- [ ] First-run onboarding wizard
-- [ ] Import profiles from official Stream Station (if format reverse-engineered)
-- [ ] Performance optimization (<50MB RAM, <1% CPU idle)
-- [ ] GPUI evaluation: prototype alternative UI (optional stretch goal)
-- [ ] Comprehensive documentation & user guide
+There is no release build, no installer and no updater. The copy currently
+registered for autostart is the **debug** binary, and it has to be replaced by
+a release build before it is a feature anyone should use.
 
-**Success Criteria:** v1.0 release with installers for all platforms.
+---
 
-## 5. REA MCP Integration Strategy
+## 5. What is **not** done
 
-Since REA MCP (Reverse Engineer Anything) is the key to understanding the closed protocol:
+Honest list. Items marked *out of scope for v1* are decisions, not debts.
 
-### 5.1 Setup
-```bash
-# REA MCP server configuration (conceptual)
-# Add to your MCP client (Claude Desktop, etc.):
-{
-  "mcpServers": {
-    "rea": {
-      "command": "rea-mcp-server",
-      "args": ["--target", "StreamStation.exe"]
-    }
-  }
-}
-```
+- **No safe-mode list** (`docs/protocol/verified.md`): the file that says which
+  commands are verified on hardware and which the driver may send.
+- **No fuzzing**: no `cargo fuzz` target on the protocol decoder.
+- **No simulator**: no `ss550-simulator` crate emulating the deck for CI.
+- **No hardware-in-loop tests**: nothing runs against a real deck from
+  `cargo test`; there is no `hardware-tests` feature.
+- **No profile push**: the host does not manage named sets of key images; the
+  `ICO`/`ULEND` path is static-only and unverified.
+- **No hotplug watcher and no automatic reconnect**: unplugging the deck needs
+  the `RECONNECT` button. The driver exposes `reconnect()`, `initialize()` and
+  `repaint_all()`; the app does not yet chain them on its own.
+- **No async transport**: `hidapi` is synchronous.
+- **No Linux packaging**: no udev rules, no `.desktop`, no AppImage/deb.
+- **No release build**: no installer, no updater, no first-run wizard.
+- **Performance budgets are unmeasured** (§7).
+- **Out of scope for v1**: OBS/Twitch plugins, a WASM sandbox, macros, key
+  combos, text injection, multi-action sequences, an icon editor.
 
-### 5.2 Analysis Workflow
-1. **Static Analysis:** Use REA to disassemble `StreamStation.exe`, locate USB HID write functions
-2. **Dynamic Tracing:** Hook `DeviceIoControl` / `HidD_SetFeature` calls with REA
-3. **Packet Capture:** Log all USB traffic during:
-   - Button image upload (send a solid red image → identify header)
-   - Button press (press physical button → identify interrupt report)
-   - Profile switch (change profile in software → identify command)
-4. **Differential Analysis:** Compare packets for button 1 vs button 2 to locate index bytes
-5. **Fuzzing:** Send mutated packets to device (safe ranges) to discover undocumented features
+---
 
-### 5.3 Protocol Documentation Template
-```markdown
-## Command: SET_BUTTON_IMAGE
-- **Direction:** Host → Device
-- **Endpoint:** 0x01 (Interrupt OUT)
-- **Report ID:** 0x02
-- **Payload Structure:**
-  - Byte 0: Report ID (0x02)
-  - Byte 1: Command (0x?? — from REA trace)
-  - Byte 2: Button index (0–14)
-  - Bytes 3–4: Image width (LE u16)
-  - Bytes 5–6: Image height (LE u16)
-  - Bytes 7+: Pixel data (BGR565 or RGB565)
-```
+## 6. Next milestones, in order
 
-## 6. Project Structure
+Each one is small enough to close on its own and leaves the project in a
+shippable state.
 
-```
-streamcraft-rs/
-├── Cargo.toml                 # Workspace root
-├── crates/
-│   ├── ss550-protocol/        # Pure protocol codec
-│   ├── ss550-driver/          # USB I/O driver
-│   ├── ss550-ui/              # egui application
-│   ├── action-engine/         # Action execution
-│   ├── plugin-api/            # Plugin trait definitions
-│   └── plugins/
-│       ├── obs/               # OBS WebSocket
-│       ├── twitch/            # Twitch chat/API
-│       └── system/            # System monitoring
-├── docs/
-│   ├── protocol/              # REA-derived protocol docs
-│   ├── development/           # This plan, AGENTS.md
-│   └── user/                  # End-user guide
-├── assets/
-│   ├── icons/                 # Built-in icon packs
-│   └── fonts/
-├── tests/
-│   ├── integration/           # Hardware-in-loop tests
-│   └── protocol/              # Codec unit tests
-└── scripts/
-    ├── rea-capture/           # REA MCP session helpers
-    └── package/               # Release packaging
-```
+### M1 — Safety net for the protocol (blocking for any new command)
 
-## 7. Risk Register
+The deck can be left backlit and black by a bad packet, and from that point no
+host can paint it until it is fully power-cycled. Before any *new* command is
+sent to the device:
 
-| Risk | Likelihood | Mitigation |
-|------|-----------|------------|
-| Protocol uses proprietary image compression | Medium | REA analysis will reveal; fallback to raw RGB565 |
-| Device requires encrypted/signed commands | Low | REA will show; SS550 is budget device, unlikely |
-| egui performance issues with 15 animated LCDs | Low | Throttle to 30fps; use texture atlases |
-| GPUI not ready for Windows | High | Stick with egui; GPUI is stretch goal only |
-| USB permissions on Linux | Medium | Ship udev rules; document setup |
-| Official software blocks device when running | Medium | Detect and warn user to close Stream Station |
+1. `docs/protocol/verified.md`: one row per command — what it does, the golden
+   vector, the trace it came from, and whether it was exercised on a test deck.
+2. The driver refuses to send anything that is not on that list (safe mode).
+3. `cargo fuzz` on the protocol decoder: panic-free on arbitrary input.
 
-## 8. Success Metrics
+**Done when** the fuzz target runs clean and every command the driver can send
+appears in `verified.md`.
 
-- [ ] 100% protocol coverage of official software features
-- [ ] <100ms latency from button press to action execution
-- [ ] <50MB RAM usage at idle
-- [ ] Zero crashes in 48-hour stress test
-- [ ] 3+ community plugins developed
+### M2 — A real release build
 
-## 9. References
+`cargo build --release` for the three roots, the GUI binary installed to
+`%LOCALAPPDATA%\Programs\ss550`, the autostart entry pointing at that copy,
+and the debug build out of the picture.
 
-- OpenDeck SS550 Plugin (MMonkeyKiller) — existing Rust implementation proving protocol viability
-- `elgato-streamdeck` crate — prior art for stream deck protocols in Rust
-- Redragon official specs: 15 buttons, 6 profiles, USB
+**Done when** the registered binary is the release build, it survives a
+sign-in cycle, and the installed copy is no longer the 53.7 MB debug binary
+that sits there today.
+
+### M3 — Hardware-in-loop tests and a simulator
+
+A `hardware-tests` feature with the tests behind `#[ignore]`, plus
+`ss550-simulator` so the same suite can run in CI without hardware.
+
+**Done when** `cargo test --features hardware-tests -- --ignored` runs against
+a real deck on a dedicated test unit, and the simulator passes the same suite.
+
+### M4 — Measure the performance budgets
+
+`hyperfine` for startup, a press→action latency probe, Task Manager/`ps` for
+RAM and CPU. Publish the numbers next to the targets.
+
+**Done when** §7 has a measured column, not a target column.
+
+### M5 — Profiles
+
+Host-side profile management: named sets of bindings and images, switching
+them on the deck, showing the active one in the window. The new commands only
+go out after M1 puts them on the verified list.
+
+**Done when** six named profiles exist and survive a restart.
+
+### M6 — Hotplug and auto-reconnect
+
+Watch for connect/disconnect, show the state, repaint on reconnect, and back
+off exponentially so a missing deck is never spammed.
+
+**Done when** unplugging and replugging the deck recovers by itself.
+
+### M7 — Linux packaging
+
+`99-streamcraft-ss550.rules`, a `.desktop` entry, an AppImage or deb.
+
+### M8 — Plugins (only after v1 is stable)
+
+A WASM sandbox first, native `libloading` second. Nothing before M1–M4 are
+closed.
+
+---
+
+## 7. Success metrics
+
+Targets come from `AGENTS.md` §10 and §12.
+
+| Metric | Target | Current |
+| --- | --- | --- |
+| CI on Windows, Linux, macOS | green | **green** (run `42763968848`, six jobs) |
+| Clippy | zero warnings, `-D warnings` | **green**, including the Linux and macOS targets |
+| Protocol coverage | every documented command | **green** (unit, doc, property tests) |
+| Cold startup | <500 ms | not measured |
+| Warm startup | <100 ms | not measured |
+| Button press → action | <50 ms | not measured (the deck itself reports in 150–270 ms) |
+| RAM at idle | <50 MB | not measured |
+| CPU at idle | <1 % | not measured |
+| Profile switch render | <200 ms for 15 keys | not measured |
+| 48 h stress run | zero crashes | not run |
+
+---
+
+## 8. Safety rules (non-negotiable)
+
+1. **Never send an untested raw command to the device.** A command is
+   documented in `docs/protocol/`, pinned by a golden vector, and tried on a
+   **test deck**, never on the daily driver.
+2. **When the deck goes backlit but black**, follow
+   `docs/troubleshooting/deck-stuck.md`. A 5-second replug is not enough;
+   60 seconds is.
+3. **Log USB traffic** in debug builds (`RUST_LOG=usb=trace`).
+4. **Back off exponentially** on an unexpected disconnect. Never spam reconnects.
+5. **Never commit REA session logs** that contain serial numbers.
+
+---
+
+## 9. Where the truth lives
+
+| Document | What it answers |
+| --- | --- |
+| `README.md` | What works today, and how to build and run it |
+| `CHANGELOG.md` | What changed, with the evidence; known limitations at the end |
+| `crates/ss550-gui/README.md` | Every control in the window, and the background mode |
+| `docs/protocol/` | The wire format, the evidence behind it, the incident log |
+| `docs/troubleshooting/deck-stuck.md` | The recovery runbook for a stuck deck |
+| `odd/tasks/` | Feature records: the specs, the tasks, the proof behind every claim |
+| `AGENTS.md` | The rules this project is built under |

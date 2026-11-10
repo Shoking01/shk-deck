@@ -7,6 +7,21 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Documentation — `PLAN.md` describes the project that exists
+- The old `PLAN.md` planned a different application: egui as the primary GUI
+  with GPUI as a fallback, a `ss550-ui` / `action-engine` / `plugins/` layout,
+  Phase 2 checkboxes for an egui shell that was never built, and a risk
+  register written before any of it existed. It now describes the project as
+  it is: the decisions that are locked (GPUI Kit, synchronous `hidapi`,
+  `tray-icon`, a two-action v1 catalogue, three workspace roots), the real
+  crate layout, the status of every phase, an honest list of what is **not**
+  done, and the eight remaining milestones in order.
+- The plan states plainly that the copy registered for autostart is still the
+  debug build, which is the first thing the release milestone fixes.
+- `.engram/config.json` pins this directory to the Engram project that already
+  holds the repository's history (`rea rd`). Without it, Engram resolved the
+  project from the git remote (`shk-deck`) and the two names disagreed.
+
 ### Fixed — "start with Windows" pointed at a build folder
 - The switch registered `std::env::current_exe()`, so turning it on from a
   development build wrote
