@@ -6407,7 +6407,7 @@ dependencies = [
  "image",
  "jpeg-encoder",
  "ss550-protocol",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -6417,7 +6417,7 @@ dependencies = [
  "serde",
  "serde_json",
  "ss550-driver",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -6435,7 +6435,7 @@ dependencies = [
 name = "ss550-protocol"
 version = "0.1.0"
 dependencies = [
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

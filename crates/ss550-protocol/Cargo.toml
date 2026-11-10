@@ -7,7 +7,7 @@ description = "Pure HID protocol codec for Redragon StreamCraft SS550 (no I/O, n
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-thiserror = "1.0"
+thiserror = "2.0"
 
 [dev-dependencies]
 proptest = "1.0"
