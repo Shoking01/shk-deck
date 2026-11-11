@@ -47,29 +47,31 @@ messages; the file below is a human summary, not a substitute for
 ### Added — a fuzz target for the protocol decoder
 - `fuzz/` is its own workspace root with a `cargo fuzz` target that feeds
   arbitrary bytes to the decoder: raw bytes, every prefix of them, the same
-  bytes inside a valid `ACK`/`OK` envelope, and an oversized buffer. It
+  bytes inside a valid `ACK`/`OK` envelope (at every length just above the
+  minimum, and at a bounded sample of the rest), and an oversized buffer. It
   asserts nothing about the result — a malformed report may be rejected; it
   may not panic.
-- Verified on nightly with AddressSanitizer, in four sessions that show what
-  each harness change cost and bought: 142,297 executions in 61 seconds at
-  2,332 per second before the enveloped sweep existed; 35,908 in 46 seconds
-  at 780 per second with an unbounded sweep; 46,335 in 46 seconds at 1,007
-  per second with the sweep bounded by a stride; and 38,455 in 46 seconds
-  at 835 per second with the lengths just above the minimum always visited.
-  No crash, no timeout and no out-of-memory in any of them. The decoder is
-  panic-free by construction (its length guard precedes every index), and
-  the fuzzer confirms it.
+- Which lengths the sweep visits is decided in `fuzz/src/lib.rs`, where
+  ordinary unit tests pin it: the minimum and the fifteen lengths above it
+  are always visited, the rest of the range is sampled at most 64 times per
+  input, and no length is ever below the minimum. `cargo test --manifest-path
+  fuzz/Cargo.toml` runs them.
+- Verified on nightly with AddressSanitizer. The edge counter rose with
+  every harness change — `cov: 75` before the enveloped sweep existed,
+  `cov: 94` with it, `cov: 115` with the lengths just above the minimum
+  always visited — and no run found a crash, a timeout or an out-of-memory.
+  The throughput that bought those edges fell from 2,332 executions per
+  second to 711, which is what the extra shapes cost. The session recorded
+  for the milestone: 32,725 executions in 46 seconds at 711 per second, peak
+  RSS 507 MB.
 - How to run it is in `fuzz/README.md`. On Windows the sanitizer runtime has
   to be on `PATH`, and `--sanitizer none` cannot link there: cargo-fuzz always
   applies sanitizer-coverage instrumentation whose section symbols do not
   exist in the COFF format.
-- The harness also feeds **enveloped reports**, at every length just above the
-  minimum report length and at a bounded sample of the rest. The prefix
-  sweep cuts random bytes, which do not spell `ACK`, and the framed input was
-  always full length, so the short-but-enveloped report — the one that
-  catches an off-by-one at the state byte — was never exercised. With it, the
-  fuzzer reaches edges it never reached before (libFuzzer's counters go from
-  `cov: 75 ft: 265` to `cov: 94 ft: 453`), still with no crash.
+- The enveloped reports are the ones that catch an off-by-one at the state
+  byte: the prefix sweep cuts random bytes, which do not spell `ACK`, and the
+  framed input was always full length, so the short-but-enveloped report was
+  never exercised before this.
 
 ### Documentation — `PLAN.md` describes the project that exists
 - The old `PLAN.md` planned a different application: egui as the primary GUI

@@ -13,6 +13,10 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 ss550-protocol = { path = "../crates/ss550-protocol" }
 
+[lib]
+name = "ss550_fuzz"
+path = "src/lib.rs"
+
 [[bin]]
 name = "decode_input_report"
 path = "fuzz_targets/decode_input_report.rs"

@@ -37,9 +37,10 @@ The five shapes exist for five different reasons:
   input is always full length. Without it the only reports that reach the key
   and state fields are long ones, and an off-by-one at the state byte — which
   needs a report that is just barely long enough — would never be exercised.
-  The sweep visits the sixteen lengths above the minimum one by one, and
+  The sweep always visits the minimum and the fifteen lengths above it, and
   samples the rest of the range at most 64 times per input, so the cost of an
-  input stays bounded.
+  input stays bounded. Which lengths those are is decided in `src/lib.rs` and
+  pinned by unit tests.
 - **The oversized buffer** catches a decoder that assumed the exact 512-byte
   report size instead of the minimum length it needs.
 
@@ -99,12 +100,12 @@ A clean run ends with something like this — the session recorded for the
 milestone, so the numbers can be checked against the changelog:
 
 ```text
-Done 38455 runs in 46 second(s)
-stat::number_of_executed_units: 38455
-stat::average_exec_per_sec:     835
-stat::new_units_added:          10
+Done 32725 runs in 46 second(s)
+stat::number_of_executed_units: 32725
+stat::average_exec_per_sec:     711
+stat::new_units_added:          6
 stat::slowest_unit_time_sec:    0
-stat::peak_rss_mb:              512
+stat::peak_rss_mb:              507
 ```
 
 and exit code `0`. A crash would land in `fuzz/artifacts/decode_input_report/`
@@ -113,6 +114,18 @@ and the run would exit non-zero.
 The corpus lives in `fuzz/corpus/decode_input_report/` and is kept between
 runs, so a later session starts from what an earlier one learned. Both the
 corpus and the artifacts are machine-local and are **not** committed.
+
+### The sweep's own tests
+
+The target is a binary, so it cannot be unit-tested. Which lengths the
+enveloped sweep visits therefore lives in `src/lib.rs`, with ordinary tests
+that pin it — the minimum and the fifteen lengths above it are always
+visited, the rest of the range is sampled at most 64 times per input, and no
+length is ever below the minimum:
+
+```bash
+cargo test --manifest-path fuzz/Cargo.toml
+```
 
 ### Windows and MSVC
 

@@ -15,69 +15,17 @@
 //!   oversized buffer.
 //! - `is_key_edge` on the same inputs.
 //! - `read_index_to_firmware_key` with every value the fuzzer can produce.
+//!
+//! Which lengths the envelope sweep visits is decided in `ss550_fuzz`, where
+//! ordinary unit tests pin it.
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use ss550_fuzz::{frame_report, swept_lengths};
 use ss550_protocol::{
     is_key_edge, parse_input_report, read_index_to_firmware_key, INPUT_REPORT_SIZE, REPORT_SIZE,
 };
-
-/// Number of payload bytes of a report that are not the envelope.
-const PAYLOAD_OFFSET: usize = 11;
-
-/// How many lengths above the minimum the sweep always visits, one by one.
-///
-/// An off-by-one at the state byte only shows in a report that is barely
-/// long enough, so those lengths are never sampled away.
-const NEAR_MINIMUM_LENGTHS: usize = 16;
-
-/// How many lengths the sweep samples from the rest of the range.
-///
-/// One report per length would make the cost of an input quadratic in its
-/// length, and a fuzzer buys inputs with time.
-const MAX_SWEEP_LENGTHS: usize = 64;
-
-/// Builds a report of `len` bytes with a valid `ACK`/`OK` envelope around `data`.
-///
-/// Random bytes never spell `ACK` at the front, so without this the fuzzer
-/// would only ever reach the envelope check. Here the key index and the state
-/// byte are driven with adversarial values instead.
-///
-/// `len` must be at least [`PAYLOAD_OFFSET`]: that is what keeps the key
-/// index at `[9]` and the state at `[10]` inside the buffer. The precondition
-/// is enforced, because a harness that panics looks exactly like a decoder
-/// crash to libFuzzer.
-fn frame_report(data: &[u8], len: usize) -> Vec<u8> {
-    assert!(
-        len >= PAYLOAD_OFFSET,
-        "an enveloped report needs at least {PAYLOAD_OFFSET} bytes, got {len}"
-    );
-
-    let mut report = vec![0u8; len];
-    report[0..3].copy_from_slice(b"ACK");
-    report[5..7].copy_from_slice(b"OK");
-
-    let mut rest = data;
-    if let Some(&state) = rest.first() {
-        report[10] = state;
-        rest = &rest[1..];
-    }
-    if let Some(&key) = rest.first() {
-        report[9] = key;
-        rest = &rest[1..];
-    }
-    let n = rest.len().min(len - PAYLOAD_OFFSET);
-    report[PAYLOAD_OFFSET..PAYLOAD_OFFSET + n].copy_from_slice(&rest[..n]);
-    report
-}
-
-/// Feeds one enveloped report of `len` bytes to both decoders.
-fn feed_enveloped(data: &[u8], len: usize) {
-    let report = frame_report(data, len);
-    let _ = parse_input_report(&report);
-    let _ = is_key_edge(&report);
-}
 
 fuzz_target!(|data: &[u8]| {
     // The report exactly as a hostile or broken device would send it.
@@ -94,24 +42,10 @@ fuzz_target!(|data: &[u8]| {
     // bytes, which essentially never spell ACK, and the full-length framed
     // input below is always long, so without this the only inputs that reach
     // the key and state fields are long ones.
-    //
-    // Every length just above the minimum is visited one by one, because that
-    // is where an off-by-one at the state byte shows. The rest of the range
-    // is sampled, at most MAX_SWEEP_LENGTHS per input, so the cost of an
-    // input stays bounded.
-    let max_len = data.len() + PAYLOAD_OFFSET;
-    let near_end = PAYLOAD_OFFSET + NEAR_MINIMUM_LENGTHS;
-    for len in PAYLOAD_OFFSET..=max_len.min(near_end) {
-        feed_enveloped(data, len);
-    }
-
-    let step = (max_len.saturating_sub(near_end) / MAX_SWEEP_LENGTHS).max(1);
-    let mut taken = 0;
-    let mut len = near_end + 1;
-    while len <= max_len && taken < MAX_SWEEP_LENGTHS {
-        feed_enveloped(data, len);
-        taken += 1;
-        len += step;
+    for len in swept_lengths(data.len()) {
+        let report = frame_report(data, len);
+        let _ = parse_input_report(&report);
+        let _ = is_key_edge(&report);
     }
 
     // The same bytes inside a full-length valid envelope, so the key index

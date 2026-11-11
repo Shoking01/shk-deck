@@ -177,10 +177,10 @@ A rule with an off switch is a rule that gets switched off.
     the buffer.
   - **The sweep was unbounded.** One report per length made the cost of an
     input quadratic in its length, and the recorded throughput dropped from
-    2,332 to 780 executions per second. The sweep now visits every length
-    just above the minimum one by one — that is where an off-by-one at the
-    state byte shows — and samples the rest of the range at most 64 times per
-    input, which brought the throughput back to 1,007 executions per second.
+    2,332 to 780 executions per second. The sweep now always visits the
+    minimum and the fifteen lengths above it — that is where an off-by-one at
+    the state byte shows — and samples the rest of the range at most 64 times
+    per input.
   - **Two documents described the behaviour incorrectly.** The changelog
     claimed the image cache changes only after the deck has been told; the
     truth is that it changes only after both clear packs are accepted, and
@@ -201,8 +201,8 @@ A rule with an off switch is a rule that gets switched off.
   important finding was a coverage regression the previous commit introduced:
   the bounded sweep sampled the lengths with a stride, so the reports just
   above the minimum — the ones an off-by-one at the state byte needs — were
-  skipped for any input longer than 64 bytes. The sweep now visits the
-  sixteen lengths above the minimum one by one and samples the rest with an
+  skipped for any input longer than 64 bytes. The sweep now always visits the
+  minimum and the fifteen lengths above it, and samples the rest with an
   exact counter, so the bound is what the documents say it is. The review
   also caught that the fuzz README still said "the same four sets" after the
   count had become five, that the changelog's "before the enveloped sweep"
@@ -214,3 +214,19 @@ A rule with an off switch is a rule that gets switched off.
   still on the author, the fuzz target still does not run in CI, and an
   enveloped report one byte below the minimum is still out of the harness's
   reach.
+- **L12 — 2026-11-10, the fourth review.** The fourth range went through the
+  same four lenses and came back **approved**, with no blocker. Its findings
+  were about my own bookkeeping and about the harness having no test: the
+  log attributed a throughput to a harness state that was not the one being
+  shipped, the log and the changelog described the sweep differently, and
+  nothing pinned which lengths the sweep visits — so a later edit could
+  reintroduce the very regression L11 fixed, with CI green. The sweep now
+  lives in `fuzz/src/lib.rs` with six unit tests that pin it, and those
+  tests found two real bugs while they were being written: the band was
+  truncated by the size of the input, so a short input never produced the
+  reports just above the minimum, and the sweep could produce 81 lengths
+  where the bound says 80. Both are fixed. The review's remaining findings
+  are the follow-ups they are: the gate still trusts the caller's label, the
+  registry rows are still on the author, the fuzz target still does not run
+  in CI, and an enveloped report one byte below the minimum is still out of
+  the harness's reach.
