@@ -100,12 +100,12 @@ A clean run ends with something like this — the session recorded for the
 milestone, so the numbers can be checked against the changelog:
 
 ```text
-Done 32725 runs in 46 second(s)
-stat::number_of_executed_units: 32725
-stat::average_exec_per_sec:     711
+Done 30059 runs in 46 second(s)
+stat::number_of_executed_units: 30059
+stat::average_exec_per_sec:     653
 stat::new_units_added:          6
 stat::slowest_unit_time_sec:    0
-stat::peak_rss_mb:              507
+stat::peak_rss_mb:              509
 ```
 
 and exit code `0`. A crash would land in `fuzz/artifacts/decode_input_report/`
@@ -118,14 +118,18 @@ corpus and the artifacts are machine-local and are **not** committed.
 ### The sweep's own tests
 
 The target is a binary, so it cannot be unit-tested. Which lengths the
-enveloped sweep visits therefore lives in `src/lib.rs`, with ordinary tests
-that pin it — the minimum and the fifteen lengths above it are always
-visited, the rest of the range is sampled at most 64 times per input, and no
-length is ever below the minimum:
+enveloped sweep visits, and how the envelope is built, therefore live in
+`src/lib.rs`, with ordinary tests that pin them — the minimum and the fifteen
+lengths above it are always visited, the rest of the range is sampled at most
+64 times per input, and no length is ever below the minimum:
 
 ```bash
-cargo test --manifest-path fuzz/Cargo.toml
+cargo test --manifest-path fuzz/Cargo.toml --lib
 ```
+
+The `--lib` is what keeps the libFuzzer binary out of the build: it is
+declared `test = false` in `Cargo.toml`, and the command needs neither
+nightly nor the sanitizer runtime.
 
 ### Windows and MSVC
 

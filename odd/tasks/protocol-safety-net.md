@@ -221,12 +221,31 @@ A rule with an off switch is a rule that gets switched off.
   shipped, the log and the changelog described the sweep differently, and
   nothing pinned which lengths the sweep visits — so a later edit could
   reintroduce the very regression L11 fixed, with CI green. The sweep now
-  lives in `fuzz/src/lib.rs` with six unit tests that pin it, and those
-  tests found two real bugs while they were being written: the band was
-  truncated by the size of the input, so a short input never produced the
-  reports just above the minimum, and the sweep could produce 81 lengths
-  where the bound says 80. Both are fixed. The review's remaining findings
-  are the follow-ups they are: the gate still trusts the caller's label, the
-  registry rows are still on the author, the fuzz target still does not run
-  in CI, and an enveloped report one byte below the minimum is still out of
-  the harness's reach.
+  lives in `fuzz/src/lib.rs` with unit tests that pin it, and those tests
+  found real bugs while they were being written: the band was truncated by
+  the size of the input, so a short input never produced the reports just
+  above the minimum, and the sweep could produce 81 lengths where the bound
+  says 80. Both are fixed. The review's remaining findings are the follow-ups
+  they are: the gate still trusts the caller's label, the registry rows are
+  still on the author, the fuzz target still does not run in CI, and an
+  enveloped report one byte below the minimum is still out of the harness's
+  reach.
+- **L13 — 2026-11-10, the fifth review.** The fifth range came back
+  **approved** as well, with no blocker, and it found a hole in the pins
+  themselves: none of the tests asserted that the sweep visits any length
+  *above* the band, so deleting the sampling loop would have left them all
+  green while the harness stopped feeding enveloped reports longer than 26
+  bytes — the exact class of regression L11 fixed. One of the six tests was
+  also vacuous (it compared a pure function with itself) and another
+  contradicted the rule the code follows: the band is visited even when it is
+  longer than the input allows, because a report is zero padded. The pins are
+  now eight tests that each assert something the implementation could get
+  wrong: the band is complete, the sweep reaches above it, the sampled
+  lengths stay within what the input can fill, the total stays inside the
+  bound, no length is below the minimum, no length is visited twice, the
+  envelope lands where the layout says, and a too short report is refused
+  instead of accepted. The two offsets the layout depends on are named
+  constants now, so the implementation and the test cannot drift apart.
+  The review also asked for the throughput trail to name the harness each
+  number came from, and for the documented test command to be the one that
+  does not need the sanitizer runtime. Both are done.

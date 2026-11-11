@@ -2,18 +2,27 @@
 //!
 //! The target itself lives in `fuzz_targets/decode_input_report.rs` and
 //! cannot be unit-tested — a libFuzzer target is a binary with `#![no_main]`.
-//! Everything that decides *which* inputs the decoder sees lives here, so it
-//! can be pinned by ordinary tests:
+//! The two decisions that shape the enveloped inputs therefore live here, so
+//! they can be pinned by ordinary tests:
 //!
 //! ```text
-//! cargo test --manifest-path fuzz/Cargo.toml
+//! cargo test --manifest-path fuzz/Cargo.toml --lib
 //! ```
+//!
+//! The target keeps two other steps of its own, which are not shaped here:
+//! the prefix sweep and the full-length envelope.
 
 /// Number of payload bytes of a report that are not the envelope.
 ///
-/// The decoder reads the key index at `[9]` and the state at `[10]`, so a
-/// report shorter than this cannot carry them.
+/// The decoder reads the key index at [`KEY_INDEX_OFFSET`] and the state at
+/// [`STATE_OFFSET`], so a report shorter than this cannot carry them.
 pub const PAYLOAD_OFFSET: usize = 11;
+
+/// Where the key index sits in a report.
+pub const KEY_INDEX_OFFSET: usize = 9;
+
+/// Where the state byte sits in a report.
+pub const STATE_OFFSET: usize = 10;
 
 /// How many lengths the sweep always visits, starting at the minimum.
 ///
@@ -34,9 +43,9 @@ pub const MAX_SWEEP_LENGTHS: usize = 64;
 /// byte are driven with adversarial values instead.
 ///
 /// `len` must be at least [`PAYLOAD_OFFSET`]: that is what keeps the key
-/// index at `[9]` and the state at `[10]` inside the buffer. The precondition
-/// is enforced, so a caller that gets it wrong gets a clear message instead
-/// of an index panic — in a harness, libFuzzer reports a panic as a crash,
+/// index and the state byte inside the buffer. The precondition is
+/// enforced, so a caller that gets it wrong gets a clear message instead of
+/// an index panic — in a harness, libFuzzer reports a panic as a crash,
 /// which is the one failure this target must not confuse with a decoder bug.
 pub fn frame_report(data: &[u8], len: usize) -> Vec<u8> {
     assert!(
@@ -50,11 +59,11 @@ pub fn frame_report(data: &[u8], len: usize) -> Vec<u8> {
 
     let mut rest = data;
     if let Some(&state) = rest.first() {
-        report[10] = state;
+        report[STATE_OFFSET] = state;
         rest = &rest[1..];
     }
     if let Some(&key) = rest.first() {
-        report[9] = key;
+        report[KEY_INDEX_OFFSET] = key;
         rest = &rest[1..];
     }
     let n = rest.len().min(len - PAYLOAD_OFFSET);
@@ -73,7 +82,7 @@ pub fn frame_report(data: &[u8], len: usize) -> Vec<u8> {
 /// The band does not depend on the size of the input: a report is zero
 /// padded, so a report longer than the input is still a shape worth feeding.
 pub fn swept_lengths(input_len: usize) -> Vec<usize> {
-    let max_len = input_len + PAYLOAD_OFFSET;
+    let max_len = input_len.saturating_add(PAYLOAD_OFFSET);
     let band_end = PAYLOAD_OFFSET + BAND_LENGTHS - 1;
 
     let mut lengths = Vec::with_capacity(BAND_LENGTHS + MAX_SWEEP_LENGTHS);
@@ -98,19 +107,9 @@ pub fn swept_lengths(input_len: usize) -> Vec<usize> {
 mod tests {
     use super::*;
 
-    /// Inputs of every interesting size: empty, shorter than the envelope,
-    /// exactly at the bound, and far past it.
-    const INPUT_LENGTHS: [usize; 6] = [0, 1, 10, 64, 65, 4096];
-
-    #[test]
-    fn the_minimum_length_is_always_visited() {
-        for input_len in INPUT_LENGTHS {
-            assert!(
-                swept_lengths(input_len).contains(&PAYLOAD_OFFSET),
-                "the minimum length is missing for an input of {input_len}"
-            );
-        }
-    }
+    /// Inputs of every interesting size: empty, one byte, shorter than the
+    /// envelope, exactly at the end of the band, one past it, and far beyond.
+    const INPUT_LENGTHS: [usize; 6] = [0, 1, 10, BAND_LENGTHS, BAND_LENGTHS + 1, 4096];
 
     #[test]
     fn every_length_of_the_band_is_always_visited() {
@@ -122,6 +121,36 @@ mod tests {
                     lengths.contains(&wanted),
                     "length {wanted} is missing for an input of {input_len}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn the_sweep_visits_lengths_above_the_band() {
+        let band_end = PAYLOAD_OFFSET + BAND_LENGTHS - 1;
+        let lengths = swept_lengths(4096);
+        assert!(
+            lengths.iter().any(|length| *length > band_end),
+            "no length above the band was visited"
+        );
+    }
+
+    #[test]
+    fn the_sampled_lengths_stay_within_the_input() {
+        // The band is visited even when it is longer than the input allows
+        // — a report is zero padded, so a longer report is still a shape
+        // worth feeding. The sampled lengths, on the other hand, never exceed
+        // what the input can fill.
+        let band_end = PAYLOAD_OFFSET + BAND_LENGTHS - 1;
+        for input_len in INPUT_LENGTHS {
+            let max_len = input_len.saturating_add(PAYLOAD_OFFSET);
+            for length in swept_lengths(input_len) {
+                if length > band_end {
+                    assert!(
+                        length <= max_len,
+                        "{length} is longer than the input of {input_len} allows"
+                    );
+                }
             }
         }
     }
@@ -148,8 +177,13 @@ mod tests {
     }
 
     #[test]
-    fn the_sweep_is_deterministic() {
-        assert_eq!(swept_lengths(300), swept_lengths(300));
+    fn the_sweep_never_repeats_a_length() {
+        for input_len in INPUT_LENGTHS {
+            let lengths = swept_lengths(input_len);
+            let mut sorted = lengths.clone();
+            sorted.dedup();
+            assert_eq!(sorted.len(), lengths.len(), "a length was visited twice");
+        }
     }
 
     #[test]
@@ -158,7 +192,18 @@ mod tests {
         assert_eq!(report.len(), PAYLOAD_OFFSET);
         assert_eq!(&report[0..3], b"ACK");
         assert_eq!(&report[5..7], b"OK");
-        assert_eq!(report[9], 2);
-        assert_eq!(report[10], 1);
+        assert_eq!(report[KEY_INDEX_OFFSET], 2);
+        assert_eq!(report[STATE_OFFSET], 1);
+    }
+
+    #[test]
+    fn a_report_shorter_than_the_envelope_is_refused() {
+        // The harness must fail loudly on its own mistake, but not with a
+        // panic message in the test output.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(|| frame_report(&[], PAYLOAD_OFFSET - 1));
+        std::panic::set_hook(hook);
+        assert!(result.is_err(), "a too short report was accepted");
     }
 }

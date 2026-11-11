@@ -54,16 +54,19 @@ messages; the file below is a human summary, not a substitute for
 - Which lengths the sweep visits is decided in `fuzz/src/lib.rs`, where
   ordinary unit tests pin it: the minimum and the fifteen lengths above it
   are always visited, the rest of the range is sampled at most 64 times per
-  input, and no length is ever below the minimum. `cargo test --manifest-path
-  fuzz/Cargo.toml` runs them.
+  input, and no length is ever below the minimum.
+  `cargo test --manifest-path fuzz/Cargo.toml --lib` runs them; the fuzz
+  binary is excluded from the test build, so the command needs neither
+  nightly nor the sanitizer runtime.
 - Verified on nightly with AddressSanitizer. The edge counter rose with
   every harness change — `cov: 75` before the enveloped sweep existed,
   `cov: 94` with it, `cov: 115` with the lengths just above the minimum
   always visited — and no run found a crash, a timeout or an out-of-memory.
   The throughput that bought those edges fell from 2,332 executions per
-  second to 711, which is what the extra shapes cost. The session recorded
-  for the milestone: 32,725 executions in 46 seconds at 711 per second, peak
-  RSS 507 MB.
+  second to 653, which is what the extra shapes cost: every input now pays
+  for the whole band and for the list of lengths. The session recorded for
+  the milestone: 30,059 executions in 46 seconds at 653 per second, peak
+  RSS 509 MB.
 - How to run it is in `fuzz/README.md`. On Windows the sanitizer runtime has
   to be on `PATH`, and `--sanitizer none` cannot link there: cargo-fuzz always
   applies sanitizer-coverage instrumentation whose section symbols do not
