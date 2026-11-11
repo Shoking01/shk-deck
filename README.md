@@ -72,6 +72,16 @@ cargo clippy --manifest-path crates/ss550-tray/Cargo.toml --all-targets -- -D wa
 The three roots are separate workspaces on purpose: the driver/protocol suite
 stays fast and never pays for GPUI's ~800 packages or the Win32 tree.
 
+The protocol decoder is fuzzed from a fourth, separate workspace root, so it
+never enters the shipped lock files:
+
+```bash
+cargo fuzz run decode_input_report -- -max_total_time=60
+```
+
+It needs a nightly toolchain and, on Windows, the Visual Studio sanitizer
+runtime on `PATH`. [`fuzz/README.md`](fuzz/README.md) has the details.
+
 ```bash
 cargo run --manifest-path crates/ss550-gui/Cargo.toml
 cargo run --manifest-path crates/ss550-gui/Cargo.toml -- --hidden   # tray only

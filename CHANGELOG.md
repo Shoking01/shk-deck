@@ -35,6 +35,21 @@ messages; the file below is a human summary, not a substitute for
   asking the firmware: `VER` is unverified precisely because writing it halts
   the USB endpoint.
 
+### Added — a fuzz target for the protocol decoder
+- `fuzz/` is its own workspace root with a `cargo fuzz` target that feeds
+  arbitrary bytes to the decoder: raw bytes, every prefix of them, the same
+  bytes inside a valid `ACK`/`OK` envelope, and an oversized buffer. It
+  asserts nothing about the result — a malformed report may be rejected; it
+  may not panic.
+- Verified: 142,297 executions in 61 seconds on nightly with
+  AddressSanitizer, with no crash, no timeout and no out-of-memory. The
+  decoder is panic-free by construction (its length guard precedes every
+  index), and the fuzzer confirms it.
+- How to run it is in `fuzz/README.md`. On Windows the sanitizer runtime has
+  to be on `PATH`, and `--sanitizer none` cannot link there: cargo-fuzz always
+  applies sanitizer-coverage instrumentation whose section symbols do not
+  exist in the COFF format.
+
 ### Documentation — `PLAN.md` describes the project that exists
 - The old `PLAN.md` planned a different application: egui as the primary GUI
   with GPUI as a fallback, a `ss550-ui` / `action-engine` / `plugins/` layout,

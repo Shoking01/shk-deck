@@ -1,0 +1,81 @@
+//! Fuzz target: the SS550 input-report decoder must never panic.
+//!
+//! The deck is a physical USB device. A malformed report that makes the
+//! decoder panic would take the host process down with it, and a decoder that
+//! trusts the device is precisely what broken — or hostile — firmware can
+//! attack. This target therefore asserts **nothing** about the result of a
+//! decode: rejecting a malformed report is a correct outcome, panicking is
+//! not. Only "no panic" is a pass.
+//!
+//! What it covers:
+//!
+//! - `parse_input_report` on arbitrary bytes, on every prefix of those bytes,
+//!   on bytes wrapped in a valid `ACK`/`OK` envelope, and on an oversized
+//!   buffer.
+//! - `is_key_edge` on the same inputs.
+//! - `read_index_to_firmware_key` with every value the fuzzer can produce.
+
+#![no_main]
+
+use libfuzzer_sys::fuzz_target;
+use ss550_protocol::{
+    is_key_edge, parse_input_report, read_index_to_firmware_key, INPUT_REPORT_SIZE, REPORT_SIZE,
+};
+
+/// Number of payload bytes of a report that are not the envelope.
+const PAYLOAD_OFFSET: usize = 11;
+
+/// Builds a report with a valid `ACK`/`OK` envelope around `data`.
+///
+/// Random bytes never spell `ACK` at the front, so without this the fuzzer
+/// would only ever reach the envelope check. Here the key index and the state
+/// byte are driven with adversarial values instead.
+fn frame_report(data: &[u8]) -> [u8; INPUT_REPORT_SIZE] {
+    let mut report = [0u8; INPUT_REPORT_SIZE];
+    report[0..3].copy_from_slice(b"ACK");
+    report[5..7].copy_from_slice(b"OK");
+
+    let mut rest = data;
+    if let Some(&state) = rest.first() {
+        report[10] = state;
+        rest = &rest[1..];
+    }
+    if let Some(&key) = rest.first() {
+        report[9] = key;
+        rest = &rest[1..];
+    }
+    let n = rest.len().min(INPUT_REPORT_SIZE - PAYLOAD_OFFSET);
+    report[PAYLOAD_OFFSET..PAYLOAD_OFFSET + n].copy_from_slice(&rest[..n]);
+    report
+}
+
+fuzz_target!(|data: &[u8]| {
+    // The report exactly as a hostile or broken device would send it.
+    let _ = parse_input_report(data);
+    let _ = is_key_edge(data);
+
+    // Every prefix of it: an off-by-one in the length guard shows up here.
+    for len in 0..=data.len() {
+        let _ = parse_input_report(&data[..len]);
+        let _ = is_key_edge(&data[..len]);
+    }
+
+    // The same bytes inside a valid envelope, so the key index and the state
+    // byte are reached with adversarial values.
+    let framed = frame_report(data);
+    let _ = parse_input_report(&framed);
+    let _ = is_key_edge(&framed);
+
+    // A report in a transport-sized buffer: longer than the 512 bytes the
+    // deck sends, so a decoder that assumed the exact size would trip here.
+    let mut oversized = [0u8; REPORT_SIZE];
+    let n = data.len().min(REPORT_SIZE);
+    oversized[..n].copy_from_slice(&data[..n]);
+    let _ = parse_input_report(&oversized);
+    let _ = is_key_edge(&oversized);
+
+    // The key-number mapping, with every value the fuzzer can produce.
+    for &byte in data {
+        let _ = read_index_to_firmware_key(byte);
+    }
+});

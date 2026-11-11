@@ -1,0 +1,6 @@
+# Build artifacts of the fuzz harness.
+target/
+
+# Corpus and crash artifacts are machine-local state, never committed.
+corpus/
+artifacts/

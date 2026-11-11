@@ -22,6 +22,11 @@ No original vendor source code was copied (clean-room note in
   refused sleep writes nothing at all.
 
 ### Added
+- `cargo fuzz` target on the input decoder: raw bytes, every prefix, the same
+  bytes inside a valid `ACK`/`OK` envelope, and an oversized buffer. 142,297
+  executions in 61 s on nightly with AddressSanitizer, with no crash. The
+  decoder is panic-free by construction — its `MIN_LEN` guard precedes every
+  index into the report — and the fuzzer confirms it.
 - `docs/protocol/verified.md`: the safe-mode list. Ten commands, four verified
   on hardware (`DIS`, `LIG`, `BAT` + chunks + `STP`, `CLE 0xFF`), six not
   (`CLE` per key, `HAN` sleep, `CONNECT`, the bare `HAN`, `VER`, `MOD`), each
