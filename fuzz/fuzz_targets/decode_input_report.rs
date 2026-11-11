@@ -10,8 +10,9 @@
 //! What it covers:
 //!
 //! - `parse_input_report` on arbitrary bytes, on every prefix of those bytes,
-//!   on bytes wrapped in a valid `ACK`/`OK` envelope (at every length from the
-//!   minimum upwards), and on an oversized buffer.
+//!   on bytes wrapped in a valid `ACK`/`OK` envelope (at every length just
+//!   above the minimum, and at a bounded sample of the rest), and on an
+//!   oversized buffer.
 //! - `is_key_edge` on the same inputs.
 //! - `read_index_to_firmware_key` with every value the fuzzer can produce.
 
@@ -25,11 +26,16 @@ use ss550_protocol::{
 /// Number of payload bytes of a report that are not the envelope.
 const PAYLOAD_OFFSET: usize = 11;
 
-/// How many lengths the enveloped sweep tries per input.
+/// How many lengths above the minimum the sweep always visits, one by one.
 ///
-/// One allocation per length would make the cost of an input quadratic in its
-/// length, and a fuzzer buys inputs with time: the sweep takes a bounded
-/// number of samples across the range instead of every length in it.
+/// An off-by-one at the state byte only shows in a report that is barely
+/// long enough, so those lengths are never sampled away.
+const NEAR_MINIMUM_LENGTHS: usize = 16;
+
+/// How many lengths the sweep samples from the rest of the range.
+///
+/// One report per length would make the cost of an input quadratic in its
+/// length, and a fuzzer buys inputs with time.
 const MAX_SWEEP_LENGTHS: usize = 64;
 
 /// Builds a report of `len` bytes with a valid `ACK`/`OK` envelope around `data`.
@@ -39,8 +45,15 @@ const MAX_SWEEP_LENGTHS: usize = 64;
 /// byte are driven with adversarial values instead.
 ///
 /// `len` must be at least [`PAYLOAD_OFFSET`]: that is what keeps the key
-/// index at `[9]` and the state at `[10]` inside the buffer.
+/// index at `[9]` and the state at `[10]` inside the buffer. The precondition
+/// is enforced, because a harness that panics looks exactly like a decoder
+/// crash to libFuzzer.
 fn frame_report(data: &[u8], len: usize) -> Vec<u8> {
+    assert!(
+        len >= PAYLOAD_OFFSET,
+        "an enveloped report needs at least {PAYLOAD_OFFSET} bytes, got {len}"
+    );
+
     let mut report = vec![0u8; len];
     report[0..3].copy_from_slice(b"ACK");
     report[5..7].copy_from_slice(b"OK");
@@ -59,6 +72,13 @@ fn frame_report(data: &[u8], len: usize) -> Vec<u8> {
     report
 }
 
+/// Feeds one enveloped report of `len` bytes to both decoders.
+fn feed_enveloped(data: &[u8], len: usize) {
+    let report = frame_report(data, len);
+    let _ = parse_input_report(&report);
+    let _ = is_key_edge(&report);
+}
+
 fuzz_target!(|data: &[u8]| {
     // The report exactly as a hostile or broken device would send it.
     let _ = parse_input_report(data);
@@ -70,21 +90,27 @@ fuzz_target!(|data: &[u8]| {
         let _ = is_key_edge(&data[..len]);
     }
 
-    // Reports that still carry the envelope, at every length from the
-    // minimum upwards. The prefix sweep cuts random bytes, which essentially
-    // never spell ACK, and the full-length framed input below is always long,
-    // so without this the only inputs that reach the key and state fields
-    // are long ones: an off-by-one at the state byte, which needs a report
-    // that is just barely long enough, would never be exercised.
+    // Reports that still carry the envelope. The prefix sweep cuts random
+    // bytes, which essentially never spell ACK, and the full-length framed
+    // input below is always long, so without this the only inputs that reach
+    // the key and state fields are long ones.
+    //
+    // Every length just above the minimum is visited one by one, because that
+    // is where an off-by-one at the state byte shows. The rest of the range
+    // is sampled, at most MAX_SWEEP_LENGTHS per input, so the cost of an
+    // input stays bounded.
     let max_len = data.len() + PAYLOAD_OFFSET;
-    let step = (max_len - PAYLOAD_OFFSET)
-        .div_ceil(MAX_SWEEP_LENGTHS)
-        .max(1);
-    let mut len = PAYLOAD_OFFSET;
-    while len <= max_len {
-        let short = frame_report(data, len);
-        let _ = parse_input_report(&short);
-        let _ = is_key_edge(&short);
+    let near_end = PAYLOAD_OFFSET + NEAR_MINIMUM_LENGTHS;
+    for len in PAYLOAD_OFFSET..=max_len.min(near_end) {
+        feed_enveloped(data, len);
+    }
+
+    let step = (max_len.saturating_sub(near_end) / MAX_SWEEP_LENGTHS).max(1);
+    let mut taken = 0;
+    let mut len = near_end + 1;
+    while len <= max_len && taken < MAX_SWEEP_LENGTHS {
+        feed_enveloped(data, len);
+        taken += 1;
         len += step;
     }
 

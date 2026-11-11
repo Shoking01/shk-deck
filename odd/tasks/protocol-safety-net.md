@@ -175,10 +175,12 @@ A rule with an off switch is a rule that gets switched off.
     now one builder, used for both shapes, and it takes the length as an
     argument — which also removes the possibility of writing past the end of
     the buffer.
-  - **The sweep was unbounded.** One allocation per length made the cost of
-    an input quadratic in its length, and the recorded throughput halved
-    (2,332 to 780 executions per second). The sweep now takes at most 64
-    samples across the range.
+  - **The sweep was unbounded.** One report per length made the cost of an
+    input quadratic in its length, and the recorded throughput dropped from
+    2,332 to 780 executions per second. The sweep now visits every length
+    just above the minimum one by one — that is where an off-by-one at the
+    state byte shows — and samples the rest of the range at most 64 times per
+    input, which brought the throughput back to 1,007 executions per second.
   - **Two documents described the behaviour incorrectly.** The changelog
     claimed the image cache changes only after the deck has been told; the
     truth is that it changes only after both clear packs are accepted, and
@@ -194,3 +196,21 @@ A rule with an off switch is a rule that gets switched off.
   arrives and the deck still shows images the driver has forgotten. A failed
   write leaves the deck's state unknown, and the driver keeps what the user
   had.
+- **L11 — 2026-11-10, the third review.** The third range went through the
+  same four lenses and came back **approved**, with no blocker. Its most
+  important finding was a coverage regression the previous commit introduced:
+  the bounded sweep sampled the lengths with a stride, so the reports just
+  above the minimum — the ones an off-by-one at the state byte needs — were
+  skipped for any input longer than 64 bytes. The sweep now visits the
+  sixteen lengths above the minimum one by one and samples the rest with an
+  exact counter, so the bound is what the documents say it is. The review
+  also caught that the fuzz README still said "the same four sets" after the
+  count had become five, that the changelog's "before the enveloped sweep"
+  baseline belonged to an older harness than the one it was describing, and
+  that the driver's new comment put the failure policy right next to the
+  statement that discards the images. All of those are fixed here. The
+  review's remaining findings are the follow-ups they are: the gate still
+  trusts the caller's label rather than the bytes, the registry rows are
+  still on the author, the fuzz target still does not run in CI, and an
+  enveloped report one byte below the minimum is still out of the harness's
+  reach.

@@ -32,13 +32,14 @@ messages; the file below is a human summary, not a substitute for
   the deck with a `DIS` before the sleep pack, so a refused sleep would have
   written to the deck on its way out. Both are fixed.
 - The image cache now changes only after both clear packs are accepted, in
-  both clear paths. `clear_all` had the same ordering hazard as `clear_key`: a
-  failed write left the driver believing every key was blank while the deck
-  still showed the old images, and `repaint_all` skips keys the cache has
-  forgotten, so nothing would have repainted them. A failed write leaves the
-  deck's state unknown, so the driver keeps the images: they are what the
-  user had, and a later repaint can restore them. The cost is that a deck
-  that cleared anyway gets its images back on the next repaint.
+  both clear paths. Before this change, `clear_all` had the same ordering
+  hazard as `clear_key`: a failed write left the driver believing every key
+  was blank while the deck still showed the old images, and `repaint_all`
+  skips keys the cache has forgotten, so nothing would have repainted them.
+  Now a failed write leaves the deck's state unknown, so the driver keeps
+  the images: they are what the user had, and a later repaint can restore
+  them. The cost is that a deck that cleared anyway gets its images back on
+  the next repaint.
 - `firmware_version()` keeps reading the static identity report instead of
   asking the firmware: `VER` is unverified precisely because writing it halts
   the USB endpoint.
@@ -49,23 +50,26 @@ messages; the file below is a human summary, not a substitute for
   bytes inside a valid `ACK`/`OK` envelope, and an oversized buffer. It
   asserts nothing about the result — a malformed report may be rejected; it
   may not panic.
-- Verified: 142,297 executions in 61 seconds on nightly with
-  AddressSanitizer before the enveloped sweep, and 46,335 in 46 seconds
-  after it (1,007 executions per second, peak RSS 509 MB), with no crash, no
-  timeout and no out-of-memory in either. The decoder is panic-free by
-  construction (its length guard precedes every index), and the fuzzer
-  confirms it.
+- Verified on nightly with AddressSanitizer, in four sessions that show what
+  each harness change cost and bought: 142,297 executions in 61 seconds at
+  2,332 per second before the enveloped sweep existed; 35,908 in 46 seconds
+  at 780 per second with an unbounded sweep; 46,335 in 46 seconds at 1,007
+  per second with the sweep bounded by a stride; and 38,455 in 46 seconds
+  at 835 per second with the lengths just above the minimum always visited.
+  No crash, no timeout and no out-of-memory in any of them. The decoder is
+  panic-free by construction (its length guard precedes every index), and
+  the fuzzer confirms it.
 - How to run it is in `fuzz/README.md`. On Windows the sanitizer runtime has
   to be on `PATH`, and `--sanitizer none` cannot link there: cargo-fuzz always
   applies sanitizer-coverage instrumentation whose section symbols do not
   exist in the COFF format.
-- The harness also feeds **enveloped reports of every length**, from the
-  minimum report length upwards. The prefix sweep cuts random bytes, which do
-  not spell `ACK`, and the framed input was always full length, so the
-  short-but-enveloped report — the one that catches an off-by-one at the
-  state byte — was never exercised. With it, the fuzzer reaches edges it
-  never reached before (libFuzzer's counters go from `cov: 75 ft: 265` to
-  `cov: 94 ft: 453`), still with no crash.
+- The harness also feeds **enveloped reports**, at every length just above the
+  minimum report length and at a bounded sample of the rest. The prefix
+  sweep cuts random bytes, which do not spell `ACK`, and the framed input was
+  always full length, so the short-but-enveloped report — the one that
+  catches an off-by-one at the state byte — was never exercised. With it, the
+  fuzzer reaches edges it never reached before (libFuzzer's counters go from
+  `cov: 75 ft: 265` to `cov: 94 ft: 453`), still with no crash.
 
 ### Documentation — `PLAN.md` describes the project that exists
 - The old `PLAN.md` planned a different application: egui as the primary GUI

@@ -20,8 +20,8 @@ entry point of `ss550-protocol`:
 
 | Call | Inputs |
 |---|---|
-| `parse_input_report` | the raw bytes; **every prefix** of them; the same bytes wrapped in a valid `ACK`/`OK` envelope, at every length from the minimum upwards; the same bytes in an oversized (1025-byte) buffer |
-| `is_key_edge` | the same four sets |
+| `parse_input_report` | the raw bytes; **every prefix** of them; the same bytes wrapped in a valid `ACK`/`OK` envelope, at every length just above the minimum and at a bounded sample of the rest; the same bytes in an oversized (1025-byte) buffer |
+| `is_key_edge` | the same five sets |
 | `read_index_to_firmware_key` | every value the fuzzer can produce |
 
 The five shapes exist for five different reasons:
@@ -33,12 +33,13 @@ The five shapes exist for five different reasons:
 - **A valid envelope** matters because random bytes never spell `ACK` at the
   front. Without it the fuzzer only ever reaches the envelope check, and the
   key-index and state fields are never reached with adversarial values.
-- **Every enveloped length** matters because the framed input is always
-  full length. Without it the only reports that reach the key and state
-  fields are long ones, and an off-by-one at the state byte — which needs a
-  report that is just barely long enough — would never be exercised. The
-  sweep is bounded to 64 lengths per input, so it cannot make the cost of an
-  input quadratic in its length.
+- **Every enveloped length just above the minimum** matters because the framed
+  input is always full length. Without it the only reports that reach the key
+  and state fields are long ones, and an off-by-one at the state byte — which
+  needs a report that is just barely long enough — would never be exercised.
+  The sweep visits the sixteen lengths above the minimum one by one, and
+  samples the rest of the range at most 64 times per input, so the cost of an
+  input stays bounded.
 - **The oversized buffer** catches a decoder that assumed the exact 512-byte
   report size instead of the minimum length it needs.
 
@@ -98,12 +99,12 @@ A clean run ends with something like this — the session recorded for the
 milestone, so the numbers can be checked against the changelog:
 
 ```text
-Done 46335 runs in 46 second(s)
-stat::number_of_executed_units: 46335
-stat::average_exec_per_sec:     1007
-stat::new_units_added:          18
+Done 38455 runs in 46 second(s)
+stat::number_of_executed_units: 38455
+stat::average_exec_per_sec:     835
+stat::new_units_added:          10
 stat::slowest_unit_time_sec:    0
-stat::peak_rss_mb:              509
+stat::peak_rss_mb:              512
 ```
 
 and exit code `0`. A crash would land in `fuzz/artifacts/decode_input_report/`
