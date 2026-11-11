@@ -42,6 +42,14 @@ use ss550_driver::{ButtonImage, ButtonState, Device, LONG_CONNECT_TIMEOUT};
 use ss550_engine::{Action, ActionRunner, ActionStore, KeyNumber};
 use ss550_tray::{autostart, install, TrayCommand, TrayHost};
 
+mod diagnostics;
+
+/// Clicks on the version line that open the diagnostic log.
+///
+/// The trigger is hidden on purpose: this is a support tool, not a feature, and
+/// a button for it would invite clicks that answer nothing.
+const VERSION_CLICKS_TO_REVEAL: u8 = 5;
+
 /// Hex colour as GPUI `Hsla`.
 fn color(hex: u32) -> Hsla {
     rgb(hex).into()
@@ -212,6 +220,8 @@ struct Controller {
     starts_with_windows: bool,
     /// Why the sign-in entry does not work, when it is there but broken.
     autostart_note: Option<String>,
+    /// Clicks on the version line, until they add up to the reveal.
+    version_clicks: u8,
 }
 
 impl Controller {
@@ -347,6 +357,7 @@ impl Controller {
             window_handle,
             starts_with_windows,
             autostart_note,
+            version_clicks: 0,
         };
 
         // Look for the deck right away: its settle window starts the moment
@@ -613,7 +624,12 @@ impl Controller {
                     self.show_window(cx);
                     changed = true;
                 }
-                TrayCommand::Quit => cx.quit(),
+                TrayCommand::Quit => {
+                    // This line, and the `started` line without it, are how the
+                    // log tells a deliberate exit from a crash.
+                    diagnostics::record("quit from the tray");
+                    cx.quit()
+                }
             }
         }
         changed
@@ -635,6 +651,22 @@ impl Controller {
         if let Some(hwnd) = self.native {
             let _ = ss550_tray::hide_window(hwnd);
         }
+    }
+
+    /// Opens the diagnostic log once the version line has been clicked enough.
+    ///
+    /// The app has no console in release, so the log is the only place a panic
+    /// or a strange exit leaves a trace. Reaching it is deliberately quiet.
+    fn reveal_log(&mut self) {
+        self.version_clicks = self.version_clicks.saturating_add(1);
+        if self.version_clicks < VERSION_CLICKS_TO_REVEAL {
+            return;
+        }
+        self.version_clicks = 0;
+        self.note = match diagnostics::reveal() {
+            Ok(()) => "Opened the log file.".into(),
+            Err(error) => error.into(),
+        };
     }
 
     /// Turns the Windows sign-in entry on or off.
@@ -1185,6 +1217,20 @@ impl Render for Controller {
             Some(note) => background_section.child(hint(note.clone(), cx)),
             None => background_section,
         };
+        // The version line is the quiet way into the diagnostic log. It reads
+        // as a stamp, not as a control, so nothing invites a click.
+        let background_section = background_section.child(
+            div()
+                .id("version-line")
+                .cursor_pointer()
+                .text_size(px(12.))
+                .text_color(cx.theme().muted_foreground.opacity(0.55))
+                .child(format!("v{}", env!("CARGO_PKG_VERSION")))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.reveal_log();
+                    cx.notify();
+                })),
+        );
 
         let bindings_panel = div()
             .flex()
@@ -1431,8 +1477,16 @@ fn native_handle(window: &Window) -> Option<isize> {
 }
 
 fn main() {
+    // The log and the panic hook come first: a failure while the window is
+    // being built is exactly the kind that used to leave no trace.
+    diagnostics::install_panic_hook();
+
     // Started by Windows: the controller lives in the tray with no window.
     let hidden = std::env::args().any(|argument| argument == autostart::HIDDEN_FLAG);
+    diagnostics::record(&format!(
+        "started v{} (hidden={hidden})",
+        env!("CARGO_PKG_VERSION")
+    ));
 
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)

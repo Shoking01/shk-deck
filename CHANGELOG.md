@@ -19,8 +19,27 @@ messages; the file below is a human summary, not a substitute for
   (CONSOLE) to `2` (GUI), and launching the installed copy creates no `conhost`
   window. A test pins the attribute and cuts the test module off before reading
   the source, so it cannot pass by matching its own literal.
-- Known limitation: a release-mode panic now leaves no visible trace, because
-  the console that used to show it is gone. Nothing writes it to a file yet.
+- Without the console, a release-mode panic would have no visible trace. The
+  diagnostic log below is what replaced it: a panic now writes itself to a file
+  before the process goes down.
+
+### Added — the controller keeps a diagnostic log
+- `crates/ss550-gui/src/diagnostics.rs` appends to
+  `%APPDATA%\ss550\ss550.log`: one `started` line per run, one `quit` line when
+  the tray's Quit is used, and the message and location of a panic, written by a
+  hook before the process goes down. A `started` line with no matching `quit` is
+  what a crash looks like.
+- The log rotates at 1 MB into `ss550.log.old`, keeping one previous file. It
+  sits next to `bindings.json`, so `SS550_CONFIG_DIR` moves both.
+- Nothing in the log path can fail the app: an unwritable log is an unwritable
+  log, and the controller keeps running.
+- Opening it is deliberately quiet: five clicks on the version line at the
+  bottom of `STEP 4 · RUN IN THE BACKGROUND` open the file in Notepad. Notepad is
+  chosen explicitly — a clean Windows has no `.log` association at all, so
+  `start` would do nothing.
+- Six tests cover the timestamp conversion (including a leap day), line framing,
+  rotation and the small-file case. Verified live: `2026-11-11T16:22:23Z started
+  v0.1.0 (hidden=true)` in the real path, and Notepad opened the file.
 
 ### Added — the registry of commands a deck has proven
 - `docs/protocol/verified.md` is the safe-mode list: one row per command the
