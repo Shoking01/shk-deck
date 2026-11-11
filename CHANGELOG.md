@@ -15,6 +15,8 @@ messages; the file below is a human summary, not a substitute for
 - `ss550-protocol` gained a registry (`Command`, `Verification`, `CommandInfo`,
   `COMMANDS`) that carries exactly the text the document prints. The protocol
   crate stays pure: it owns the registry, the driver owns the enforcement.
+- A test compares the document with the registry, so the list cannot drift
+  away from the code: flipping a status in the document fails the build.
 
 ### Added — the driver refuses to send commands nobody has proven
 - The driver's only write path now checks the registry **before** the bytes
