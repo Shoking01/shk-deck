@@ -165,9 +165,11 @@ exit would otherwise leave no trace. The app writes an append-only log instead:
   console. Control characters in the message are escaped, so a payload cannot
   forge a second line — including a fake `quit`.
 - The log rotates at 1 MB: the full file becomes `ss550.log.old` and a fresh one
-  starts. One old file is kept, never a growing pile. When the rename is blocked
-  — a viewer holding the file open does that on Windows — the file is truncated
-  in place instead, so it still cannot grow without bound.
+  starts. One old file is kept, never a growing pile. The cap is soft on purpose:
+  when a viewer or an indexer holds the file open, Windows refuses the rename and
+  the log keeps growing until the lock clears, and the next run rotates it then.
+  Truncating instead would delete the current log — the only crash evidence a
+  release build produces — to satisfy a size limit nobody is waiting on.
 - Each line is built in full and written in one call, so a panic on a worker
   thread cannot interleave with a line already being written.
 - Writing the log can never fail the app. A log that cannot be written is a log
@@ -177,15 +179,19 @@ exit would otherwise leave no trace. The app writes an append-only log instead:
 
 **Opening it.** There is no button. Click the version line at the bottom of
 `STEP 4 · RUN IN THE BACKGROUND` five times and the log opens in Notepad; the
-status line says whether it opened, and the log records the outcome rather than
-the attempt. The trigger is hidden on purpose: this is a support tool, not a
-feature, and a button would invite clicks that answer nothing.
+status line says whether it started, and the log records the same thing — the
+viewer's launch, not that it managed to display the file. The trigger is hidden
+on purpose: this is a support tool, not a feature, and a button would invite
+clicks that answer nothing.
 
 Notepad is chosen explicitly rather than through the `.log` file association. A
 clean Windows has no association for `.log` at all, so `start` would do nothing.
-It is also launched by absolute path, `%SystemRoot%\System32\notepad.exe`, so the
-lookup never walks the process's current directory, where a planted
-`notepad.exe` would otherwise run with the controller's privileges.
+It is also launched as `%SystemRoot%\System32\notepad.exe`, so the lookup does not
+walk the process's current directory, where a planted `notepad.exe` would
+otherwise run with the controller's privileges. That holds whenever `SystemRoot`
+is set, which is every interactive Windows session; the stripped-environment
+fallback to the bare name gives it up, and a missing `notepad.exe` at the
+absolute path reports the reason instead of falling back to the weaker lookup.
 
 **Verified live**: `2026-11-11T16:22:23Z started v0.1.0 (hidden=true)` landed in
 the real path with UTC correct, and `notepad <log>` opened the file.

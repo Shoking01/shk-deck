@@ -74,13 +74,16 @@ fn panic_place(location: Option<&std::panic::Location<'_>>) -> String {
 ///
 /// Notepad on Windows, `open` on macOS, `xdg-open` elsewhere. Notepad is named
 /// explicitly rather than through the `.log` file association: a clean Windows
-/// has no association for `.log` at all, so `start` would do nothing. It is also
-/// the system copy by absolute path, so the lookup never walks the process's
-/// current directory, where a planted `notepad.exe` would otherwise run.
+/// has no association for `.log` at all, so `start` would do nothing. It is
+/// launched as `%SystemRoot%\System32\notepad.exe`, so the lookup does not walk
+/// the process's current directory, where a planted `notepad.exe` would
+/// otherwise run. That guarantee holds whenever `SystemRoot` is set, which is
+/// every interactive Windows session; the bare-name fallback for a stripped
+/// environment gives it up, and is documented as such in `notepad_path`.
 ///
 /// Returns the reason when the viewer would not start, so the window can say so
-/// instead of failing in silence. The outcome, not the intent, is what the log
-/// records.
+/// instead of failing in silence. The log records that the viewer started, not
+/// that it managed to display the file: nothing waits on the child.
 pub fn reveal() -> Result<(), String> {
     let path = log_path();
 
@@ -107,11 +110,20 @@ pub fn reveal() -> Result<(), String> {
 
 /// The system Notepad, by absolute path.
 ///
-/// `SystemRoot` is set for every interactive Windows process. The bare name is
-/// the fallback when it is not, so the reveal still works in a stripped
-/// environment, where there is no current directory to plant anything in.
+/// `SystemRoot` is set for every interactive Windows process, so the normal
+/// path never touches the search order. When the variable is missing the bare
+/// name is the only option left; that branch does resolve through the current
+/// directory, so it is a compatibility fallback, not a guarantee. A missing
+/// `notepad.exe` at the absolute path reports the reason instead of falling
+/// back to the bare name, because a second, weaker lookup is not worth the
+/// exposure.
 fn notepad_path() -> std::ffi::OsString {
-    match std::env::var_os("SystemRoot") {
+    notepad_path_in(std::env::var_os("SystemRoot"))
+}
+
+/// `notepad_path` with the root passed in, so both branches are testable.
+fn notepad_path_in(root: Option<std::ffi::OsString>) -> std::ffi::OsString {
+    match root {
         Some(root) => Path::new(&root)
             .join("System32")
             .join("notepad.exe")
@@ -123,8 +135,10 @@ fn notepad_path() -> std::ffi::OsString {
 /// Appends one timestamped line to `path`, rotating it first when it is full.
 ///
 /// The whole line is built before the file is opened and written in one call,
-/// so a panic on a worker thread cannot interleave with a line already being
-/// written. `record_at` is the only writer.
+/// so a panic on a worker thread cannot interleave inside a line and leave a
+/// mangled timestamp. Rotation is still unlocked: two writers at the exact same
+/// instant can lose one line to a rotation, which is a narrower race than a
+/// corrupted line and not worth a lock on the crash path.
 fn record_at(path: &Path, message: &str) {
     let line = format!("{} {}\n", timestamp_at(SystemTime::now()), escape(message));
     rotate_if_full(path, line.len() as u64);
@@ -139,31 +153,36 @@ fn record_at(path: &Path, message: &str) {
 
 /// Renames a full log to `ss550.log.old`, dropping the one already there.
 ///
-/// A viewer holding the file open blocks the rename on Windows, and so does an
-/// indexer, so a failed rename truncates in place instead: the previous log is
-/// lost, but the file cannot grow past its bound forever.
+/// The size cap is soft on purpose. When a viewer or an indexer holds the file
+/// open, Windows refuses the rename, and the log keeps growing until the lock
+/// clears; the next run rotates it then. Truncating instead would delete the
+/// current log, which is the only crash evidence a release build produces, to
+/// satisfy a size limit nobody is waiting on. Losing evidence is worse than
+/// overshooting a cap.
 fn rotate_if_full(path: &Path, incoming: u64) {
     let current = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
     if current + incoming <= MAX_BYTES {
         return;
     }
     let previous = path.with_file_name(PREVIOUS_FILE);
+    // Windows refuses to rename onto an existing name, so the old archive goes
+    // first. If the rename then fails, only the archive is gone; the current
+    // log, the one that matters, is still there.
     let _ = fs::remove_file(&previous);
-    if fs::rename(path, &previous).is_ok() {
-        return;
-    }
-    let _ = OpenOptions::new().write(true).truncate(true).open(path);
+    let _ = fs::rename(path, &previous);
 }
 
-/// Replaces control characters so one message stays one line.
+/// Replaces anything that could start a new line so one message stays one line.
 ///
 /// A panic payload can carry newlines, and an unescaped one would append extra
-/// lines to the log, including a fabricated `quit` marker.
+/// lines to the log, including a fabricated `quit` marker. U+2028 and U+2029
+/// are line and paragraph separators but are not `is_control`, so they are
+/// named here.
 fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for character in text.chars() {
         match character {
-            '\n' => out.push_str("\\n"),
+            '\n' | '\u{2028}' | '\u{2029}' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             other if other.is_control() => out.push('?'),
@@ -259,11 +278,26 @@ mod tests {
         record_at(&path, "quit from the tray");
         let text = fs::read_to_string(&path).expect("the log was written");
         let _ = fs::remove_dir_all(&dir);
-        let stamp = "1970-01-01T00:00:00Z";
-        assert_eq!(text.len(), stamp.len() + " quit from the tray\n".len());
+        // Any timestamp this writes is twenty characters wide; the epoch literal
+        // is used for its width, not because it is the value under test.
+        let stamp_width = "1970-01-01T00:00:00Z".len();
+        assert_eq!(text.len(), stamp_width + " quit from the tray\n".len());
         assert_eq!(text.lines().count(), 1, "got: {text:?}");
         assert!(text.ends_with(" quit from the tray\n"), "got: {text:?}");
         assert!(text.starts_with("20"), "got: {text:?}");
+    }
+
+    #[test]
+    fn every_character_that_could_start_a_line_is_escaped() {
+        assert_eq!(escape("a\nb"), "a\\nb");
+        assert_eq!(escape("a\rb"), "a\\rb");
+        assert_eq!(escape("a\tb"), "a\\tb");
+        // U+2028 and U+2029 are line separators but are not `is_control`.
+        assert_eq!(escape("a\u{2028}b"), "a\\nb");
+        assert_eq!(escape("a\u{2029}b"), "a\\nb");
+        // A generic control character keeps its place with a placeholder.
+        assert_eq!(escape("a\u{7}b"), "a?b");
+        assert_eq!(escape("plain text"), "plain text");
     }
 
     #[test]
@@ -322,6 +356,67 @@ mod tests {
         let kept = fs::metadata(&previous).map(|meta| meta.len());
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(kept.ok(), Some(MAX_BYTES - 1), "the nearly full log moved");
+    }
+
+    #[test]
+    fn a_line_that_lands_exactly_on_the_bound_does_not_rotate() {
+        let dir = scratch("equal");
+        let path = dir.join(LOG_FILE);
+        let previous = dir.join(PREVIOUS_FILE);
+        // The timestamp is twenty characters wide, so this message makes the
+        // whole line twenty-eight bytes: 20 + 1 + 6 + 1.
+        let incoming = 20 + 1 + "equals".len() + 1;
+        fs::write(&path, vec![b'x'; MAX_BYTES as usize - incoming]).expect("the log just below");
+
+        record_at(&path, "equals");
+
+        let size = fs::metadata(&path).map(|meta| meta.len());
+        let rotated = previous.exists();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(
+            size.ok(),
+            Some(MAX_BYTES),
+            "the file lands exactly on the bound"
+        );
+        assert!(!rotated, "a line that fits exactly must not rotate");
+    }
+
+    #[test]
+    fn a_log_that_cannot_rotate_keeps_its_evidence() {
+        let dir = scratch("locked");
+        let path = dir.join(LOG_FILE);
+        let previous = dir.join(PREVIOUS_FILE);
+        // A directory where the archive belongs makes both the remove and the
+        // rename fail, which is what a viewer holding the file open looks like.
+        fs::create_dir_all(&previous).expect("the blocking directory");
+        fs::write(&path, vec![b'x'; MAX_BYTES as usize]).expect("the full log was written");
+
+        record_at(&path, "the line nobody may lose");
+
+        let text = fs::read_to_string(&path).expect("the log is still there");
+        let archived = previous.is_dir();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            text.ends_with(" the line nobody may lose\n"),
+            "the current log keeps its evidence: {text:?}"
+        );
+        assert!(archived, "the archive was left as it was");
+    }
+
+    #[test]
+    fn notepad_is_the_system_copy_when_the_root_is_known() {
+        let found = notepad_path_in(Some(std::ffi::OsString::from("C:\\Windows")));
+        assert_eq!(
+            Path::new(&found),
+            Path::new("C:\\Windows")
+                .join("System32")
+                .join("notepad.exe")
+        );
+    }
+
+    #[test]
+    fn notepad_falls_back_to_the_bare_name_without_a_root() {
+        assert_eq!(notepad_path_in(None), std::ffi::OsString::from("notepad"));
     }
 
     #[test]

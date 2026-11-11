@@ -34,23 +34,28 @@ messages; the file below is a human summary, not a substitute for
   second line, including a fake `quit`. Each line is built in full and written in
   one call, so a panic on a worker thread cannot interleave with a line already
   being written.
-- The log rotates at 1 MB into `ss550.log.old`, keeping one previous file. When
-  the rename is blocked — a viewer holding the file open does that on Windows —
-  the file is truncated in place instead, so it cannot grow without bound. It
-  sits next to `bindings.json`, so `SS550_CONFIG_DIR` moves both.
+- The log rotates at 1 MB into `ss550.log.old`, keeping one previous file. The
+  cap is soft: when a viewer or an indexer holds the file open, Windows refuses
+  the rename and the log keeps growing until the lock clears, then the next run
+  rotates it. Truncating instead would delete the only crash evidence a release
+  build produces, so it is not done. The log sits next to `bindings.json`, so
+  `SS550_CONFIG_DIR` moves both.
 - Nothing in the log path can fail the app: an unwritable log is an unwritable
   log, and the controller keeps running.
 - Opening it is deliberately quiet: five clicks on the version line at the
   bottom of `STEP 4 · RUN IN THE BACKGROUND` open the file in Notepad, and the
-  log records the outcome rather than the attempt. Notepad is named explicitly —
-  a clean Windows has no `.log` association, so `start` would do nothing — and by
-  absolute path, `%SystemRoot%\System32\notepad.exe`, so the lookup cannot pick up
-  a planted `notepad.exe` from the current directory.
-- Twelve tests cover the timestamp conversion including a leap day, line framing
-  and newline escaping, all three panic payload shapes, rotation at and just
-  below the bound, the small-file case, and the five-click boundary. Verified
-  live: `2026-11-11T16:22:23Z started v0.1.0 (hidden=true)` in the real path, and
-  Notepad opened the file.
+  log records that the viewer started rather than that it displayed the file.
+  Notepad is named explicitly — a clean Windows has no `.log` association, so
+  `start` would do nothing — and launched as `%SystemRoot%\System32\notepad.exe`,
+  so the lookup cannot pick up a planted `notepad.exe` from the current directory.
+  That guarantee holds whenever `SystemRoot` is set; the stripped-environment
+  fallback to the bare name gives it up, and is documented as such.
+- Seventeen tests cover the timestamp conversion including a leap day, line
+  framing and every escaping shape, all three panic payload shapes, rotation at,
+  below and exactly on the bound, a log that cannot rotate keeping its evidence,
+  the small-file case, both Notepad branches, and the five-click boundary.
+  Verified live: `2026-11-11T16:42:59Z started v0.1.0 (hidden=true)` in the real
+  path, and Notepad opened the file from the absolute path.
 
 ### Added — the registry of commands a deck has proven
 - `docs/protocol/verified.md` is the safe-mode list: one row per command the
