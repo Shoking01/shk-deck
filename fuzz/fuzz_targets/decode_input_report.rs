@@ -1,7 +1,7 @@
 //! Fuzz target: the SS550 input-report decoder must never panic.
 //!
 //! The deck is a physical USB device. A malformed report that makes the
-//! decoder panic would take the host process down with it, and a decoder that
+//! decoder panic would take the whole host down with it, and a decoder that
 //! trusts the device is precisely what broken — or hostile — firmware can
 //! attack. This target therefore asserts **nothing** about the result of a
 //! decode: rejecting a malformed report is a correct outcome, panicking is
@@ -10,8 +10,8 @@
 //! What it covers:
 //!
 //! - `parse_input_report` on arbitrary bytes, on every prefix of those bytes,
-//!   on bytes wrapped in a valid `ACK`/`OK` envelope, and on an oversized
-//!   buffer.
+//!   on bytes wrapped in a valid `ACK`/`OK` envelope (at every length from the
+//!   minimum upwards), and on an oversized buffer.
 //! - `is_key_edge` on the same inputs.
 //! - `read_index_to_firmware_key` with every value the fuzzer can produce.
 
@@ -25,13 +25,23 @@ use ss550_protocol::{
 /// Number of payload bytes of a report that are not the envelope.
 const PAYLOAD_OFFSET: usize = 11;
 
-/// Builds a report with a valid `ACK`/`OK` envelope around `data`.
+/// How many lengths the enveloped sweep tries per input.
+///
+/// One allocation per length would make the cost of an input quadratic in its
+/// length, and a fuzzer buys inputs with time: the sweep takes a bounded
+/// number of samples across the range instead of every length in it.
+const MAX_SWEEP_LENGTHS: usize = 64;
+
+/// Builds a report of `len` bytes with a valid `ACK`/`OK` envelope around `data`.
 ///
 /// Random bytes never spell `ACK` at the front, so without this the fuzzer
 /// would only ever reach the envelope check. Here the key index and the state
 /// byte are driven with adversarial values instead.
-fn frame_report(data: &[u8]) -> [u8; INPUT_REPORT_SIZE] {
-    let mut report = [0u8; INPUT_REPORT_SIZE];
+///
+/// `len` must be at least [`PAYLOAD_OFFSET`]: that is what keeps the key
+/// index at `[9]` and the state at `[10]` inside the buffer.
+fn frame_report(data: &[u8], len: usize) -> Vec<u8> {
+    let mut report = vec![0u8; len];
     report[0..3].copy_from_slice(b"ACK");
     report[5..7].copy_from_slice(b"OK");
 
@@ -44,7 +54,7 @@ fn frame_report(data: &[u8]) -> [u8; INPUT_REPORT_SIZE] {
         report[9] = key;
         rest = &rest[1..];
     }
-    let n = rest.len().min(INPUT_REPORT_SIZE - PAYLOAD_OFFSET);
+    let n = rest.len().min(len - PAYLOAD_OFFSET);
     report[PAYLOAD_OFFSET..PAYLOAD_OFFSET + n].copy_from_slice(&rest[..n]);
     report
 }
@@ -60,36 +70,27 @@ fuzz_target!(|data: &[u8]| {
         let _ = is_key_edge(&data[..len]);
     }
 
-    // A **short** report that still carries the envelope. The prefix sweep
-    // cuts random bytes, which essentially never spell ACK, and the framed
-    // input is always full length, so without this the only inputs that
-    // reach the key and state fields are long ones: an off-by-one at the
-    // state byte, which needs a report that is just barely long enough,
-    // would never be exercised.
-    for len in PAYLOAD_OFFSET..=data.len() + PAYLOAD_OFFSET {
-        let mut short = vec![0u8; len];
-        short[0..3].copy_from_slice(b"ACK");
-        short[5..7].copy_from_slice(b"OK");
-
-        let mut rest = data;
-        if let Some(&state) = rest.first() {
-            short[10] = state;
-            rest = &rest[1..];
-        }
-        if let Some(&key) = rest.first() {
-            short[9] = key;
-            rest = &rest[1..];
-        }
-        let n = rest.len().min(len - PAYLOAD_OFFSET);
-        short[PAYLOAD_OFFSET..PAYLOAD_OFFSET + n].copy_from_slice(&rest[..n]);
-
+    // Reports that still carry the envelope, at every length from the
+    // minimum upwards. The prefix sweep cuts random bytes, which essentially
+    // never spell ACK, and the full-length framed input below is always long,
+    // so without this the only inputs that reach the key and state fields
+    // are long ones: an off-by-one at the state byte, which needs a report
+    // that is just barely long enough, would never be exercised.
+    let max_len = data.len() + PAYLOAD_OFFSET;
+    let step = (max_len - PAYLOAD_OFFSET)
+        .div_ceil(MAX_SWEEP_LENGTHS)
+        .max(1);
+    let mut len = PAYLOAD_OFFSET;
+    while len <= max_len {
+        let short = frame_report(data, len);
         let _ = parse_input_report(&short);
         let _ = is_key_edge(&short);
+        len += step;
     }
 
-    // The same bytes inside a valid envelope, so the key index and the state
-    // byte are reached with adversarial values.
-    let framed = frame_report(data);
+    // The same bytes inside a full-length valid envelope, so the key index
+    // and the state byte are reached with adversarial values.
+    let framed = frame_report(data, INPUT_REPORT_SIZE);
     let _ = parse_input_report(&framed);
     let _ = is_key_edge(&framed);
 

@@ -166,3 +166,31 @@ A rule with an off switch is a rule that gets switched off.
   - **The fuzz lock file is not audited and the fuzz target does not run in
     CI** (risk and resilience): see L8. Adding either is a decision about
     CI, not about the protocol.
+- **L10 — 2026-11-10, the second review.** The follow-up range went through
+  the same four lenses plus a refuter and came back **approved** as well, with
+  no blocker. Three of its findings were real and are fixed:
+  - **The fuzz harness built the envelope twice.** The short-enveloped sweep
+    hand-assembled the header with its own magic offsets while the file
+    already had a helper for it, so the layout could drift apart. There is
+    now one builder, used for both shapes, and it takes the length as an
+    argument — which also removes the possibility of writing past the end of
+    the buffer.
+  - **The sweep was unbounded.** One allocation per length made the cost of
+    an input quadratic in its length, and the recorded throughput halved
+    (2,332 to 780 executions per second). The sweep now takes at most 64
+    samples across the range.
+  - **Two documents described the behaviour incorrectly.** The changelog
+    claimed the image cache changes only after the deck has been told; the
+    truth is that it changes only after both clear packs are accepted, and
+    that a failed write leaves the deck's state unknown. The fuzz README
+    promised a cross-check with the changelog that the two files did not
+    share a number for, and listed four input shapes while the harness has
+    five.
+  The review also flagged, and this record keeps, the trade-off in the
+  `clear_all` ordering: if the first clear pack lands and the second fails,
+  the deck may be blank while the driver keeps the images, so a later repaint
+  pushes them back. The alternative — emptying the cache as soon as the deck
+  is told to clear — is wrong in the other direction, when the commit never
+  arrives and the deck still shows images the driver has forgotten. A failed
+  write leaves the deck's state unknown, and the driver keeps what the user
+  had.

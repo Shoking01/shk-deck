@@ -644,10 +644,12 @@ impl Device {
         self.write_pack(Command::ClearAll, &stp)?;
 
         // Clear the cache so repaint_all won't put them back — but only once
-        // the deck has actually been told. The writes above can fail, and if
-        // they do the deck still shows the old images: dropping them from the
-        // cache anyway would make the driver claim every key is blank while
-        // the deck shows them, and it would never repaint them.
+        // the deck has actually been told. A failed write leaves the deck's
+        // state unknown: the images may still be there, or the deck may have
+        // been told to clear and never got the commit. The safe answer is to
+        // keep the images, because they are what the user had and a later
+        // repaint can restore them. The cost is that a deck that cleared
+        // anyway gets its images back on the next repaint.
         self.button_cache.fill(None);
 
         Ok(())

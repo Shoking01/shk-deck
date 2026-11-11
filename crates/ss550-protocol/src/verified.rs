@@ -261,8 +261,8 @@ mod tests {
     /// [`COMMANDS`] but missing here, or listed twice. A variant somebody
     /// adds to the enum and to `info()` but to **neither** list still slips
     /// through: the compiler forces the `info()` arm, but no compiler forces
-    /// a registry row or a row in `docs/protocol/verified.md`. Those two are
-    /// on the author, and the document says so where a reader will see it.
+    /// a registry row or a row in the verified list in `docs/protocol/`.
+    /// Those two are on the author.
     const ALL: [Command; 10] = [
         Command::DisplayOn,
         Command::Brightness,
