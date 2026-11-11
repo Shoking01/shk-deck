@@ -3,8 +3,12 @@
 //! The release build is a GUI subsystem with no console, so a panic would
 //! otherwise leave no trace at all. Every run appends a `started` line, the
 //! tray's Quit appends a `quit` line, and a panic hook appends the panic before
-//! the process goes down. A `started` line with no matching `quit` is what a
-//! crash looks like in this file.
+//! the process goes down.
+//!
+//! A `started` line with no matching `quit` means the process did not exit
+//! through the tray's Quit. That is what an unexpected exit looks like, but it
+//! is a narrowed search rather than a verdict: a logoff, a shutdown or an "End
+//! task" kills the process without running that handler either.
 //!
 //! Nothing here may fail the app: a log that cannot be written is a log that
 //! cannot be written, and the controller keeps running.
@@ -15,16 +19,16 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The log's name inside the app's config directory.
-pub const LOG_FILE: &str = "ss550.log";
+const LOG_FILE: &str = "ss550.log";
 
 /// The previous log, kept when the current one rotates.
-pub const PREVIOUS_FILE: &str = "ss550.log.old";
+const PREVIOUS_FILE: &str = "ss550.log.old";
 
-/// Rotate before a write that would push the file past this size.
-pub const MAX_BYTES: u64 = 1_000_000;
+/// Rotate before a line would push the file past this size.
+const MAX_BYTES: u64 = 1_000_000;
 
 /// The log's full path, next to `bindings.json`.
-pub fn log_path() -> PathBuf {
+fn log_path() -> PathBuf {
     ss550_engine::config_dir().join(LOG_FILE)
 }
 
@@ -41,34 +45,47 @@ pub fn record(message: &str) {
 pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let message = info
-            .payload()
-            .downcast_ref::<&str>()
-            .map(|text| (*text).to_string())
-            .or_else(|| info.payload().downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "a payload that is not a string".to_string());
-        let place = info
-            .location()
-            .map(|place| format!("{}:{}:{}", place.file(), place.line(), place.column()))
-            .unwrap_or_else(|| "an unknown place".to_string());
-        record(&format!("panic at {place}: {message}"));
+        record(&format!(
+            "panic at {}: {}",
+            panic_place(info.location()),
+            panic_message(info.payload())
+        ));
         previous(info);
     }));
 }
 
-/// Opens the log with whatever the system uses for text files.
+/// The panic's message, whichever way the payload carries it.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a payload that is not a string".to_string())
+}
+
+/// Where the panic happened, or a placeholder when the place is unknown.
+fn panic_place(location: Option<&std::panic::Location<'_>>) -> String {
+    location
+        .map(|place| format!("{}:{}:{}", place.file(), place.line(), place.column()))
+        .unwrap_or_else(|| "an unknown place".to_string())
+}
+
+/// Opens the log in a text viewer.
 ///
-/// Returns the reason when the system would not take it, so the window can say
-/// so instead of failing in silence.
+/// Notepad on Windows, `open` on macOS, `xdg-open` elsewhere. Notepad is named
+/// explicitly rather than through the `.log` file association: a clean Windows
+/// has no association for `.log` at all, so `start` would do nothing. It is also
+/// the system copy by absolute path, so the lookup never walks the process's
+/// current directory, where a planted `notepad.exe` would otherwise run.
+///
+/// Returns the reason when the viewer would not start, so the window can say so
+/// instead of failing in silence. The outcome, not the intent, is what the log
+/// records.
 pub fn reveal() -> Result<(), String> {
     let path = log_path();
-    record("the log was opened from the controller");
 
-    // Notepad is the one text viewer that exists on every Windows machine.
-    // `start` would go through the `.log` file association, and a clean Windows
-    // has no association for `.log` at all, so it would do nothing.
     let mut command = if cfg!(windows) {
-        std::process::Command::new("notepad")
+        std::process::Command::new(notepad_path())
     } else if cfg!(target_os = "macos") {
         std::process::Command::new("open")
     } else {
@@ -76,32 +93,84 @@ pub fn reveal() -> Result<(), String> {
     };
 
     match command.arg(&path).spawn() {
-        Ok(_) => Ok(()),
-        Err(error) => Err(format!("Could not open {}: {error}", path.display())),
+        Ok(_) => {
+            record("the log was opened");
+            Ok(())
+        }
+        Err(error) => {
+            let reason = format!("Could not open {}: {error}", path.display());
+            record(&reason);
+            Err(reason)
+        }
+    }
+}
+
+/// The system Notepad, by absolute path.
+///
+/// `SystemRoot` is set for every interactive Windows process. The bare name is
+/// the fallback when it is not, so the reveal still works in a stripped
+/// environment, where there is no current directory to plant anything in.
+fn notepad_path() -> std::ffi::OsString {
+    match std::env::var_os("SystemRoot") {
+        Some(root) => Path::new(&root)
+            .join("System32")
+            .join("notepad.exe")
+            .into_os_string(),
+        None => std::ffi::OsString::from("notepad"),
     }
 }
 
 /// Appends one timestamped line to `path`, rotating it first when it is full.
+///
+/// The whole line is built before the file is opened and written in one call,
+/// so a panic on a worker thread cannot interleave with a line already being
+/// written. `record_at` is the only writer.
 fn record_at(path: &Path, message: &str) {
-    rotate_if_full(path);
+    let line = format!("{} {}\n", timestamp_at(SystemTime::now()), escape(message));
+    rotate_if_full(path, line.len() as u64);
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
     let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
         return;
     };
-    let _ = writeln!(file, "{} {}", timestamp_at(SystemTime::now()), message);
+    let _ = file.write_all(line.as_bytes());
 }
 
 /// Renames a full log to `ss550.log.old`, dropping the one already there.
-fn rotate_if_full(path: &Path) {
-    let too_big = fs::metadata(path).is_ok_and(|meta| meta.len() >= MAX_BYTES);
-    if !too_big {
+///
+/// A viewer holding the file open blocks the rename on Windows, and so does an
+/// indexer, so a failed rename truncates in place instead: the previous log is
+/// lost, but the file cannot grow past its bound forever.
+fn rotate_if_full(path: &Path, incoming: u64) {
+    let current = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    if current + incoming <= MAX_BYTES {
         return;
     }
     let previous = path.with_file_name(PREVIOUS_FILE);
     let _ = fs::remove_file(&previous);
-    let _ = fs::rename(path, &previous);
+    if fs::rename(path, &previous).is_ok() {
+        return;
+    }
+    let _ = OpenOptions::new().write(true).truncate(true).open(path);
+}
+
+/// Replaces control characters so one message stays one line.
+///
+/// A panic payload can carry newlines, and an unescaped one would append extra
+/// lines to the log, including a fabricated `quit` marker.
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other if other.is_control() => out.push('?'),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ`, in UTC.
@@ -146,12 +215,17 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// A path this process owns, so parallel tests never share a log.
+    /// A directory this process owns, so parallel tests never share a log.
+    ///
+    /// It must be a directory, not a bare file name in the temp folder:
+    /// `with_file_name` drops everything before the last separator, so two
+    /// tests would otherwise share one `ss550.log.old`.
     fn scratch(name: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!("ss550-diagnostics-{}-{name}", std::process::id()));
-        let _ = fs::remove_file(&path);
-        path
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("ss550-diagnostics-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("the scratch directory");
+        dir
     }
 
     fn at(seconds: u64) -> String {
@@ -180,41 +254,84 @@ mod tests {
 
     #[test]
     fn a_line_carries_the_timestamp_and_the_message() {
-        let path = scratch("line");
+        let dir = scratch("line");
+        let path = dir.join(LOG_FILE);
         record_at(&path, "quit from the tray");
         let text = fs::read_to_string(&path).expect("the log was written");
-        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
+        let stamp = "1970-01-01T00:00:00Z";
+        assert_eq!(text.len(), stamp.len() + " quit from the tray\n".len());
+        assert_eq!(text.lines().count(), 1, "got: {text:?}");
         assert!(text.ends_with(" quit from the tray\n"), "got: {text:?}");
-        assert_eq!(text.len(), "1970-01-01T00:00:00Z".len() + 1 + 18 + 1);
         assert!(text.starts_with("20"), "got: {text:?}");
     }
 
     #[test]
+    fn a_newline_in_a_message_cannot_forge_a_second_line() {
+        let dir = scratch("forge");
+        let path = dir.join(LOG_FILE);
+        record_at(&path, "boom\nquit from the tray");
+        let text = fs::read_to_string(&path).expect("the log was written");
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(text.lines().count(), 1, "got: {text:?}");
+        assert!(
+            text.ends_with(" boom\\nquit from the tray\n"),
+            "got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_panic_payload_is_read_whatever_shape_it_has() {
+        assert_eq!(panic_message(&"static text"), "static text");
+        assert_eq!(panic_message(&String::from("owned text")), "owned text");
+        assert_eq!(panic_message(&7u8), "a payload that is not a string");
+    }
+
+    #[test]
+    fn a_panic_without_a_place_says_so() {
+        assert_eq!(panic_place(None), "an unknown place");
+    }
+
+    #[test]
     fn a_full_log_rotates_before_the_next_line() {
-        let path = scratch("rotate");
+        let dir = scratch("rotate");
+        let path = dir.join(LOG_FILE);
+        let previous = dir.join(PREVIOUS_FILE);
         fs::write(&path, vec![b'x'; MAX_BYTES as usize]).expect("the full log was written");
-        let previous = path.with_file_name(PREVIOUS_FILE);
-        let _ = fs::remove_file(&previous);
 
         record_at(&path, "after the rotation");
 
         let line = fs::read_to_string(&path).expect("a fresh log replaced the full one");
         let kept = fs::metadata(&previous).map(|meta| meta.len());
-        let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(&previous);
+        let _ = fs::remove_dir_all(&dir);
         assert!(line.ends_with(" after the rotation\n"), "got: {line:?}");
         assert_eq!(kept.ok(), Some(MAX_BYTES), "the full log was kept as .old");
     }
 
     #[test]
+    fn a_log_one_line_short_of_the_bound_rotates_before_overflowing() {
+        let dir = scratch("bound");
+        let path = dir.join(LOG_FILE);
+        let previous = dir.join(PREVIOUS_FILE);
+        // One byte below the bound: the current length alone says "not full",
+        // but the line about to be written would push it past it.
+        fs::write(&path, vec![b'x'; MAX_BYTES as usize - 1]).expect("the nearly full log");
+
+        record_at(&path, "the line that would overflow");
+
+        let kept = fs::metadata(&previous).map(|meta| meta.len());
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(kept.ok(), Some(MAX_BYTES - 1), "the nearly full log moved");
+    }
+
+    #[test]
     fn a_small_log_is_left_alone() {
-        let path = scratch("small");
+        let dir = scratch("small");
+        let path = dir.join(LOG_FILE);
         record_at(&path, "first");
         record_at(&path, "second");
         let text = fs::read_to_string(&path).expect("the log was written");
-        let previous = path.with_file_name(PREVIOUS_FILE);
-        let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(&previous);
+        let _ = fs::remove_dir_all(&dir);
         assert_eq!(text.lines().count(), 2, "got: {text:?}");
     }
 }

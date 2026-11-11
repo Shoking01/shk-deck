@@ -156,13 +156,20 @@ exit would otherwise leave no trace. The app writes an append-only log instead:
 ```
 
 - Every run appends a `started` line, and the tray's `Quit` appends a `quit`
-  line. A `started` line with no matching `quit` is what a crash looks like in
-  this file — the app was running and then it was not.
+  line. A `started` line with no matching `quit` means the process did not leave
+  through the tray's Quit. That is what an unexpected exit looks like, but it is
+  a narrowed search rather than a verdict: a logoff, a shutdown or an "End task"
+  kills the process without running that handler either.
 - A panic writes its message and location before the process goes down, then
   hands the panic to the previous hook, so debug builds still print it to the
-  console.
+  console. Control characters in the message are escaped, so a payload cannot
+  forge a second line — including a fake `quit`.
 - The log rotates at 1 MB: the full file becomes `ss550.log.old` and a fresh one
-  starts. One old file is kept, never a growing pile.
+  starts. One old file is kept, never a growing pile. When the rename is blocked
+  — a viewer holding the file open does that on Windows — the file is truncated
+  in place instead, so it still cannot grow without bound.
+- Each line is built in full and written in one call, so a panic on a worker
+  thread cannot interleave with a line already being written.
 - Writing the log can never fail the app. A log that cannot be written is a log
   that cannot be written, and the controller keeps running.
 - `SS550_CONFIG_DIR` moves the whole directory, log included — the log sits next
@@ -170,13 +177,15 @@ exit would otherwise leave no trace. The app writes an append-only log instead:
 
 **Opening it.** There is no button. Click the version line at the bottom of
 `STEP 4 · RUN IN THE BACKGROUND` five times and the log opens in Notepad; the
-status line says whether it opened. The trigger is hidden on purpose: this is a
-support tool, not a feature, and a button would invite clicks that answer
-nothing.
+status line says whether it opened, and the log records the outcome rather than
+the attempt. The trigger is hidden on purpose: this is a support tool, not a
+feature, and a button would invite clicks that answer nothing.
 
 Notepad is chosen explicitly rather than through the `.log` file association. A
-clean Windows has no association for `.log` at all, so `start` would do nothing
-at all — Notepad is the one text viewer that exists on every Windows machine.
+clean Windows has no association for `.log` at all, so `start` would do nothing.
+It is also launched by absolute path, `%SystemRoot%\System32\notepad.exe`, so the
+lookup never walks the process's current directory, where a planted
+`notepad.exe` would otherwise run with the controller's privileges.
 
 **Verified live**: `2026-11-11T16:22:23Z started v0.1.0 (hidden=true)` landed in
 the real path with UTC correct, and `notepad <log>` opened the file.

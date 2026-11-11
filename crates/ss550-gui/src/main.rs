@@ -50,6 +50,19 @@ mod diagnostics;
 /// a button for it would invite clicks that answer nothing.
 const VERSION_CLICKS_TO_REVEAL: u8 = 5;
 
+/// Counts one click on the version line and says whether the reveal is due.
+///
+/// Split out from the window so the boundary — four clicks do nothing, the
+/// fifth reveals and starts over — is testable without starting a viewer.
+fn advance_clicks(clicks: u8) -> (u8, bool) {
+    let next = clicks.saturating_add(1);
+    if next < VERSION_CLICKS_TO_REVEAL {
+        (next, false)
+    } else {
+        (0, true)
+    }
+}
+
 /// Hex colour as GPUI `Hsla`.
 fn color(hex: u32) -> Hsla {
     rgb(hex).into()
@@ -658,11 +671,11 @@ impl Controller {
     /// The app has no console in release, so the log is the only place a panic
     /// or a strange exit leaves a trace. Reaching it is deliberately quiet.
     fn reveal_log(&mut self) {
-        self.version_clicks = self.version_clicks.saturating_add(1);
-        if self.version_clicks < VERSION_CLICKS_TO_REVEAL {
+        let (clicks, due) = advance_clicks(self.version_clicks);
+        self.version_clicks = clicks;
+        if !due {
             return;
         }
-        self.version_clicks = 0;
         self.note = match diagnostics::reveal() {
             Ok(()) => "Opened the log file.".into(),
             Err(error) => error.into(),
@@ -1520,6 +1533,21 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::advance_clicks;
+
+    #[test]
+    fn the_version_line_reveals_on_the_fifth_click() {
+        let mut clicks = 0;
+        for _ in 0..4 {
+            let (next, due) = advance_clicks(clicks);
+            clicks = next;
+            assert!(!due, "the reveal must wait for the fifth click");
+        }
+        let (next, due) = advance_clicks(clicks);
+        assert!(due, "the fifth click must reveal");
+        assert_eq!(next, 0, "the counter starts over after a reveal");
+    }
+
     #[test]
     fn the_release_binary_is_a_windows_gui() {
         // A console-subsystem binary gets a console window from Windows no
@@ -1531,10 +1559,7 @@ mod tests {
         // The test module is cut off first, so this assertion cannot match the
         // literal it contains and pass while the attribute is gone.
         let source = include_str!("main.rs");
-        let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("this file always has a test module");
+        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
         assert!(
             production
                 .contains(r#"#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]"#),
