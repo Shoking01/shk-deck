@@ -31,6 +31,11 @@ messages; the file below is a human summary, not a substitute for
   claiming a key was blank while the deck still showed it. And `sleep` woke
   the deck with a `DIS` before the sleep pack, so a refused sleep would have
   written to the deck on its way out. Both are fixed.
+- The image cache now changes only after the deck has been told, in both
+  clear paths. `clear_all` had the same ordering hazard as `clear_key`: a
+  failed write left the driver believing every key was blank while the deck
+  still showed the old images, and `repaint_all` skips keys the cache has
+  forgotten, so nothing would have repainted them.
 - `firmware_version()` keeps reading the static identity report instead of
   asking the firmware: `VER` is unverified precisely because writing it halts
   the USB endpoint.
@@ -49,6 +54,12 @@ messages; the file below is a human summary, not a substitute for
   to be on `PATH`, and `--sanitizer none` cannot link there: cargo-fuzz always
   applies sanitizer-coverage instrumentation whose section symbols do not
   exist in the COFF format.
+- The harness also feeds **enveloped reports of every length**, from the
+  minimum upwards. The prefix sweep cuts random bytes, which do not spell
+  `ACK`, and the framed input was always full length, so the short-but-
+  enveloped report — the one that catches an off-by-one at the state byte —
+  was never exercised. With it, the fuzz run reaches code the first corpus
+  never touched: coverage goes from `cov: 75 ft: 265` to `cov: 94 ft: 453`.
 
 ### Documentation — `PLAN.md` describes the project that exists
 - The old `PLAN.md` planned a different application: egui as the primary GUI

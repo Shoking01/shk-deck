@@ -637,14 +637,18 @@ impl Device {
             return Err(Ss550Error::NotInitialized);
         }
 
-        // Clear the cache so repaint_all won't put them back.
-        self.button_cache.fill(None);
-
         let cle = build_cle_all();
         self.write_pack(Command::ClearAll, &cle)?;
 
         let stp = build_stp();
         self.write_pack(Command::ClearAll, &stp)?;
+
+        // Clear the cache so repaint_all won't put them back — but only once
+        // the deck has actually been told. The writes above can fail, and if
+        // they do the deck still shows the old images: dropping them from the
+        // cache anyway would make the driver claim every key is blank while
+        // the deck shows them, and it would never repaint them.
+        self.button_cache.fill(None);
 
         Ok(())
     }
