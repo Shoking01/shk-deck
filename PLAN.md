@@ -141,9 +141,16 @@ a release build before it is a feature anyone should use.
 
 Honest list. Items marked *out of scope for v1* are decisions, not debts.
 
-- **No safe-mode list** (`docs/protocol/verified.md`): the file that says which
-  commands are verified on hardware and which the driver may send.
-- **No fuzzing**: no `cargo fuzz` target on the protocol decoder.
+- **The gate trusts the caller's label, not the bytes**: the driver checks the
+  command the caller declares, never the pack it is about to send. No call
+  site mislabels anything today, so no unproven byte is reachable; the
+  hardening is for `Pack` to carry the command it belongs to.
+- **The registry rows are on the author**: the compiler forces an entry for
+  every command variant, but nothing forces a row in the registry or in the
+  verified list.
+- **The fuzz target does not run in CI**, and `fuzz/Cargo.lock` is not covered
+  by the dependency audit. Both are decisions about CI, not about the
+  protocol.
 - **No simulator**: no `ss550-simulator` crate emulating the deck for CI.
 - **No hardware-in-loop tests**: nothing runs against a real deck from
   `cargo test`; there is no `hardware-tests` feature.
@@ -166,7 +173,7 @@ Honest list. Items marked *out of scope for v1* are decisions, not debts.
 Each one is small enough to close on its own and leaves the project in a
 shippable state.
 
-### M1 — Safety net for the protocol (blocking for any new command)
+### M1 — Safety net for the protocol: done (2026-11-11)
 
 The deck can be left backlit and black by a bad packet, and from that point no
 host can paint it until it is fully power-cycled. Before any *new* command is
@@ -179,6 +186,19 @@ sent to the device:
 
 **Done when** the fuzz target runs clean and every command the driver can send
 appears in `verified.md`.
+
+**Status: done.** Merged into `main` as PR #10 — ten work-unit commits and
+five native reviews, all approved. Ten commands on the list, four verified on
+hardware and six not, each with its evidence or the reason it is pending. The
+driver refuses an unproven command **before its bytes leave the host**, and
+there is no switch that turns that off. A test fails when the document and the
+registry disagree, so the list cannot drift away from the code. The fuzz
+target ran 30,059 executions with no crash, and eight unit tests pin which
+inputs it feeds.
+
+Two commands changed behaviour, on purpose: `clear_key` and `sleep` are now
+refused, because neither was ever exercised on a deck. The application calls
+neither.
 
 ### M2 — A real release build
 
