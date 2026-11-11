@@ -60,6 +60,33 @@ fuzz_target!(|data: &[u8]| {
         let _ = is_key_edge(&data[..len]);
     }
 
+    // A **short** report that still carries the envelope. The prefix sweep
+    // cuts random bytes, which essentially never spell ACK, and the framed
+    // input is always full length, so without this the only inputs that
+    // reach the key and state fields are long ones: an off-by-one at the
+    // state byte, which needs a report that is just barely long enough,
+    // would never be exercised.
+    for len in PAYLOAD_OFFSET..=data.len() + PAYLOAD_OFFSET {
+        let mut short = vec![0u8; len];
+        short[0..3].copy_from_slice(b"ACK");
+        short[5..7].copy_from_slice(b"OK");
+
+        let mut rest = data;
+        if let Some(&state) = rest.first() {
+            short[10] = state;
+            rest = &rest[1..];
+        }
+        if let Some(&key) = rest.first() {
+            short[9] = key;
+            rest = &rest[1..];
+        }
+        let n = rest.len().min(len - PAYLOAD_OFFSET);
+        short[PAYLOAD_OFFSET..PAYLOAD_OFFSET + n].copy_from_slice(&rest[..n]);
+
+        let _ = parse_input_report(&short);
+        let _ = is_key_edge(&short);
+    }
+
     // The same bytes inside a valid envelope, so the key index and the state
     // byte are reached with adversarial values.
     let framed = frame_report(data);

@@ -255,8 +255,14 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// Every command, listed by hand: a new variant that nobody adds to
-    /// [`COMMANDS`] must fail this test instead of sailing through.
+    /// Every command, listed by hand.
+    ///
+    /// This is the check's own universe, so it catches a command that is in
+    /// [`COMMANDS`] but missing here, or listed twice. A variant somebody
+    /// adds to the enum and to `info()` but to **neither** list still slips
+    /// through: the compiler forces the `info()` arm, but no compiler forces
+    /// a registry row or a row in `docs/protocol/verified.md`. Those two are
+    /// on the author, and the document says so where a reader will see it.
     const ALL: [Command; 10] = [
         Command::DisplayOn,
         Command::Brightness,

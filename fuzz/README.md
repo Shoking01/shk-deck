@@ -24,7 +24,7 @@ entry point of `ss550-protocol`:
 | `is_key_edge` | the same four sets |
 | `read_index_to_firmware_key` | every value the fuzzer can produce |
 
-The three shapes exist for three different reasons:
+The four shapes exist for four different reasons:
 
 - **Raw bytes** are what a hostile or broken device actually sends.
 - **Every prefix** exposes an off-by-one in the length guard: if the decoder
@@ -88,15 +88,16 @@ That runs until it finds a crash. For a bounded session:
 RUSTUP_TOOLCHAIN=nightly cargo fuzz run decode_input_report -- -max_total_time=60 -print_final_stats=1
 ```
 
-A clean run ends with something like:
+A clean run ends with something like this — the session recorded for the
+milestone, so the number can be checked against the changelog:
 
 ```text
-Done 270327 runs in 61 second(s)
-stat::number_of_executed_units: 270327
-stat::average_exec_per_sec:     4431
-stat::new_units_added:          68
+Done 142297 runs in 61 second(s)
+stat::number_of_executed_units: 142297
+stat::average_exec_per_sec:     2332
+stat::new_units_added:          3
 stat::slowest_unit_time_sec:    0
-stat::peak_rss_mb:              514
+stat::peak_rss_mb:              542
 ```
 
 and exit code `0`. A crash would land in `fuzz/artifacts/decode_input_report/`

@@ -134,3 +134,35 @@ A rule with an off switch is a rule that gets switched off.
   dependency tree is unaudited; and the fuzz target is not run by CI, because
   a permanent fuzzing job is a decision about CI, not about the protocol.
   Both are follow-ups, recorded here on purpose.
+- **L9 — 2026-11-10, the native review.** The candidate went through the four
+  native lenses (risk, resilience, readability, reliability) plus a refuter,
+  and the review came back **approved**; the authority was burned with
+  `review.acknowledge-approved`. One BLOCKER was raised — the drift test said
+  it did not compile — and the refuter **refuted** it: the line reads
+  `command.name() == row.name`, with the call, and the target compiles and
+  passes. The advisory findings are follow-up work, not defects in this
+  change:
+  - **`clear_all` emptied the image cache before the write** (flagged by
+    risk, resilience and reliability). It is pre-existing, but it is the same
+    hazard this change fixed for `clear_key`, so it is fixed here too: the
+    cache is cleared only after the deck has been told.
+  - **The gate trusts the caller's label, not the bytes** (risk and
+    readability). `write_pack` takes the command the caller declares and
+    never compares it with the pack it is about to send. No current call site
+    mislabels anything, so no unproven byte is reachable today; the exposure
+    is a future mislabel. The proper hardening is for `Pack` to carry the
+    command it belongs to, so the funnel can compare the two. That changes
+    the protocol crate's public builders, so it is the first follow-up.
+  - **The registry-completeness test overpromised** (readability and
+    reliability): the compiler forces an `info()` arm, but nothing forces a
+    row in `COMMANDS` or a row in the document. The doc comment now says
+    exactly what is enforced and what is on the author.
+  - **The fuzz harness never combined a short buffer with a valid envelope**
+    (reliability): the prefix sweep cuts random bytes, which do not spell
+    ACK, and the framed input was always full length. The harness now feeds
+    enveloped reports of every length from the minimum upwards.
+  - **The fuzz README quoted a different run** than the one the changelogs
+    record, and counted three input shapes while listing four. Both fixed.
+  - **The fuzz lock file is not audited and the fuzz target does not run in
+    CI** (risk and resilience): see L8. Adding either is a decision about
+    CI, not about the protocol.
