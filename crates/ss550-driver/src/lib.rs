@@ -41,7 +41,9 @@ mod error;
 mod image;
 mod keys;
 
-pub use connection::{ButtonEvent, Device, LONG_CONNECT_TIMEOUT, PID, VID};
+pub use connection::{
+    ensure_verified, ButtonEvent, Command, Device, LONG_CONNECT_TIMEOUT, PID, VID,
+};
 pub use error::Ss550Error;
 pub use image::{ButtonImage, Rotation};
 pub use keys::Key;

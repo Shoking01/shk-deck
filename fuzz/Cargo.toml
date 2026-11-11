@@ -1,0 +1,34 @@
+[package]
+name = "ss550-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Fuzz harness for the SS550 protocol decoder (development only, needs nightly)"
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ss550-protocol = { path = "../crates/ss550-protocol" }
+
+[lib]
+name = "ss550_fuzz"
+path = "src/lib.rs"
+
+[[bin]]
+name = "decode_input_report"
+path = "fuzz_targets/decode_input_report.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
+
+# This crate is its own workspace root on purpose: `cargo fuzz` needs a
+# standalone package, and keeping it out of the repository workspace keeps
+# the fuzz lock file and the nightly-only dependencies out of the three
+# shipped lock files.
+[workspace]

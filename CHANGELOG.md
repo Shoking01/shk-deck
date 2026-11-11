@@ -7,6 +7,75 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Added — the registry of commands a deck has proven
+- `docs/protocol/verified.md` is the safe-mode list: one row per command the
+  protocol crate can encode, with the tag on the wire, whether a test deck has
+  proven it, and where the evidence lives. Ten commands, four verified, six
+  not.
+- `ss550-protocol` gained a registry (`Command`, `Verification`, `CommandInfo`,
+  `COMMANDS`) that carries exactly the text the document prints. The protocol
+  crate stays pure: it owns the registry, the driver owns the enforcement.
+- A test compares the document with the registry, so the list cannot drift
+  away from the code: flipping a status in the document fails the build.
+
+### Added — the driver refuses to send commands nobody has proven
+- The driver's only write path now checks the registry **before** the bytes
+  leave the host. An unproven command is refused with the command's name and
+  the reason, and there is no flag, no environment variable and no setter that
+  turns the gate off.
+- What it changes today: `clear_key` and `sleep` are refused, because neither
+  was ever exercised on a deck. The app calls neither. `clear_all`, the image
+  path, the brightness and the heartbeat are untouched: all four are verified.
+- Two bugs the gate exposed. `clear_key` used to drop the key from the image
+  cache *before* writing, so a refused clear would have left the driver
+  claiming a key was blank while the deck still showed it. And `sleep` woke
+  the deck with a `DIS` before the sleep pack, so a refused sleep would have
+  written to the deck on its way out. Both are fixed.
+- The image cache now changes only after both clear packs are accepted, in
+  both clear paths. Before this change, `clear_all` had the same ordering
+  hazard as `clear_key`: a failed write left the driver believing every key
+  was blank while the deck still showed the old images, and `repaint_all`
+  skips keys the cache has forgotten, so nothing would have repainted them.
+  Now a failed write leaves the deck's state unknown, so the driver keeps
+  the images: they are what the user had, and a later repaint can restore
+  them. The cost is that a deck that cleared anyway gets its images back on
+  the next repaint.
+- `firmware_version()` keeps reading the static identity report instead of
+  asking the firmware: `VER` is unverified precisely because writing it halts
+  the USB endpoint.
+
+### Added — a fuzz target for the protocol decoder
+- `fuzz/` is its own workspace root with a `cargo fuzz` target that feeds
+  arbitrary bytes to the decoder: raw bytes, every prefix of them, the same
+  bytes inside a valid `ACK`/`OK` envelope (at every length just above the
+  minimum, and at a bounded sample of the rest), and an oversized buffer. It
+  asserts nothing about the result — a malformed report may be rejected; it
+  may not panic.
+- Which lengths the sweep visits is decided in `fuzz/src/lib.rs`, where
+  ordinary unit tests pin it: the minimum and the fifteen lengths above it
+  are always visited, the rest of the range is sampled at most 64 times per
+  input, and no length is ever below the minimum.
+  `cargo test --manifest-path fuzz/Cargo.toml --lib` runs them; the fuzz
+  binary is excluded from the test build, so the command needs neither
+  nightly nor the sanitizer runtime.
+- Verified on nightly with AddressSanitizer. The edge counter rose with
+  every harness change — `cov: 75` before the enveloped sweep existed,
+  `cov: 94` with it, `cov: 115` with the lengths just above the minimum
+  always visited — and no run found a crash, a timeout or an out-of-memory.
+  The throughput that bought those edges fell from 2,332 executions per
+  second to 653, which is what the extra shapes cost: every input now pays
+  for the whole band and for the list of lengths. The session recorded for
+  the milestone: 30,059 executions in 46 seconds at 653 per second, peak
+  RSS 509 MB.
+- How to run it is in `fuzz/README.md`. On Windows the sanitizer runtime has
+  to be on `PATH`, and `--sanitizer none` cannot link there: cargo-fuzz always
+  applies sanitizer-coverage instrumentation whose section symbols do not
+  exist in the COFF format.
+- The enveloped reports are the ones that catch an off-by-one at the state
+  byte: the prefix sweep cuts random bytes, which do not spell `ACK`, and the
+  framed input was always full length, so the short-but-enveloped report was
+  never exercised before this.
+
 ### Documentation — `PLAN.md` describes the project that exists
 - The old `PLAN.md` planned a different application: egui as the primary GUI
   with GPUI as a fallback, a `ss550-ui` / `action-engine` / `plugins/` layout,

@@ -19,6 +19,22 @@
 //! - Button edges (verified live): `CRT|ACK` header with `"ACK"` at `[0..3]`,
 //!   `"OK"` at `[5..7]`, key at `[9]`, state at `[10]`.
 //!
+//! ## The verified list
+//!
+//! The `verified` module is the machine-readable safe-mode list: for every
+//! command the protocol can encode, [`Command`] says whether a **test deck**
+//! has proven it and where the evidence lives. The driver refuses to send
+//! anything that is not on it. The human-readable twin is
+//! `docs/protocol/verified.md`, and a test fails when the two disagree.
+//!
+//! ```rust
+//! use ss550_protocol::{Command, COMMANDS};
+//!
+//! assert_eq!(COMMANDS.len(), 10);
+//! assert!(Command::DisplayOn.is_verified());
+//! assert!(!Command::FirmwareVersion.is_verified());
+//! ```
+//!
 //! ## Example
 //!
 //! ```rust
@@ -44,6 +60,7 @@
 mod error;
 mod input;
 mod pack;
+mod verified;
 
 pub const VID: u16 = 0x0200;
 pub const PID: u16 = 0x3000;
@@ -58,3 +75,4 @@ pub use pack::{
     build_image_chunk, build_image_chunks, build_lig, build_mod, build_sleep, build_stp, build_ver,
     Pack, CHUNK_SIZE, MAX_IMAGE_SIZE, REPORT_SIZE,
 };
+pub use verified::{Command, CommandInfo, Verification, COMMANDS};

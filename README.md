@@ -25,11 +25,17 @@ protocol ──▶ driver ──▶ engine ──▶ gui (GPUI Kit)
 | Background mode | tray icon, X hides the window, deck stays awake, keys keep working |
 | Start with Windows | opt-in, one `HKCU\...\Run` value, off by default |
 | Report a program that dies | watched for 6 s, failure shown in the status line |
+| Safe mode | the driver refuses to send any command a test deck has not proven |
 
 Every launch route above was exercised on the real deck. What is *not* done is
 listed in [`CHANGELOG.md`](CHANGELOG.md#known-limitations--fase-1-close-out):
-profiles, plugin sandbox, hotplug notifications, async transport, fuzzing and
-the udev rules.
+profiles, plugin sandbox, hotplug notifications, async transport and the udev
+rules.
+
+The commands the deck has actually proven live are listed in
+[`docs/protocol/verified.md`](docs/protocol/verified.md), and the driver
+enforces that list: a command nobody has exercised on a deck is refused
+before its bytes leave the host.
 
 ## Layout
 
@@ -65,6 +71,16 @@ cargo clippy --manifest-path crates/ss550-tray/Cargo.toml --all-targets -- -D wa
 
 The three roots are separate workspaces on purpose: the driver/protocol suite
 stays fast and never pays for GPUI's ~800 packages or the Win32 tree.
+
+The protocol decoder is fuzzed from a fourth, separate workspace root, so it
+never enters the shipped lock files:
+
+```bash
+cargo fuzz run decode_input_report -- -max_total_time=60
+```
+
+It needs a nightly toolchain and, on Windows, the Visual Studio sanitizer
+runtime on `PATH`. [`fuzz/README.md`](fuzz/README.md) has the details.
 
 ```bash
 cargo run --manifest-path crates/ss550-gui/Cargo.toml
