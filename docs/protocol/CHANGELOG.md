@@ -9,6 +9,12 @@ No original vendor source code was copied (clean-room note in
 ## Unreleased
 
 ### Added
+- `docs/protocol/verified.md`: the safe-mode list. Ten commands, four verified
+  on hardware (`DIS`, `LIG`, `BAT` + chunks + `STP`, `CLE 0xFF`), six not
+  (`CLE` per key, `HAN` sleep, `CONNECT`, the bare `HAN`, `VER`, `MOD`), each
+  with its evidence or the reason it is still pending. The registry in
+  `ss550-protocol` carries the same text, and a test fails when the document
+  and the registry disagree.
 - `is_key_edge(report)`: tells a real key edge apart from a reply to one of our
   own commands. Every report from the deck wears the same envelope (`"ACK"` at
   `[0..3]`, `"OK"` at `[5..7]`), so a command reply (generic ACK, `TF` space

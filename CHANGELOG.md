@@ -7,6 +7,15 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Added — the registry of commands a deck has proven
+- `docs/protocol/verified.md` is the safe-mode list: one row per command the
+  protocol crate can encode, with the tag on the wire, whether a test deck has
+  proven it, and where the evidence lives. Ten commands, four verified, six
+  not.
+- `ss550-protocol` gained a registry (`Command`, `Verification`, `CommandInfo`,
+  `COMMANDS`) that carries exactly the text the document prints. The protocol
+  crate stays pure: it owns the registry, the driver owns the enforcement.
+
 ### Documentation — `PLAN.md` describes the project that exists
 - The old `PLAN.md` planned a different application: egui as the primary GUI
   with GPUI as a fallback, a `ss550-ui` / `action-engine` / `plugins/` layout,
