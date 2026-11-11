@@ -7,7 +7,22 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
-### Added — the registry of commands a deck has proven
+### Fixed - the release build opened a console window
+- The GUI binary was linked as a console subsystem. Windows creates a console
+  window for such an executable no matter how it is started — double-click, the
+  autostart entry, or a terminal — and a tray application must not have one.
+  `crates/ss550-gui/src/main.rs` now carries
+  `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`.
+- The attribute is release-only on purpose: debug builds keep the console, so
+  `cargo run` still shows output and panics while developing.
+- Measured on the release artifact: `OptionalHeader.Subsystem` went from `3`
+  (CONSOLE) to `2` (GUI), and launching the installed copy creates no `conhost`
+  window. A test pins the attribute and cuts the test module off before reading
+  the source, so it cannot pass by matching its own literal.
+- Known limitation: a release-mode panic now leaves no visible trace, because
+  the console that used to show it is gone. Nothing writes it to a file yet.
+
+### Added - the registry of commands a deck has proven
 - `docs/protocol/verified.md` is the safe-mode list: one row per command the
   protocol crate can encode, with the tag on the wire, whether a test deck has
   proven it, and where the evidence lives. Ten commands, four verified, six

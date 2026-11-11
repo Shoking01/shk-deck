@@ -13,6 +13,12 @@
 //! Pressing a key on the deck lights its tile and runs the action bound to it,
 //! on a background thread. Bindings are kept in
 //! `%APPDATA%\ss550\bindings.json` (or `$SS550_CONFIG_DIR/bindings.json`).
+
+// The release build is a GUI binary: Windows creates a console window for a
+// console-subsystem executable no matter how it is started, and a tray
+// application must not have one. Debug builds keep the console so `cargo run`
+// still shows output and panics while developing.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![deny(unsafe_code)]
 
 use std::path::PathBuf;
@@ -1456,4 +1462,29 @@ fn main() {
             })
             .expect("failed to open the controller window");
         });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_release_binary_is_a_windows_gui() {
+        // A console-subsystem binary gets a console window from Windows no
+        // matter how it is started: double-click, the autostart entry, or a
+        // terminal. This app is a tray application, so the release build must
+        // be the GUI subsystem. Debug builds keep the console on purpose, so
+        // `cargo run` still shows output and panics while developing.
+        //
+        // The test module is cut off first, so this assertion cannot match the
+        // literal it contains and pass while the attribute is gone.
+        let source = include_str!("main.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("this file always has a test module");
+        assert!(
+            production
+                .contains(r#"#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]"#),
+            "the release binary must be a GUI subsystem, not a console one"
+        );
+    }
 }
