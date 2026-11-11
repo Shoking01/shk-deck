@@ -25,11 +25,17 @@ protocol ──▶ driver ──▶ engine ──▶ gui (GPUI Kit)
 | Background mode | tray icon, X hides the window, deck stays awake, keys keep working |
 | Start with Windows | opt-in, one `HKCU\...\Run` value, off by default |
 | Report a program that dies | watched for 6 s, failure shown in the status line |
+| Safe mode | the driver refuses to send any command a test deck has not proven |
 
 Every launch route above was exercised on the real deck. What is *not* done is
 listed in [`CHANGELOG.md`](CHANGELOG.md#known-limitations--fase-1-close-out):
-profiles, plugin sandbox, hotplug notifications, async transport, fuzzing and
-the udev rules.
+profiles, plugin sandbox, hotplug notifications, async transport and the udev
+rules.
+
+The commands the deck has actually proven live are listed in
+[`docs/protocol/verified.md`](docs/protocol/verified.md), and the driver
+enforces that list: a command nobody has exercised on a deck is refused
+before its bytes leave the host.
 
 ## Layout
 

@@ -16,6 +16,23 @@ messages; the file below is a human summary, not a substitute for
   `COMMANDS`) that carries exactly the text the document prints. The protocol
   crate stays pure: it owns the registry, the driver owns the enforcement.
 
+### Added — the driver refuses to send commands nobody has proven
+- The driver's only write path now checks the registry **before** the bytes
+  leave the host. An unproven command is refused with the command's name and
+  the reason, and there is no flag, no environment variable and no setter that
+  turns the gate off.
+- What it changes today: `clear_key` and `sleep` are refused, because neither
+  was ever exercised on a deck. The app calls neither. `clear_all`, the image
+  path, the brightness and the heartbeat are untouched: all four are verified.
+- Two bugs the gate exposed. `clear_key` used to drop the key from the image
+  cache *before* writing, so a refused clear would have left the driver
+  claiming a key was blank while the deck still showed it. And `sleep` woke
+  the deck with a `DIS` before the sleep pack, so a refused sleep would have
+  written to the deck on its way out. Both are fixed.
+- `firmware_version()` keeps reading the static identity report instead of
+  asking the firmware: `VER` is unverified precisely because writing it halts
+  the USB endpoint.
+
 ### Documentation — `PLAN.md` describes the project that exists
 - The old `PLAN.md` planned a different application: egui as the primary GUI
   with GPUI as a fallback, a `ss550-ui` / `action-engine` / `plugins/` layout,

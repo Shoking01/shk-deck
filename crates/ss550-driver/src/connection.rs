@@ -6,7 +6,7 @@ use crate::keys::{self, Key};
 use hidapi::{HidApi, HidDevice};
 use ss550_protocol::{
     build_bat, build_cle_all, build_cle_key, build_dis, build_image_chunks, build_lig, build_sleep,
-    build_stp, is_key_edge, parse_input_report, ButtonState, INPUT_REPORT_SIZE,
+    build_stp, is_key_edge, parse_input_report, ButtonState, Verification, INPUT_REPORT_SIZE,
 };
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -14,11 +14,53 @@ use std::time::{Duration, Instant};
 /// Redragon SS550 v3 VID/PID (re-exported from `ss550-protocol`).
 pub use ss550_protocol::{PID, VID};
 
+/// A command the host can send to the deck (re-exported from `ss550-protocol`).
+///
+/// The driver refuses to send anything that is not on the verified list, so
+/// a caller that wants to know what *can* be sent asks the registry.
+pub use ss550_protocol::Command;
+
 /// Usage page of the writable vendor interface (MI_00).
 /// Windows denies output reports on the keyboard collection (MI_01,
 /// usage page `0x0001`), so discovery must prefer this page — exactly
 /// like `ss550-probe` does.
 const VENDOR_USAGE_PAGE: u16 = 0xffa0;
+
+/// Refuses a command that no test deck has proven.
+///
+/// This is the safety net of `AGENTS.md` §4 in code form: the driver sends
+/// nothing that is not on the verified list, and the refusal happens
+/// **before** the bytes leave the host.
+///
+/// There is deliberately **no flag, no environment variable and no setter**
+/// that turns this off (S7): a rule with an off switch is a rule that gets
+/// switched off.
+///
+/// The error names the command and the reason, so the caller can tell
+/// *which* command was blocked and *why*:
+///
+/// ```text
+/// Refusing to send clear_key: never sent to a deck: live clear-per-key is still pending (docs/protocol/CHANGELOG.md)
+/// ```
+///
+/// # Examples
+///
+/// ```
+/// use ss550_driver::{ensure_verified, Command};
+///
+/// assert!(ensure_verified(Command::DisplayOn).is_ok());
+/// assert!(ensure_verified(Command::ClearKey).is_err());
+/// ```
+pub fn ensure_verified(command: Command) -> Result<(), Ss550Error> {
+    let info = command.info();
+    match info.verification {
+        Verification::Verified { .. } => Ok(()),
+        Verification::Unverified { reason } => Err(Ss550Error::CommandNotVerified {
+            command: info.command.name(),
+            reason,
+        }),
+    }
+}
 
 /// How long the driver may stay silent before it should send a heartbeat.
 ///
@@ -308,6 +350,13 @@ impl Device {
     /// static, a successful read is **not** evidence that anything reached the
     /// firmware. If the device returns no bytes, this returns an empty string
     /// rather than fabricating a version.
+    ///
+    /// `VER` stays `unverified` in the registry
+    /// (`docs/protocol/verified.md`) precisely **because** writing it halts
+    /// the endpoint. That is why this method reads the static identity report
+    /// instead of asking the firmware: the gate would refuse the write
+    /// anyway, and the refusal would be the last warning before the deck
+    /// goes dark.
     pub fn firmware_version(&self) -> Result<String, Ss550Error> {
         let mut buf = vec![0u8; ss550_protocol::REPORT_SIZE];
         // `buf[0]` already holds report ID 0x00, as required before the call.
@@ -323,7 +372,21 @@ impl Device {
         Ok(parse_firmware_version(&buf[..end]))
     }
 
-    fn write_pack(&mut self, pack: &ss550_protocol::Pack) -> Result<(), Ss550Error> {
+    /// The one and only way bytes leave the host.
+    ///
+    /// The command is checked against the verified registry **before** the
+    /// write, so an unproven command never reaches the deck. This is the
+    /// single funnel every report goes through: keep it that way, or the
+    /// safety net has a hole in it.
+    fn write_pack(
+        &mut self,
+        command: Command,
+        pack: &ss550_protocol::Pack,
+    ) -> Result<(), Ss550Error> {
+        // The gate. Before the bytes, never after: an unproven command must
+        // not leave the host at all.
+        ensure_verified(command)?;
+
         // The reference implementation drives this path with `hid_write`
         // (interrupt OUT). Control `Set_Report` (`send_output_report`) returns
         // success but the firmware ignores it, so it must never be used here:
@@ -376,8 +439,10 @@ impl Device {
 
         // `DIS` is the proven heartbeat: it wakes the display and has no
         // persistent side effect, unlike `LIG` which would need a restore.
+        // The heartbeat is the `display_on` command, not a command of its own:
+        // the registry lists what the deck has proven, and `DIS` is proven.
         let dis = build_dis();
-        self.write_pack(&dis)
+        self.write_pack(Command::DisplayOn, &dis)
     }
 
     /// Overrides the heartbeat interval.
@@ -451,7 +516,7 @@ impl Device {
         }
 
         let dis = build_dis();
-        self.write_pack(&dis)?;
+        self.write_pack(Command::DisplayOn, &dis)?;
 
         self.initialized = true;
         Ok(())
@@ -465,7 +530,7 @@ impl Device {
     /// Sets brightness (0-100).
     pub fn set_brightness(&mut self, b: u8) -> Result<(), Ss550Error> {
         let pack = build_lig(b.clamp(0, 100))?;
-        self.write_pack(&pack)?;
+        self.write_pack(Command::Brightness, &pack)?;
         self.brightness = b.clamp(0, 100);
         Ok(())
     }
@@ -505,7 +570,7 @@ impl Device {
         }
 
         let stp = build_stp();
-        self.write_pack(&stp)?;
+        self.write_pack(Command::ImageTransfer, &stp)?;
 
         Ok(())
     }
@@ -513,10 +578,10 @@ impl Device {
     fn send_image(&mut self, img: &ButtonImage) -> Result<(), Ss550Error> {
         let firmware_key = keys::open_deck_to_firmware(img.key);
         let bat = build_bat(img.jpeg.len(), firmware_key)?;
-        self.write_pack(&bat)?;
+        self.write_pack(Command::ImageTransfer, &bat)?;
 
         for chunk in build_image_chunks(&img.jpeg) {
-            self.write_pack(&chunk)?;
+            self.write_pack(Command::ImageTransfer, &chunk)?;
         }
 
         Ok(())
@@ -526,23 +591,33 @@ impl Device {
     ///
     /// Sends `CRT|CLE` for the given key's 1-based firmware key, followed by
     /// one `STP` to commit. Use [`Device::clear_all`] to clear every key.
+    ///
+    /// **This always fails, on purpose.** The clear-per-key path was never
+    /// exercised on a deck, so it is `unverified` in the registry
+    /// (`docs/protocol/verified.md`) and the driver refuses to send it with
+    /// [`Ss550Error::CommandNotVerified`]. The encoding stays here, unit
+    /// tested, until a **test deck** proves it: a rejected report halts the
+    /// USB endpoint, and the daily driver is not the place to find out.
     pub fn clear_key(&mut self, key: Key) -> Result<(), Ss550Error> {
         if !self.initialized {
             return Err(Ss550Error::NotInitialized);
         }
 
-        // Clear from cache as well.
+        let firmware_key = keys::open_deck_to_firmware(key.to_index());
+        let cle = build_cle_key(firmware_key)?;
+        self.write_pack(Command::ClearKey, &cle)?;
+
+        let stp = build_stp();
+        self.write_pack(Command::ClearKey, &stp)?;
+
+        // Clear from cache as well — but only once the deck has actually been
+        // told. The writes above are refused today, so the cache keeps the
+        // image: dropping it would make the driver claim a key is clear
+        // while the deck still shows it.
         let idx = key.to_index() as usize;
         if idx < self.button_cache.len() {
             self.button_cache[idx] = None;
         }
-
-        let firmware_key = keys::open_deck_to_firmware(key.to_index());
-        let cle = build_cle_key(firmware_key)?;
-        self.write_pack(&cle)?;
-
-        let stp = build_stp();
-        self.write_pack(&stp)?;
 
         Ok(())
     }
@@ -555,6 +630,8 @@ impl Device {
     /// Note: Brightness must be managed separately before and after.
     /// Also clears the internal image cache so these buttons won't be
     /// repainted by [`Device::repaint_all`].
+    ///
+    /// This command **is** on the verified list: it was exercised on a deck.
     pub fn clear_all(&mut self) -> Result<(), Ss550Error> {
         if !self.initialized {
             return Err(Ss550Error::NotInitialized);
@@ -564,10 +641,10 @@ impl Device {
         self.button_cache.fill(None);
 
         let cle = build_cle_all();
-        self.write_pack(&cle)?;
+        self.write_pack(Command::ClearAll, &cle)?;
 
         let stp = build_stp();
-        self.write_pack(&stp)?;
+        self.write_pack(Command::ClearAll, &stp)?;
 
         Ok(())
     }
@@ -660,11 +737,22 @@ impl Device {
     /// not-initialized, so call [`Device::initialize`] again to wake.
     /// Pending queued images are kept and will flush after the next
     /// initialize + flush.
+    ///
+    /// **This always fails, on purpose.** The sleep form was encoded from the
+    /// reference implementation and never exercised on a deck, so it is
+    /// `unverified` in the registry (`docs/protocol/verified.md`) and the
+    /// driver refuses to send it with [`Ss550Error::CommandNotVerified`].
+    /// The gate is checked *before* [`Device::initialize`] too, so a refused
+    /// sleep does not leave a `DIS` on the deck on its way out.
     pub fn sleep(&mut self) -> Result<(), Ss550Error> {
+        // Check the gate first: the refusal must not wake the deck on its
+        // way to being refused.
+        ensure_verified(Command::Sleep)?;
+
         self.initialize()?;
 
         let sleep_pack = build_sleep();
-        self.write_pack(&sleep_pack)?;
+        self.write_pack(Command::Sleep, &sleep_pack)?;
 
         self.initialized = false;
         Ok(())
@@ -927,5 +1015,76 @@ mod tests {
         //
         // Integration test: run `cargo test -p ss550-driver -- --ignored connect_real`
         // on hardware. It replugs the deck and verifies connect() returns in ~4 s.
+    }
+
+    #[test]
+    fn the_verified_commands_pass_the_gate() {
+        for command in [
+            Command::DisplayOn,
+            Command::Brightness,
+            Command::ImageTransfer,
+            Command::ClearAll,
+        ] {
+            assert!(
+                ensure_verified(command).is_ok(),
+                "{} must be allowed",
+                command.name()
+            );
+        }
+    }
+
+    #[test]
+    fn the_unverified_commands_are_refused() {
+        for command in [
+            Command::ClearKey,
+            Command::Sleep,
+            Command::KeepAlive,
+            Command::Handshake,
+            Command::FirmwareVersion,
+            Command::Mode,
+        ] {
+            match ensure_verified(command) {
+                Err(Ss550Error::CommandNotVerified {
+                    command: name,
+                    reason,
+                }) => {
+                    assert_eq!(name, command.name());
+                    assert!(!reason.trim().is_empty());
+                }
+                Ok(()) => panic!("{} must be refused", command.name()),
+                Err(other) => panic!(
+                    "{} was refused for the wrong reason: {other}",
+                    command.name()
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn the_refusal_names_the_command_and_the_reason() {
+        let error = ensure_verified(Command::ClearKey).expect_err("clear_key is unverified");
+        assert_eq!(
+            error.to_string(),
+            "Refusing to send clear_key: never sent to a deck: live clear-per-key \
+             is still pending (docs/protocol/CHANGELOG.md)"
+        );
+    }
+
+    #[test]
+    fn every_write_goes_through_the_gated_funnel() {
+        // The gate is only as good as its coverage: every byte that leaves the
+        // host must go through the one gated funnel. Count the write call
+        // sites in the production half of this file — the test module is cut
+        // off first, so this test cannot match its own text.
+        let source = include_str!("connection.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("this file always has a test module");
+        assert_eq!(
+            production.matches(".write(").count(),
+            1,
+            "every byte must leave through the single gated funnel"
+        );
     }
 }

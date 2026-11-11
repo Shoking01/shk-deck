@@ -8,6 +8,19 @@ No original vendor source code was copied (clean-room note in
 
 ## Unreleased
 
+### Changed
+- The driver now refuses to send any command that is not on the verified list,
+  and it refuses it **before** the bytes leave the host. The refusal names the
+  command and the reason, and there is no switch that turns it off.
+  `clear_key` and `sleep` are the two commands it refuses: neither was ever
+  exercised on a deck, so neither may reach one. `clear_all`, the image path,
+  the brightness and the heartbeat are verified and behave exactly as before.
+- The driver's image cache is no longer updated before the deck has been told:
+  `clear_key` used to drop the key from the cache first, which would have left
+  the driver claiming a key was blank while the deck still showed it.
+- `sleep` no longer wakes the deck before sending the sleep pack, so a
+  refused sleep writes nothing at all.
+
 ### Added
 - `docs/protocol/verified.md`: the safe-mode list. Ten commands, four verified
   on hardware (`DIS`, `LIG`, `BAT` + chunks + `STP`, `CLE 0xFF`), six not

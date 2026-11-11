@@ -51,6 +51,19 @@ pub enum Ss550Error {
          5 s replug is not enough. See docs/troubleshooting/deck-stuck.md"
     )]
     TransportStalled { detail: String },
+
+    /// The command has not been verified on hardware, so the driver refuses to send it.
+    ///
+    /// The refusal happens **before** the bytes leave the host: an unproven
+    /// command never reaches the deck. `command` is the command name, as in
+    /// `docs/protocol/verified.md` (`clear_key`), not the wire tag.
+    #[error("Refusing to send {command}: {reason}")]
+    CommandNotVerified {
+        /// The command name, as `docs/protocol/verified.md` spells it.
+        command: &'static str,
+        /// Why the command is not verified, and where the gap is recorded.
+        reason: &'static str,
+    },
 }
 
 /// hidapi reports these Windows errors once the interrupt OUT endpoint is
