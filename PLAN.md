@@ -200,7 +200,7 @@ Two commands changed behaviour, on purpose: `clear_key` and `sleep` are now
 refused, because neither was ever exercised on a deck. The application calls
 neither.
 
-### M2 — A real release build
+### M2 — A real release build: done (2026-11-11)
 
 `cargo build --release` for the three roots, the GUI binary installed to
 `%LOCALAPPDATA%\Programs\ss550`, the autostart entry pointing at that copy,
@@ -209,6 +209,29 @@ and the debug build out of the picture.
 **Done when** the registered binary is the release build, it survives a
 sign-in cycle, and the installed copy is no longer the 53.7 MB debug binary
 that sits there today.
+
+**Status: done.** Measured, not claimed:
+
+- `cargo build --release` builds all three roots. The GUI binary is 24.5 MB
+  against the 53.7 MB debug build, and its `OptionalHeader.Subsystem` is `2`
+  (GUI) instead of `3` (CONSOLE), so a launch creates no console window and no
+  `conhost` child.
+- The installed copy at `%LOCALAPPDATA%\Programs\ss550\ss550-gui.exe` **is** the
+  release build; the debug binary is out of the picture.
+- `ss550-gui = "...\Programs\ss550\ss550-gui.exe" --hidden` is the only entry
+  under `HKCU\...\Run` for this app; no startup-folder shortcut, no scheduled
+  task. The old `StreamStation` entry is gone and Stream Station no longer
+  starts.
+- Survived a sign-in cycle: after signing back in, the process runs from the
+  installed path with no visible window (`MainWindowHandle = 0`), and the log
+  gained a `started` line for that session. The log shows two `started` lines
+  and no `quit`: the session that ended was killed by the sign-out, which is
+  exactly the shape the log documents as "did not exit through the tray".
+- A release panic used to leave no trace at all, because the console it printed
+  to was gone. `crates/ss550-gui/src/diagnostics.rs` now writes
+  `%APPDATA%\ss550\ss550.log`: `started` per run, `quit` from the tray, and a
+  panic's message and place before the process goes down. It opens from a hidden
+  five-click trigger on the version line.
 
 ### M3 — Hardware-in-loop tests and a simulator
 
