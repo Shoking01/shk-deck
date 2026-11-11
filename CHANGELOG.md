@@ -7,7 +7,7 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
-### Fixed - the release build opened a console window
+### Fixed — the release build opened a console window
 - The GUI binary was linked as a console subsystem. Windows creates a console
   window for such an executable no matter how it is started — double-click, the
   autostart entry, or a terminal — and a tray application must not have one.
@@ -22,7 +22,7 @@ messages; the file below is a human summary, not a substitute for
 - Known limitation: a release-mode panic now leaves no visible trace, because
   the console that used to show it is gone. Nothing writes it to a file yet.
 
-### Added - the registry of commands a deck has proven
+### Added — the registry of commands a deck has proven
 - `docs/protocol/verified.md` is the safe-mode list: one row per command the
   protocol crate can encode, with the tag on the wire, whether a test deck has
   proven it, and where the evidence lives. Ten commands, four verified, six
