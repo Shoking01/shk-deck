@@ -83,9 +83,9 @@ impl Geometry {
     /// ```
     /// use deck_api::Geometry;
     ///
-    /// let geometry = Geometry::new(15, 3, 5);
-    /// assert_eq!(geometry.rows(), 3);
-    /// assert_eq!(geometry.columns(), 5);
+    /// let geometry = Geometry::new(8, 2, 4);
+    /// assert_eq!(geometry.rows(), 2);
+    /// assert_eq!(geometry.columns(), 4);
     /// ```
     pub fn new(key_count: u16, rows: u16, columns: u16) -> Self {
         Self {
@@ -100,7 +100,7 @@ impl Geometry {
     /// ```
     /// use deck_api::Geometry;
     ///
-    /// assert_eq!(Geometry::new(15, 3, 5).key_count(), 15);
+    /// assert_eq!(Geometry::new(8, 2, 4).key_count(), 8);
     /// ```
     pub fn key_count(&self) -> u16 {
         self.key_count
@@ -111,7 +111,7 @@ impl Geometry {
     /// ```
     /// use deck_api::Geometry;
     ///
-    /// assert_eq!(Geometry::new(15, 3, 5).rows(), 3);
+    /// assert_eq!(Geometry::new(8, 2, 4).rows(), 2);
     /// ```
     pub fn rows(&self) -> u16 {
         self.rows
@@ -122,7 +122,7 @@ impl Geometry {
     /// ```
     /// use deck_api::Geometry;
     ///
-    /// assert_eq!(Geometry::new(15, 3, 5).columns(), 5);
+    /// assert_eq!(Geometry::new(8, 2, 4).columns(), 4);
     /// ```
     pub fn columns(&self) -> u16 {
         self.columns

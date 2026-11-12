@@ -37,3 +37,15 @@ fn the_seam_never_names_a_device() {
         );
     }
 }
+
+#[test]
+fn the_seam_never_assumes_a_key_count() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    source_files(&root, &mut files);
+    for file in files {
+        let text = fs::read_to_string(&file).expect("a readable source file");
+        let assumes = text.split(|c: char| !c.is_ascii_digit()).any(|n| n == "15");
+        assert!(!assumes, "{} assumes a key count", file.display());
+    }
+}
