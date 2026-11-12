@@ -161,10 +161,12 @@ Honest list. Items marked *out of scope for v1* are decisions, not debts.
 - **The fuzz target does not run in CI**, and `fuzz/Cargo.lock` is not covered
   by the dependency audit. Both are decisions about CI, not about the
   protocol.
-- **No second deck implementation**: there is no simulator crate, so nothing
-  proves the deck seam and nothing runs the suite without hardware (M3).
-- **No hardware-in-loop tests**: nothing runs against a real deck from
-  `cargo test`; there is no `hardware-tests` feature (M3).
+- **The second deck is a simulator, not hardware**: `deck-simulator` ships a
+  six-key profile and the SS550 wire fake, so the seam is proven and the suite
+  runs without a device — but no real second deck has been driven yet (M9).
+- **The hardware-in-loop run is still open**: the `hardware-tests` feature
+  exists and the test compiles, but it has never run against a deck on a
+  dedicated test unit (M3's last open line).
 - **The app is bound to the SS550**: 15 keys, a 5-wide geometry and 100×100
   images are hardcoded in the driver, the engine and the window. The seam is
   M3, the deck-agnostic window is M4, and a real second deck is M9.
@@ -287,7 +289,11 @@ gates every test that touches hardware and each one is `#[ignore]`d; a plain
 **The guards.** Three, and the last one already exists but goes blind:
 
 1. The seam crate does not contain the string `ss550`.
-2. The number 15 does not appear outside the SS550 provider.
+2. The number 15 does not appear outside the SS550 provider. **As M3 can
+   enforce it**: the seam and the conformance crate contain no `15`, and the
+   second profile's geometry differs from the SS550's. The engine's
+   `KeyNumber` still carries `1..=15` and the window still says 15; both
+   belong to M4.
 3. The single-writer guard of M1 (`every_write_goes_through_the_gated_funnel`)
    counts `.write(` in `connection.rs` alone. Moving the transport out of that
    file would leave the guard blind while a second writer exists, so it is
@@ -305,6 +311,26 @@ deck on a dedicated test unit.
 **Blocked on hardware.** Everything above except the run against the real deck
 needs no device. That last line needs the deck on a unit that is not the daily
 driver.
+
+**Status: done, except the hardware line.** The seam shipped as three crates:
+`deck-api` holds the contract, `deck-conformance` holds one suite of ten
+cases, and `deck-simulator` holds a six-key deck plus the SS550 wire fake. The
+driver now sits on the seam as `Ss550Deck`, a `Deck` over a `Transport`, and
+the suite is green over two profiles. The three guards are green: the seam
+names no device, the seam assumes no key count, and the driver writes through
+exactly one gated funnel — the gate did not move, and the crate-wide guard now
+watches every source file instead of one. The engine no longer knows what a
+physical key is: the two conversions are gone and so is its dependency on the
+driver.
+
+Two lines of the "done when" stay open, and both are honest:
+
+1. `cargo test --features hardware-tests -- --ignored` has never run against a
+   real deck on a dedicated test unit. The feature is off by default and every
+   hardware test is `#[ignore]`d, so a plain `cargo test` never opens the
+   device.
+2. The suite runs at the transport seam. It proves the driver's logic, not
+   Microsoft's HID stack — a virtual HID device in CI is not promised.
 
 ### M4 — A deck-agnostic window
 

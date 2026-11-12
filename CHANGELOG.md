@@ -7,6 +7,34 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Added — a seam that lets a second deck drive the same app
+- `crates/deck-api` is the contract every deck answers to: `Deck` (what a deck
+  can do) above `Transport` (how its bytes travel). It is a leaf crate — its
+  only dependency is `thiserror` — and it names no device and assumes no key
+  count, with two guards that fail the build if either creeps in.
+- An operation a deck cannot do returns a typed error (`DeckError::Unsupported`)
+  and never a silent no-op: a caller that cannot tell "done" from "not
+  possible" has no way to tell the user anything useful. A brightness outside
+  the accepted range is refused, not clamped.
+- `crates/ss550-driver` now sits on the seam as `Ss550Deck`, a `Deck` over a
+  `Transport`. The bytes still leave through one gated funnel after the
+  verified-command check — the gate did not move — and the crate-wide guard now
+  watches every source file instead of one.
+- `crates/deck-conformance` holds one suite of ten cases, run against any
+  `Deck`. No case paints a key, so the same suite is safe on a desk. Each case
+  is paired with a stub that breaks exactly one rule, and the pairing is
+  checked in both directions: the flaw fails that case and only that case, and
+  every case has a flaw that breaks it.
+- `crates/deck-simulator` holds the second profile: a six-key deck, two rows of
+  three, 72×72 images, no brightness — plus the SS550 wire fake, which decodes
+  real packs so the driver runs in CI without a device.
+- `crates/ss550-engine` no longer knows what a physical key is.
+  `KeyNumber::key()` and `KeyNumber::from_key()` are gone, and with them the
+  engine's dependency on the driver. The conversions carried a silent
+  fallback: a number that could not be converted became the bottom-left key
+  instead of an error. A guard fails if the driver, the fallback or either
+  conversion comes back.
+
 ### Fixed — the release build opened a console window
 - The GUI binary was linked as a console subsystem. Windows creates a console
   window for such an executable no matter how it is started — double-click, the
