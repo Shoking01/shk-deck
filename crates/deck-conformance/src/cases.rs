@@ -1,16 +1,21 @@
 //! The cases every deck has to answer.
 //!
-//! Two rules shaped this file, and both of them are about honesty:
+//! Three rules shaped this file, and all three are about honesty.
 //!
-//! **Every case is falsifiable through the seam.** A case that no deck can
-//! fail is a case that proves nothing, so each one here is paired with a stub
-//! in `tests/the_suite_catches_a_bad_deck.rs` that breaks exactly that rule and
-//! must make exactly that case fail. If a case cannot be broken, it does not
-//! belong here.
+//! **Every case is falsifiable, and independent.** A case no deck can fail
+//! proves nothing, and two cases that the same deck always fails together are
+//! one case wearing two names. Each case here is paired with a stub in
+//! `tests/the_suite_catches_a_bad_deck.rs` that breaks exactly that rule, and
+//! the test asserts that stub fails exactly that case and no other.
 //!
-//! **No case changes the deck.** The same suite runs against a real device on
-//! a desk, so the only calls it makes are the ones a deck is obliged to
-//! refuse. A deck that passes has had nothing painted on it.
+//! **No case paints a key.** The same suite runs against a real device on a
+//! desk, so it only makes calls it expects to be refused. A successful paint is
+//! the provider's own test to write.
+//!
+//! **The cheap check comes first.** A deck that inspects a payload before it
+//! checks the key, or decodes before it checks the limit, spends work on a
+//! question it could have answered for free — and on hardware that work is a
+//! write waiting to happen.
 
 use deck_api::{Deck, DeckError, DeckOperation, KeyId, VALUE_MAX};
 
@@ -21,7 +26,7 @@ pub(crate) fn all(deck: &mut dyn Deck) -> Vec<CaseResult> {
     vec![
         image_spec_is_usable(deck),
         a_key_past_the_end_is_refused(deck),
-        a_key_refusal_names_the_key_count_the_deck_has(deck),
+        an_image_over_the_limit_is_refused(deck),
         brightness_past_the_range_is_refused(deck),
         brightness_without_the_capability_is_refused(deck),
         clear_key_without_the_capability_is_refused(deck),
@@ -66,12 +71,13 @@ fn image_spec_is_usable(deck: &mut dyn Deck) -> CaseResult {
     CaseResult::pass(NAME)
 }
 
-/// The key range is checked before the payload.
+/// A key past the end is refused, naming the key count the deck declares.
 ///
-/// The payload here is empty, and that is deliberate: a deck that inspects the
-/// bytes before the key answers with an image error, which is the wrong
-/// answer and a wasted decode. Refusing the key first is cheaper and it is the
-/// only thing the suite can require without knowing how to encode an image.
+/// The payload is empty on purpose: a deck that inspects the bytes before the
+/// key answers with an image error, which is the wrong answer and a wasted
+/// decode. The expected error carries the declared count as well as the key, so
+/// a deck that grew out of another shape and still reports the old number is
+/// caught here rather than in a test of its own.
 fn a_key_past_the_end_is_refused(deck: &mut dyn Deck) -> CaseResult {
     const NAME: &str = "a_key_past_the_end_is_refused";
 
@@ -91,32 +97,30 @@ fn a_key_past_the_end_is_refused(deck: &mut dyn Deck) -> CaseResult {
     )
 }
 
-/// A refusal is only useful if it reports the deck you are actually holding.
+/// One byte over the declared limit is refused, naming the limit.
 ///
-/// This is the case that catches the deck which grew out of a fifteen-key
-/// shape and still names fifteen in its errors while declaring six.
-fn a_key_refusal_names_the_key_count_the_deck_has(deck: &mut dyn Deck) -> CaseResult {
-    const NAME: &str = "a_key_refusal_names_the_key_count_the_deck_has";
+/// The key is one the deck has, so a deck that refuses everything cannot pass
+/// this, and a deck that accepts anything cannot pass the case before it. The
+/// payload is a run of bytes rather than an image: only the length matters, and
+/// checking it needs no decoder — which is exactly why it belongs first.
+fn an_image_over_the_limit_is_refused(deck: &mut dyn Deck) -> CaseResult {
+    const NAME: &str = "an_image_over_the_limit_is_refused";
 
-    let declared = deck.geometry().key_count();
-    let Some(past_the_end) = declared.checked_add(1) else {
-        return CaseResult::not_applicable(
-            NAME,
-            "the deck already names every key a u16 can address",
-        );
+    if !deck.geometry().contains(KeyId::FIRST) {
+        return CaseResult::not_applicable(NAME, "this deck has no keys to paint");
+    }
+
+    let max_bytes = deck.image_spec().max_bytes();
+    let Some(bytes) = max_bytes.checked_add(1) else {
+        return CaseResult::not_applicable(NAME, "the deck accepts every image a usize can count");
     };
 
-    match deck.set_key_image(KeyId::new(past_the_end), &[]) {
-        Err(DeckError::KeyOutOfRange { key_count, .. }) if key_count == declared => {
-            CaseResult::pass(NAME)
-        }
-        Err(DeckError::KeyOutOfRange { key_count, .. }) => CaseResult::fail(
-            NAME,
-            format!("the deck reports {key_count} keys but declares {declared}"),
-        ),
-        Err(other) => CaseResult::fail(NAME, format!("expected a key refusal, got {other}")),
-        Ok(()) => CaseResult::fail(NAME, "the deck accepted a key past the end"),
-    }
+    let payload = vec![0_u8; bytes];
+    expect_refusal(
+        NAME,
+        deck.set_key_image(KeyId::FIRST, &payload),
+        DeckError::ImageTooLarge { bytes, max_bytes },
+    )
 }
 
 /// One past the top of the range is refused, not clamped.
