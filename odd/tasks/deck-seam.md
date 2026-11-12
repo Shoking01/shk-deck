@@ -131,9 +131,9 @@ item, `cargo fmt` and zero clippy warnings. Artifacts in English.
 | --- | --- | --- | --- | --- | --- |
 | T1 | `deck-api`: the seam crate — `Deck`, `Transport`, the data types, the typed errors, the guards | S1, S4, S10 | inline | done | `257cb99` + `9b89741` (review approved, authority burned) |
 | T1b | Seal the seam contract before anything consumes it: the missing `dials` capability, a `sleep` operation for the capability that advertises it, a bounded brightness with a typed refusal, a geometry that cannot contradict itself, one timeout unit across the seam, a guard that covers the whole crate, and behaviour tests for the handle | S1, S4, S10 | inline | done | `70d19aa` + `727e220` + `44b5c73` (review approved, authority burned) + `93ad96c` (review findings) |
-| T2 | `deck-conformance`: the shared suite and its own stub-deck tests | S3, S10 | inline | pending | — |
-| T3 | `ss550-driver`: the SS550 as a `Deck` over a `Transport` — including the image adapter (the driver takes an encoded `ButtonImage`, the seam takes raw bytes plus a key) and declaring `clear_key`/`sleep`/`identity` as typed refusals where the verified registry forbids them — plus the crate-wide writer guard and the hardware test behind the feature | S1, S3, S4, S6, S7, S10 | delegated | pending | — |
-| T4 | `deck-simulator`: the SS550 wire fake and the 6-key deck, both passing the suite | S2, S3, S10 | delegated | pending | — |
+| T2 | `deck-conformance`: the shared suite - ten cases, none of which paints a key, each falsified by exactly one stub flaw and checked in both directions - and its own no-device/no-key-count guard | S3, S10 | inline | done | `5c5cdf6` (review approved, authority burned) + `425d3a5` (review findings) |
+| T3 | `ss550-driver`: the SS550 as a `Deck` over a `Transport` - including the image adapter (the driver takes an encoded `ButtonImage`, the seam takes raw bytes plus a key), which must refuse the key range and then the image length before it builds or decodes anything, because the suite asserts both refusals and their numbers - and declaring `clear_key`/`sleep`/`identity` as typed refusals where the verified registry forbids them - plus the crate-wide writer guard and the hardware test behind the feature | S1, S3, S4, S6, S7, S10 | delegated | done | `f13d403` |
+| T4 | `deck-simulator`: the SS550 wire fake and the 6-key deck, both passing the suite | S2, S3, S10 | delegated | done | `c4bfd6e` |
 | T5 | `ss550-engine`: drop the driver's `Key` and the silent fallback | S8, S10 | inline | pending | — |
 | T6 | Docs: the plan's guard 2 amendment, the changelog, the crate READMEs | S4, S10 | inline | pending | — |
 | T7 | Seam check: the whole suite, fmt, clippy, and the per-commit assessment | S6 | inline | pending | — |
@@ -264,3 +264,65 @@ changed. The remaining WARNING finding (the value bound is not enforced in the
 trait's default methods) stays informational: enforcement belongs to each
 provider, and the conformance suite in T2 is where a provider that silently
 clamps gets caught.
+
+L14 - 2026-11-11, T2 landed and the second review closed. `deck-conformance`
+is in the workspace with ten cases and, next to it, the scaffolding the two
+delegated writers need (`deck-simulator` joins the workspace with a
+placeholder body; the driver declares `deck-api`, `deck-conformance` and a
+`hardware-tests` feature that is off by default). The placeholder is
+deliberate and transient: T4 replaces it in the same milestone.
+
+Two things about the suite are worth recording because they constrain T3/T4:
+
+1. **No case paints a key.** The same suite runs against a device on a desk,
+   so it only makes calls it expects to be refused. `deck-simulator` and the
+   driver's own tests are where a successful paint is exercised.
+2. **The cheap check comes first.** A deck must refuse an out-of-range key
+   before it looks at the payload, and must refuse an over-limit image
+   before it decodes one. Both cases assert the exact error including the
+   numbers in it (`key_count`, `max_bytes`), so a deck carrying another
+   shape's constants inside its refusals is caught rather than trusted.
+
+The review of the T2 candidate (`review-43c1668c5eee6bdc`) approved with no
+blocker and no refuter; `425d3a5` answers its three real findings. The rest
+were accepted as they stand, and both suggestions are recorded here so they
+are not rediscovered later:
+
+- The filesystem scan in each crate's genericity guard is duplicated, and
+  sharing it would mean a test-only crate for one function. Left as it is;
+  two copies that must both stay correct is cheaper than a crate that exists
+  to hold forty lines.
+- The guards read files best-effort as UTF-8 and skip anything else, so a
+  non-UTF-8 file could hide a device name. No file in either crate is
+  non-UTF-8, and the guard is a tripwire against a careless edit, not an
+  adversarial control.
+
+L15 - 2026-11-12, T3 and T4 landed, in parallel, on disjoint surfaces. T3 put
+the device behind `deck_api::Transport` and added `Ss550Deck`; the gate did
+not move — every byte still leaves through `write_pack` after `ensure_verified`,
+and the crate-wide guard now scans every source file instead of one, asserting
+exactly one physical write (in the transport) with exactly one call site into
+it (in the funnel, after the check). T4 added the 6-key deck and the SS550 wire
+fake at the transport level.
+
+Two facts about the run are worth keeping:
+
+1. **The T3 writer died at the end, not at the beginning.** Its session hit a
+   provider usage limit after the code was already written and passing, so it
+   never filed its report. Its work was verified by the parent instead: the
+   whole crate compiles, `cargo test -p ss550-driver` is green, clippy is clean
+   on a fresh build, the hardware-gated target compiles, and all three
+   workspace roots (repo, gui, tray) build. The lesson is the procedure, not
+   the code: a writer that dies leaves work in the tree, and that work has to
+   be read and checked, not assumed.
+2. **`crates/ss550-gui/Cargo.lock` changed**, and it is not a gui change. The
+   gui is a separate workspace root that depends on the driver by path, so
+   recording the driver's new path dependency is cargo's job, not an edit to
+   the window. M3 touches no gui code; the lock moved because the graph under
+   it moved.
+
+T3's risk line is **item 5 (dependencies)**: the driver's manifest gained
+`deck-api` and, as a dev-dependency, `deck-conformance`. Both are path
+dependencies inside this workspace — no external crate and no version change —
+but the manifest changed, so the line is declared and an independent verifier
+runs over the diff before the native review.
