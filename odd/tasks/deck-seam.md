@@ -130,9 +130,9 @@ item, `cargo fmt` and zero clippy warnings. Artifacts in English.
 | ID | Task | Specs | Route | Status | Commit |
 | --- | --- | --- | --- | --- | --- |
 | T1 | `deck-api`: the seam crate — `Deck`, `Transport`, the data types, the typed errors, the guards | S1, S4, S10 | inline | done | `257cb99` + `9b89741` (review approved, authority burned) |
-| T1b | Seal the seam contract before anything consumes it: the missing `dials` capability, a `sleep` operation for the capability that advertises it, a bounded brightness with a typed refusal, a geometry that cannot contradict itself, one timeout unit across the seam, a guard that covers the whole crate, and behaviour tests for the handle | S1, S4, S10 | inline | done | `70d19aa` + `727e220` |
+| T1b | Seal the seam contract before anything consumes it: the missing `dials` capability, a `sleep` operation for the capability that advertises it, a bounded brightness with a typed refusal, a geometry that cannot contradict itself, one timeout unit across the seam, a guard that covers the whole crate, and behaviour tests for the handle | S1, S4, S10 | inline | done | `70d19aa` + `727e220` + `44b5c73` (review approved, authority burned) + `93ad96c` (review findings) |
 | T2 | `deck-conformance`: the shared suite and its own stub-deck tests | S3, S10 | inline | pending | — |
-| T3 | `ss550-driver`: the SS550 as a `Deck` over a `Transport`, the crate-wide writer guard, the hardware test behind the feature | S1, S3, S4, S6, S7, S10 | delegated | pending | — |
+| T3 | `ss550-driver`: the SS550 as a `Deck` over a `Transport` — including the image adapter (the driver takes an encoded `ButtonImage`, the seam takes raw bytes plus a key) and declaring `clear_key`/`sleep`/`identity` as typed refusals where the verified registry forbids them — plus the crate-wide writer guard and the hardware test behind the feature | S1, S3, S4, S6, S7, S10 | delegated | pending | — |
 | T4 | `deck-simulator`: the SS550 wire fake and the 6-key deck, both passing the suite | S2, S3, S10 | delegated | pending | — |
 | T5 | `ss550-engine`: drop the driver's `Key` and the silent fallback | S8, S10 | inline | pending | — |
 | T6 | Docs: the plan's guard 2 amendment, the changelog, the crate READMEs | S4, S10 | inline | pending | — |
@@ -212,3 +212,55 @@ that cannot be split without leaving the crate not compiling in the middle.
 The heuristic is advisory and the delivery strategy is `single-pr`, so the
 branch carries it as one reviewable unit instead of being carved into
 artificial pieces.
+
+L11 - 2026-11-11, T3 read before writing. Reading the driver's real surface
+changed two things about T3, and both are recorded here because the task row
+no longer describes the work:
+
+1. **The seam's `set_key_image(key, jpeg)` cannot wrap the driver's
+   `set_key_image(ButtonImage)`.** The driver takes an already-encoded
+   `ButtonImage { jpeg, key }` and the seam takes raw bytes plus the key. The
+   adapter is not a forwarding shim: it must build the image (or refuse a
+   payload the deck would not accept), and `DeckError::ImageTooLarge` /
+   `ImageWrongSize` are exactly the typed refusals the seam promised. This is
+   the seam's own example made real, not an extra.
+2. **Three capabilities the seam can advertise are refused by the protocol
+   registry today**: `ClearKey`, `Sleep` and `FirmwareVersion` are
+   `Unverified`, and `ensure_verified` refuses them before the bytes leave the
+   host. So the SS550 provider must declare `clear_key: false`,
+   `sleep: false` and answer `identity()` with a typed refusal rather than
+   pretend. That is the milestone's own rule ("no silent no-op") biting the
+   driver, and it is the honest shape: the deck cannot do what was never
+   proven safe.
+
+L12 - 2026-11-11, delegation topology corrected. The plan said T3 and T4 run
+in parallel as two delegated writers, and the refuter would run in the same
+child context. Probed: a subagent cannot see the `review-*` agents at all (a
+direct `rust-core` dispatch reports the only visible subagent is a generic
+one), and the orchestrator's `task` allowlist names `rust-core` and
+`rust-ui` but no review agent for a child to call. So the refuter stays a
+top-level dispatch owned by this orchestrator. T3 and T4 remain two units
+with disjoint edit surfaces and can still run together; only the review-role
+part of the plan was wrong.
+
+L13 - 2026-11-11, T1b review closed and what it left behind. The review ran
+three lenses (risk, readability, reliability) plus a refuter. The refuter
+refuted both CRITICAL findings, the review came back approved, and the
+authority is burned on target `sha256:b6c2862a...`. Two of the WARNING
+findings were real and are fixed in `93ad96c` rather than deferred:
+
+1. `deck_handle_forwards.rs` was named "forwards every call" and skipped
+   `image_spec` and `capabilities`, and its stub could never refuse, so the
+   error path through the handle was asserted nowhere. The stub now refuses
+   every fallible method with its own named operation, and both directions
+   have a test.
+2. `Geometry::new` had no edge coverage: zero keys, zero columns, and a key
+   count that does not divide evenly. `geometry_edges.rs` pins all three,
+   plus the invariant that every declared key lands inside the declared grid.
+
+Fixing them required `PartialEq`/`Eq` on `DeckError` and `TransportError`, so
+the tests compare values instead of strings. Additive, no existing shape
+changed. The remaining WARNING finding (the value bound is not enforced in the
+trait's default methods) stays informational: enforcement belongs to each
+provider, and the conformance suite in T2 is where a provider that silently
+clamps gets caught.
