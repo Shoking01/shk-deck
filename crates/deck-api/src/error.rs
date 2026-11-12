@@ -69,7 +69,7 @@ impl fmt::Display for DeckOperation {
 /// let error = TransportError::Stalled("the device stopped answering".to_owned());
 /// assert_eq!(error.to_string(), "transport stalled: the device stopped answering");
 /// ```
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TransportError {
     /// The device answered with an I/O error.
@@ -91,7 +91,7 @@ pub enum TransportError {
 /// };
 /// assert_eq!(error.to_string(), "brightness is not supported by this deck");
 /// ```
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DeckError {
     /// The deck does not do this at all.

@@ -80,6 +80,8 @@ fn the_seam_never_assumes_a_key_count() {
     let mut files = Vec::new();
     crate_files(&root, &mut files);
 
+    assert!(!files.is_empty(), "the scan found no files at all");
+
     let needle = key_count();
     for file in files {
         let Some(text) = text_of(&file) else {
