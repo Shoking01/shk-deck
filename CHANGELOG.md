@@ -705,6 +705,26 @@ messages; the file below is a human summary, not a substitute for
 - The crate names no device, and a test keeps it that way: it fails when the
   string `ss550` appears anywhere in the seam's source. The guard was proved
   by leaking the name on purpose and watching it fail.
+- The contract was sealed before anything consumed it, so the three crates
+  above it code against one shape and not three:
+  - `Geometry::new(key_count, columns)` derives the rows, so a deck cannot
+    publish a grid that contradicts its own key count.
+  - `Capabilities` is built by naming each capability, and every capability
+    has an operation behind it — `sleep` and `set_dial` are now operations of
+    the trait, and `dials` is a capability the trait can act on.
+  - A brightness or a dial position outside `0..=100` is refused with
+    `DeckError::ValueOutOfRange`. It is never clamped: a clamped request is a
+    request that changed without telling anyone.
+  - `DeckError::Unsupported` names the refused operation with the
+    `DeckOperation` type instead of a free-form string, so a typo cannot
+    change the message the user reads.
+  - `Transport::read_input` takes a `Duration`, the same unit the deck layer
+    uses, and "nothing arrived" has one answer everywhere: zero bytes read,
+    not an error.
+- The seam's guards now cover **the whole crate**, manifest and tests
+  included, and the seam's own handle is covered by behaviour tests: a stub
+  deck records what it was asked to do, and the test fails if the handle
+  forwards anything to the wrong call.
 
 ### Known limitations — Fase 1 close-out
 - **Live verification of input events.** Button presses were verified one-at-a-time

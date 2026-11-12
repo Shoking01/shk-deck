@@ -12,7 +12,8 @@
 //! A deck that cannot do something says so with a typed error
 //! ([`DeckError::Unsupported`]). It never pretends to have done it: a silent
 //! no-op is how a user ends up with a key that does nothing and no way to know
-//! why.
+//! why. The same rule covers values: a brightness the deck cannot take is
+//! refused, never clamped.
 //!
 //! ## Why two traits
 //!
@@ -50,6 +51,9 @@ mod transport;
 mod types;
 
 pub use deck::{Deck, DeckHandle};
-pub use error::{DeckError, TransportError};
+pub use error::{DeckError, DeckOperation, TransportError};
 pub use transport::Transport;
-pub use types::{ButtonState, Capabilities, Geometry, ImageFormat, ImageSpec, KeyEvent, KeyId};
+pub use types::{
+    ButtonState, Capabilities, Geometry, ImageFormat, ImageSpec, KeyEvent, KeyId, VALUE_MAX,
+    VALUE_MIN,
+};

@@ -6,6 +6,24 @@
 
 use std::fmt;
 
+/// The lowest value a deck accepts for a brightness or a dial position.
+///
+/// ```
+/// use deck_api::VALUE_MIN;
+///
+/// assert_eq!(VALUE_MIN, 0);
+/// ```
+pub const VALUE_MIN: u8 = 0;
+
+/// The highest value a deck accepts for a brightness or a dial position.
+///
+/// ```
+/// use deck_api::VALUE_MAX;
+///
+/// assert_eq!(VALUE_MAX, 100);
+/// ```
+pub const VALUE_MAX: u8 = 100;
+
 /// A key on a deck, addressed by its position in the deck's own key order.
 ///
 /// The index is **0-based**: it is the key's place in the deck's order, not a
@@ -64,8 +82,9 @@ impl fmt::Display for KeyId {
 /// ```
 /// use deck_api::{Geometry, KeyId};
 ///
-/// let geometry = Geometry::new(6, 2, 3);
+/// let geometry = Geometry::new(6, 3);
 /// assert_eq!(geometry.key_count(), 6);
+/// assert_eq!(geometry.rows(), 2);
 /// assert_eq!(geometry.position(KeyId::new(4)), Some((1, 1)));
 /// assert_eq!(geometry.position(KeyId::new(6)), None);
 /// ```
@@ -77,17 +96,24 @@ pub struct Geometry {
 }
 
 impl Geometry {
-    /// Describes a deck with `key_count` keys laid out in `rows` rows of
-    /// `columns` keys each.
+    /// Describes a deck with `key_count` keys, `columns` keys wide.
+    ///
+    /// The number of rows follows from the other two: eight keys in rows of
+    /// four make two rows. The constructor cannot produce a geometry whose
+    /// grid contradicts its key count, because there is no third number left
+    /// to disagree with. A deck with no columns is treated as one column
+    /// wide, which is what a single line of keys is.
     ///
     /// ```
     /// use deck_api::Geometry;
     ///
-    /// let geometry = Geometry::new(8, 2, 4);
+    /// let geometry = Geometry::new(8, 4);
     /// assert_eq!(geometry.rows(), 2);
     /// assert_eq!(geometry.columns(), 4);
     /// ```
-    pub fn new(key_count: u16, rows: u16, columns: u16) -> Self {
+    pub fn new(key_count: u16, columns: u16) -> Self {
+        let columns = columns.max(1);
+        let rows = key_count.div_ceil(columns);
         Self {
             key_count,
             rows,
@@ -100,7 +126,7 @@ impl Geometry {
     /// ```
     /// use deck_api::Geometry;
     ///
-    /// assert_eq!(Geometry::new(8, 2, 4).key_count(), 8);
+    /// assert_eq!(Geometry::new(8, 4).key_count(), 8);
     /// ```
     pub fn key_count(&self) -> u16 {
         self.key_count
@@ -111,7 +137,7 @@ impl Geometry {
     /// ```
     /// use deck_api::Geometry;
     ///
-    /// assert_eq!(Geometry::new(8, 2, 4).rows(), 2);
+    /// assert_eq!(Geometry::new(8, 4).rows(), 2);
     /// ```
     pub fn rows(&self) -> u16 {
         self.rows
@@ -122,7 +148,7 @@ impl Geometry {
     /// ```
     /// use deck_api::Geometry;
     ///
-    /// assert_eq!(Geometry::new(8, 2, 4).columns(), 4);
+    /// assert_eq!(Geometry::new(8, 4).columns(), 4);
     /// ```
     pub fn columns(&self) -> u16 {
         self.columns
@@ -133,7 +159,7 @@ impl Geometry {
     /// ```
     /// use deck_api::{Geometry, KeyId};
     ///
-    /// let geometry = Geometry::new(6, 2, 3);
+    /// let geometry = Geometry::new(6, 3);
     /// assert!(geometry.contains(KeyId::new(5)));
     /// assert!(!geometry.contains(KeyId::new(6)));
     /// ```
@@ -144,10 +170,14 @@ impl Geometry {
     /// The `(row, column)` of `key`, or `None` when the key is not on this
     /// deck.
     ///
+    /// The row and the column always land inside the grid the geometry
+    /// declares, because the row count was derived from the same two numbers
+    /// that place the key.
+    ///
     /// ```
     /// use deck_api::{Geometry, KeyId};
     ///
-    /// let geometry = Geometry::new(6, 2, 3);
+    /// let geometry = Geometry::new(6, 3);
     /// assert_eq!(geometry.position(KeyId::new(0)), Some((0, 0)));
     /// assert_eq!(geometry.position(KeyId::new(5)), Some((1, 2)));
     /// ```
@@ -155,11 +185,8 @@ impl Geometry {
         if !self.contains(key) {
             return None;
         }
-        // A deck that declares no columns still has keys; treating the row as
-        // a single line keeps the arithmetic honest instead of dividing by zero.
-        let columns = self.columns.max(1);
         let index = key.index();
-        Some((index / columns, index % columns))
+        Some((index / self.columns, index % self.columns))
     }
 }
 
@@ -259,16 +286,23 @@ impl ImageSpec {
 
 /// What a deck can do, stated as data.
 ///
-/// The point of this type is that a caller asks before it acts, and an
-/// operation the deck does not have fails with a typed error rather than
-/// doing nothing.
+/// Every capability here has an operation behind it in
+/// [`Deck`](crate::Deck): a deck that advertises a capability is one the
+/// seam can ask, and a deck that cannot do it refuses with a typed error
+/// rather than accepting the call and doing nothing.
+///
+/// The set is built by naming each capability, never by passing a row of
+/// booleans in the right order — a swapped `true` and `false` would declare a
+/// deck that can do something it cannot.
 ///
 /// ```
 /// use deck_api::Capabilities;
 ///
-/// let capabilities = Capabilities::new(true, false, true, false);
+/// let capabilities = Capabilities::new().with_brightness(true).with_sleep(true);
 /// assert!(capabilities.brightness());
+/// assert!(capabilities.sleep());
 /// assert!(!capabilities.clear_key());
+/// assert_eq!(capabilities.dial_count(), 0);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
@@ -276,31 +310,106 @@ pub struct Capabilities {
     clear_key: bool,
     clear_all: bool,
     sleep: bool,
+    dials: u16,
 }
 
 impl Capabilities {
     /// A deck that can do none of the optional things.
+    ///
+    /// ```
+    /// use deck_api::Capabilities;
+    ///
+    /// assert!(!Capabilities::NONE.brightness());
+    /// assert_eq!(Capabilities::NONE.dial_count(), 0);
+    /// ```
     pub const NONE: Capabilities = Capabilities {
         brightness: false,
         clear_key: false,
         clear_all: false,
         sleep: false,
+        dials: 0,
     };
 
-    /// States what the deck can do.
+    /// Starts from nothing and names what the deck can do.
     ///
     /// ```
     /// use deck_api::Capabilities;
     ///
-    /// let capabilities = Capabilities::new(true, true, true, false);
-    /// assert!(capabilities.sleep() == false);
+    /// let capabilities = Capabilities::new().with_clear_all(true);
+    /// assert!(capabilities.clear_all());
+    /// assert!(!capabilities.brightness());
     /// ```
-    pub fn new(brightness: bool, clear_key: bool, clear_all: bool, sleep: bool) -> Self {
+    pub fn new() -> Self {
+        Self::NONE
+    }
+
+    /// States whether the deck's brightness can be set.
+    ///
+    /// ```
+    /// use deck_api::Capabilities;
+    ///
+    /// assert!(Capabilities::new().with_brightness(true).brightness());
+    /// ```
+    pub fn with_brightness(self, enabled: bool) -> Self {
         Self {
-            brightness,
-            clear_key,
-            clear_all,
-            sleep,
+            brightness: enabled,
+            ..self
+        }
+    }
+
+    /// States whether one key can be cleared on its own.
+    ///
+    /// ```
+    /// use deck_api::Capabilities;
+    ///
+    /// assert!(Capabilities::new().with_clear_key(true).clear_key());
+    /// ```
+    pub fn with_clear_key(self, enabled: bool) -> Self {
+        Self {
+            clear_key: enabled,
+            ..self
+        }
+    }
+
+    /// States whether every key can be cleared at once.
+    ///
+    /// ```
+    /// use deck_api::Capabilities;
+    ///
+    /// assert!(Capabilities::new().with_clear_all(true).clear_all());
+    /// ```
+    pub fn with_clear_all(self, enabled: bool) -> Self {
+        Self {
+            clear_all: enabled,
+            ..self
+        }
+    }
+
+    /// States whether the deck can be told to sleep.
+    ///
+    /// ```
+    /// use deck_api::Capabilities;
+    ///
+    /// assert!(Capabilities::new().with_sleep(true).sleep());
+    /// ```
+    pub fn with_sleep(self, enabled: bool) -> Self {
+        Self {
+            sleep: enabled,
+            ..self
+        }
+    }
+
+    /// States how many dials the deck has.
+    ///
+    /// ```
+    /// use deck_api::Capabilities;
+    ///
+    /// assert_eq!(Capabilities::new().with_dials(2).dial_count(), 2);
+    /// ```
+    pub fn with_dials(self, count: u16) -> Self {
+        Self {
+            dials: count,
+            ..self
         }
     }
 
@@ -309,7 +418,7 @@ impl Capabilities {
     /// ```
     /// use deck_api::Capabilities;
     ///
-    /// assert!(Capabilities::new(true, false, false, false).brightness());
+    /// assert!(Capabilities::new().with_brightness(true).brightness());
     /// ```
     pub fn brightness(&self) -> bool {
         self.brightness
@@ -320,7 +429,7 @@ impl Capabilities {
     /// ```
     /// use deck_api::Capabilities;
     ///
-    /// assert!(!Capabilities::new(true, false, false, false).clear_key());
+    /// assert!(!Capabilities::new().with_clear_key(false).clear_key());
     /// ```
     pub fn clear_key(&self) -> bool {
         self.clear_key
@@ -331,7 +440,7 @@ impl Capabilities {
     /// ```
     /// use deck_api::Capabilities;
     ///
-    /// assert!(Capabilities::new(true, false, true, false).clear_all());
+    /// assert!(Capabilities::new().with_clear_all(true).clear_all());
     /// ```
     pub fn clear_all(&self) -> bool {
         self.clear_all
@@ -342,10 +451,34 @@ impl Capabilities {
     /// ```
     /// use deck_api::Capabilities;
     ///
-    /// assert!(!Capabilities::NONE.sleep());
+    /// assert!(!Capabilities::new().with_sleep(false).sleep());
     /// ```
     pub fn sleep(&self) -> bool {
         self.sleep
+    }
+
+    /// How many dials the deck has.
+    ///
+    /// ```
+    /// use deck_api::Capabilities;
+    ///
+    /// assert_eq!(Capabilities::new().with_dials(2).dial_count(), 2);
+    /// ```
+    pub fn dial_count(&self) -> u16 {
+        self.dials
+    }
+}
+
+impl Default for Capabilities {
+    /// The same as [`Capabilities::NONE`].
+    ///
+    /// ```
+    /// use deck_api::Capabilities;
+    ///
+    /// assert_eq!(Capabilities::default(), Capabilities::NONE);
+    /// ```
+    fn default() -> Self {
+        Self::NONE
     }
 }
 

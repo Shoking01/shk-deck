@@ -16,6 +16,9 @@ use crate::types::{Capabilities, Geometry, ImageSpec, KeyEvent, KeyId};
 /// [`DeckError::Unsupported`]. It does not accept the call and quietly do
 /// nothing: a caller that cannot tell the difference between "done" and "not
 /// possible" has no way to tell the user anything useful.
+///
+/// The same rule covers values: a brightness outside the accepted range is
+/// refused with [`DeckError::ValueOutOfRange`], never clamped.
 pub trait Deck {
     /// The shape of the deck's keys.
     fn geometry(&self) -> Geometry;
@@ -29,7 +32,12 @@ pub trait Deck {
     /// The deck's identity string, as the device reports it.
     fn identity(&self) -> Result<String, DeckError>;
 
-    /// Sets the display brightness, from 0 to 100.
+    /// Sets the display brightness, from
+    /// [`VALUE_MIN`](crate::VALUE_MIN) to [`VALUE_MAX`](crate::VALUE_MAX).
+    ///
+    /// A value outside that range is refused with
+    /// [`DeckError::ValueOutOfRange`]: the seam does not clamp it, because a
+    /// clamped request is a request that changed without telling anyone.
     fn set_brightness(&mut self, value: u8) -> Result<(), DeckError>;
 
     /// Paints one key with a JPEG image.
@@ -43,6 +51,21 @@ pub trait Deck {
 
     /// Clears every key back to blank.
     fn clear_all(&mut self) -> Result<(), DeckError>;
+
+    /// Puts the deck to sleep.
+    ///
+    /// A deck that cannot sleep refuses with
+    /// [`DeckError::Unsupported`], naming
+    /// [`DeckOperation::Sleep`](crate::DeckOperation::Sleep).
+    fn sleep(&mut self) -> Result<(), DeckError>;
+
+    /// Moves one dial to `value`, from
+    /// [`VALUE_MIN`](crate::VALUE_MIN) to [`VALUE_MAX`](crate::VALUE_MAX).
+    ///
+    /// A deck with no dials refuses with [`DeckError::Unsupported`], naming
+    /// [`DeckOperation::SetDial`](crate::DeckOperation::SetDial); a dial that
+    /// does not exist is refused with [`DeckError::DialOutOfRange`].
+    fn set_dial(&mut self, dial: u8, value: u8) -> Result<(), DeckError>;
 
     /// Reads the key events waiting on the deck.
     ///
@@ -59,6 +82,14 @@ pub trait Deck {
 /// window, the engine and the action runner can all hold a `DeckHandle`
 /// without naming a model. The handle is a [`Deck`] itself, so it can be
 /// used wherever a deck is expected.
+///
+/// ```
+/// use deck_api::{Deck, DeckHandle};
+///
+/// fn geometry_of(handle: &DeckHandle) -> deck_api::Geometry {
+///     handle.geometry()
+/// }
+/// ```
 pub struct DeckHandle {
     inner: Box<dyn Deck>,
 }
@@ -75,19 +106,6 @@ impl DeckHandle {
     /// ```
     pub fn new(inner: Box<dyn Deck>) -> Self {
         Self { inner }
-    }
-
-    /// The geometry of the deck inside the handle.
-    ///
-    /// ```
-    /// use deck_api::DeckHandle;
-    ///
-    /// fn geometry_of(handle: &DeckHandle) -> deck_api::Geometry {
-    ///     handle.geometry()
-    /// }
-    /// ```
-    pub fn geometry(&self) -> Geometry {
-        self.inner.geometry()
     }
 }
 
@@ -122,6 +140,14 @@ impl Deck for DeckHandle {
 
     fn clear_all(&mut self) -> Result<(), DeckError> {
         self.inner.clear_all()
+    }
+
+    fn sleep(&mut self) -> Result<(), DeckError> {
+        self.inner.sleep()
+    }
+
+    fn set_dial(&mut self, dial: u8, value: u8) -> Result<(), DeckError> {
+        self.inner.set_dial(dial, value)
     }
 
     fn poll_events(&mut self, timeout: Duration) -> Result<Vec<KeyEvent>, DeckError> {
