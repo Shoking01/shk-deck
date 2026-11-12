@@ -691,6 +691,21 @@ messages; the file below is a human summary, not a substitute for
   --all-features -- -D warnings`, and release builds pass on Windows
   (rustc 1.99.0).
 
+### Added — the seam between a deck and its bytes
+- `crates/deck-api` is the new contract between **what a deck can do** and
+  **how its bytes travel**: a `Deck` trait (geometry, image spec, capabilities,
+  identity, painting, clearing, key events) above a `Transport` trait (write a
+  report, read an input report, read a control report).
+- A deck that cannot do something refuses it with a typed
+  `DeckError::Unsupported`. Accepting a call it cannot honour is worse than
+  refusing it: the user gets a key that does nothing and no way to find out
+  why.
+- `KeyId` is 0-based and `Geometry::position` derives the row and the column
+  from the deck's own geometry, so no layer has to assume five columns.
+- The crate names no device, and a test keeps it that way: it fails when the
+  string `ss550` appears anywhere in the seam's source. The guard was proved
+  by leaking the name on purpose and watching it fail.
+
 ### Known limitations — Fase 1 close-out
 - **Live verification of input events.** Button presses were verified one-at-a-time
   on hardware, but we have not exercised many presses in quick succession nor

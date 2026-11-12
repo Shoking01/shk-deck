@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/deck-api",
     "crates/ss550-driver",
     "crates/ss550-engine",
     "crates/ss550-probe",
