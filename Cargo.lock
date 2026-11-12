@@ -223,6 +223,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "deck-conformance"
+version = "0.1.0"
+dependencies = [
+ "deck-api",
+]
+
+[[package]]
+name = "deck-simulator"
+version = "0.1.0"
+dependencies = [
+ "deck-api",
+ "deck-conformance",
+ "ss550-protocol",
+ "thiserror",
+]
+
+[[package]]
 name = "defmt"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -754,6 +771,8 @@ name = "ss550-driver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "deck-api",
+ "deck-conformance",
  "env_logger",
  "hidapi",
  "image",
