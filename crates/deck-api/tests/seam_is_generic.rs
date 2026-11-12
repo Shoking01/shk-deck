@@ -1,37 +1,73 @@
 //! Guard 1: the seam names no device.
 //!
-//! The whole point of `deck-api` is to be the part of the code that does not
-//! know which deck it is talking to. The day a device's name appears here,
-//! the seam has leaked and a second model would have to work around it.
+//! Guard 2: the seam assumes no key count.
+//!
+//! Both cover **the whole crate**, every file in it, not only `src/`: a
+//! device name in the manifest or in a test is just as much a leak as one in
+//! the implementation.
+//!
+//! The two things the guards look for are spelled in pieces, so this file —
+//! which has to name what it looks for — is scanned like every other file and
+//! does not trip over itself.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn source_files(dir: &Path, found: &mut Vec<PathBuf>) {
-    let entries = fs::read_dir(dir).expect("the crate's source directory is readable");
+/// The device name the seam must never contain.
+fn device_name() -> String {
+    ["ss", "550"].concat()
+}
+
+/// The key count the seam must never assume.
+fn key_count() -> String {
+    ["1", "5"].concat()
+}
+
+fn crate_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+}
+
+fn crate_files(root: &Path, found: &mut Vec<PathBuf>) {
+    let entries = fs::read_dir(root).expect("the crate directory is readable");
     for entry in entries {
         let path = entry.expect("a readable directory entry").path();
         if path.is_dir() {
-            source_files(&path, found);
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            if path.file_name().is_some_and(|name| name == "target") {
+                continue;
+            }
+            crate_files(&path, found);
+        } else {
             found.push(path);
         }
     }
 }
 
+fn text_of(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+/// Every number written out in the text, digit run by digit run.
+fn numbers_in(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|character: char| !character.is_ascii_digit())
+        .filter(|number| !number.is_empty())
+}
+
 #[test]
 fn the_seam_never_names_a_device() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let root = crate_root();
     let mut files = Vec::new();
-    source_files(&root, &mut files);
+    crate_files(&root, &mut files);
 
-    assert!(!files.is_empty(), "the scan found no source files at all");
+    assert!(!files.is_empty(), "the scan found no files at all");
 
+    let needle = device_name();
     for file in files {
-        let text = fs::read_to_string(&file).expect("a readable source file");
-        let lowered = text.to_lowercase();
+        let Some(text) = text_of(&file) else {
+            continue;
+        };
         assert!(
-            !lowered.contains("ss550"),
+            !text.to_lowercase().contains(&needle),
             "{} names a device: the seam must stay generic",
             file.display()
         );
@@ -40,12 +76,19 @@ fn the_seam_never_names_a_device() {
 
 #[test]
 fn the_seam_never_assumes_a_key_count() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let root = crate_root();
     let mut files = Vec::new();
-    source_files(&root, &mut files);
+    crate_files(&root, &mut files);
+
+    let needle = key_count();
     for file in files {
-        let text = fs::read_to_string(&file).expect("a readable source file");
-        let assumes = text.split(|c: char| !c.is_ascii_digit()).any(|n| n == "15");
-        assert!(!assumes, "{} assumes a key count", file.display());
+        let Some(text) = text_of(&file) else {
+            continue;
+        };
+        assert!(
+            !numbers_in(&text).any(|number| number == needle),
+            "{} assumes a key count",
+            file.display()
+        );
     }
 }
