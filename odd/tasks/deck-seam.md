@@ -129,7 +129,8 @@ item, `cargo fmt` and zero clippy warnings. Artifacts in English.
 
 | ID | Task | Specs | Route | Status | Commit |
 | --- | --- | --- | --- | --- | --- |
-| T1 | `deck-api`: the seam crate — `Deck`, `Transport`, the data types, the typed errors, the guards | S1, S4, S10 | inline | pending | — |
+| T1 | `deck-api`: the seam crate — `Deck`, `Transport`, the data types, the typed errors, the guards | S1, S4, S10 | inline | done | `257cb99` + `9b89741` (review approved, authority burned) |
+| T1b | Seal the seam contract before anything consumes it: the missing `dials` capability, a `sleep` operation for the capability that advertises it, a bounded brightness with a typed refusal, a geometry that cannot contradict itself, one timeout unit across the seam, a guard that covers the whole crate, and behaviour tests for the handle | S1, S4, S10 | inline | done | `70d19aa` + `727e220` |
 | T2 | `deck-conformance`: the shared suite and its own stub-deck tests | S3, S10 | inline | pending | — |
 | T3 | `ss550-driver`: the SS550 as a `Deck` over a `Transport`, the crate-wide writer guard, the hardware test behind the feature | S1, S3, S4, S6, S7, S10 | delegated | pending | — |
 | T4 | `deck-simulator`: the SS550 wire fake and the 6-key deck, both passing the suite | S2, S3, S10 | delegated | pending | — |
@@ -170,3 +171,44 @@ L5 - 2026-11-11. The engine's `KeyNumber::key()` fallback is the only live
 bug in this list, and `from_key` / `key()` are used by the engine's own tests
 only — the window never calls them. Removing them is contained and kills the
 engine's dependency on the driver.
+
+L6 - 2026-11-11, T1. The seam crate landed as `257cb99`. The native review
+(`review-aaf606ba4eea87f0`, three lenses) refuted one CRITICAL finding:
+**R3-seam-hardcodes-15** — the seam's own doc examples carried the number 15
+in four places and no guard forbade it, which is exactly what S4 forbids. The
+finding was correct: the commit violated the spec it was written from.
+
+L7 - 2026-11-11, T1 correction. The guard was added first and observed
+**failing** against the old examples (`the_seam_never_assumes_a_key_count`,
+exit 101), then the examples were changed to a neutral eight-key shape and the
+guard went green. Correction committed as `9b89741`, exactly 24 changed lines
+(the declared correction plan). The targeted validator approved it and the
+review authority was burned (`gentle-ai.review-acknowledged/v1`).
+
+L8 - 2026-11-11, T1b opened. The review's advisory findings are not a reason
+to re-run the review, but three of them are holes in the contract **before**
+anything consumes it, and one of them (no `dials` capability, a `sleep` flag
+with no `sleep` operation) is an unmet spec item — S1 names both. A seam is
+the one contract every crate above it codes against; sealing it now costs one
+commit, sealing it after T2, T3 and T4 costs three. T1b fixes: the capability
+set against the trait's operations, the brightness range, the geometry that
+can contradict itself, the two timeout units, the guard's real scope, and the
+missing behaviour tests for the handle.
+
+L9 - 2026-11-11, T1b. Two commits: `70d19aa` (the contract) and `727e220`
+(the guards). Evidence: the API did not exist before the change (the test
+run failed to compile — RED), then `cargo test -p deck-api` went green with
+9 handle tests, 2 guard tests and 43 doctests, and
+`cargo clippy -p deck-api --all-targets -- --deny warnings` is clean. Two
+guards were proved, not assumed: a device name leaked into the crate
+manifest on purpose made the widened guard fail (exit 101), and a
+deliberately mis-forwarded `clear_key` made the handle test fail before it
+was put back.
+
+L10 - 2026-11-11, T1b size note. The contract commit is ~670 changed lines,
+over the ~400 heuristic. The reason is the house rule: every public item in
+a contract crate carries a doc example, and the change is one API migration
+that cannot be split without leaving the crate not compiling in the middle.
+The heuristic is advisory and the delivery strategy is `single-pr`, so the
+branch carries it as one reviewable unit instead of being carved into
+artificial pieces.
