@@ -1,15 +1,16 @@
 //! The deck keys, addressed the way the user sees them.
 
 use serde::{Deserialize, Serialize};
-use ss550_driver::Key;
 
 use crate::ActionError;
 
 /// A deck key, addressed by the **1-based number shown in the UI**.
 ///
-/// Key 1 is the bottom-left key and key 15 the top-right one, which is also
-/// the firmware's own numbering: the same number appears in an input report
-/// and in a paint command, so one number identifies a key everywhere.
+/// Key 1 is the bottom-left key and key 15 the top-right one. The number is
+/// the whole identity: the engine does not know which device the keys belong
+/// to, so it cannot turn a number into a physical key, and it does not guess
+/// one when the number is out of range — a key that does not exist is an
+/// error, never a silent fallback to another key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "u8")]
 pub struct KeyNumber(u8);
@@ -41,20 +42,6 @@ impl KeyNumber {
     /// The 1-based number of this key.
     pub fn get(self) -> u8 {
         self.0
-    }
-
-    /// The physical key this number refers to.
-    pub fn key(self) -> Key {
-        match Key::from_index(self.0 - 1) {
-            Ok(key) => key,
-            // Unreachable: a `KeyNumber` only exists for 1..=15.
-            Err(_) => Key::BottomLeft,
-        }
-    }
-
-    /// The number of a physical key.
-    pub fn from_key(key: Key) -> Self {
-        Self(key.to_index() + 1)
     }
 }
 
@@ -102,29 +89,15 @@ mod tests {
     }
 
     #[test]
-    fn the_default_key_is_the_bottom_left_one() {
+    fn the_default_key_is_the_first_one() {
         assert_eq!(KeyNumber::default().get(), 1);
-        assert_eq!(KeyNumber::default().key(), Key::BottomLeft);
     }
 
     #[test]
-    fn every_physical_key_maps_to_a_distinct_number() {
-        let mut seen = [false; 16];
-        for index in 0..15u8 {
-            let key = Key::from_index(index).expect("in range");
-            let number = KeyNumber::from_key(key);
-            assert!(!seen[number.get() as usize], "key {index} collides");
-            seen[number.get() as usize] = true;
-            assert_eq!(number.key(), key, "round trip failed for {index}");
-        }
-        assert!(seen[1..].iter().all(|&used| used), "every key reachable");
-    }
-
-    #[test]
-    fn the_bottom_left_key_is_one_and_the_top_right_is_fifteen() {
-        assert_eq!(KeyNumber::from_key(Key::BottomLeft).get(), 1);
-        assert_eq!(KeyNumber::from_key(Key::TopRight).get(), 15);
-        assert_eq!(KeyNumber::new(1).expect("valid").key(), Key::BottomLeft);
-        assert_eq!(KeyNumber::new(15).expect("valid").key(), Key::TopRight);
+    fn the_number_is_the_one_the_ui_shows() {
+        assert_eq!(KeyNumber::new(1).expect("valid").get(), 1);
+        assert_eq!(KeyNumber::new(15).expect("valid").get(), 15);
+        assert_eq!(u8::from(KeyNumber::new(7).expect("valid")), 7);
+        assert_eq!(KeyNumber::new(7).expect("valid").to_string(), "#7");
     }
 }

@@ -4,9 +4,10 @@ The action layer of the Redragon StreamCraft SS550 controller: it binds the
 deck's 15 physical keys to actions, keeps those bindings on disk, and runs
 them without ever going through a shell.
 
-Dependency position: `protocol → driver → engine → ui`. This crate knows
-nothing about HID, painting or windows; the GUI maps a decoded key edge to a
-[`KeyNumber`] and calls the store and the runner.
+Dependency position: `engine → ui`. This crate knows nothing about HID,
+painting or windows — and nothing about which device the keys belong to. The
+GUI maps a decoded key edge to a [`KeyNumber`] and calls the store and the
+runner.
 
 ## What it does
 
