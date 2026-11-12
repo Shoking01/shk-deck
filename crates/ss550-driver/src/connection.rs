@@ -1,8 +1,10 @@
 //! Device connection and communication.
 
 use crate::error::Ss550Error;
+use crate::hid_transport::HidTransport;
 use crate::image::ButtonImage;
 use crate::keys::{self, Key};
+use deck_api::Transport;
 use hidapi::{HidApi, HidDevice};
 use ss550_protocol::{
     build_bat, build_cle_all, build_cle_key, build_dis, build_image_chunks, build_lig, build_sleep,
@@ -192,16 +194,6 @@ pub struct ButtonEvent {
     pub state: ButtonState,
 }
 
-/// Clamps a [`Duration`] into hidapi's millisecond `i32` timeout.
-fn duration_to_timeout_ms(wait: Duration) -> i32 {
-    let ms = wait.as_millis();
-    if ms > i32::MAX as u128 {
-        i32::MAX
-    } else {
-        ms as i32
-    }
-}
-
 /// Decodes one input report into a key edge.
 ///
 /// Returns `Ok(None)` for the replies the deck sends to our own writes: they
@@ -222,8 +214,13 @@ fn decode_key_edge(report: &[u8]) -> Result<Option<ButtonEvent>, Ss550Error> {
 }
 
 /// A connection to an SS550 device.
+///
+/// Every byte this type sends or receives goes through a
+/// [`Transport`](deck_api::Transport), never through the handle directly. In
+/// production that transport is [`HidTransport`]; in tests and in the simulator
+/// it is a fake, which is how the deck's logic is exercised without a device.
 pub struct Device {
-    device: HidDevice,
+    transport: Box<dyn Transport + Send>,
     initialized: bool,
     brightness: u8,
     pending_images: Vec<ButtonImage>,
@@ -324,8 +321,18 @@ impl Device {
 
     /// Initializes a Device from an already-opened HidDevice.
     fn init_from_handle(device: HidDevice) -> Self {
+        Self::over_transport(Box::new(HidTransport::new(device)))
+    }
+
+    /// Builds a `Device` over a caller-supplied transport.
+    ///
+    /// Used by [`Ss550Deck::over_transport`](crate::Ss550Deck::over_transport)
+    /// and by this crate's tests. It does not weaken the gate: every write
+    /// still goes through [`Device::write_pack`] and its verified-command
+    /// check, whatever the transport does with the bytes afterwards.
+    pub(crate) fn over_transport(transport: Box<dyn Transport + Send>) -> Self {
         Self {
-            device,
+            transport,
             initialized: false,
             brightness: 100,
             pending_images: Vec::new(),
@@ -344,7 +351,7 @@ impl Device {
     /// the vendor app) can write until the deck is power cycled. See
     /// `docs/troubleshooting/deck-stuck.md`.
     ///
-    /// So this never writes. It reads with `get_input_report` and a 1025-byte
+    /// So this never writes. It reads with a control transfer and a 1025-byte
     /// buffer (a 513-byte input-sized buffer fails with `ERROR_GEN_FAILURE` on
     /// Windows). The returned string is informational: because the report is
     /// static, a successful read is **not** evidence that anything reached the
@@ -357,13 +364,13 @@ impl Device {
     /// instead of asking the firmware: the gate would refuse the write
     /// anyway, and the refusal would be the last warning before the deck
     /// goes dark.
-    pub fn firmware_version(&self) -> Result<String, Ss550Error> {
+    ///
+    /// Takes `&mut self` because a read is a byte transfer and the transport
+    /// seam models one as a mutable borrow; nothing here writes.
+    pub fn firmware_version(&mut self) -> Result<String, Ss550Error> {
         let mut buf = vec![0u8; ss550_protocol::REPORT_SIZE];
         // `buf[0]` already holds report ID 0x00, as required before the call.
-        let n = self
-            .device
-            .get_input_report(&mut buf)
-            .map_err(|e| Ss550Error::HidIoError(e.to_string()))?;
+        let n = self.transport.read_control(&mut buf)?;
 
         if n == 0 {
             return Ok(String::new());
@@ -376,8 +383,10 @@ impl Device {
     ///
     /// The command is checked against the verified registry **before** the
     /// write, so an unproven command never reaches the deck. This is the
-    /// single funnel every report goes through: keep it that way, or the
-    /// safety net has a hole in it.
+    /// single call site into the transport's write: keep it that way, or the
+    /// safety net has a hole in it. The crate-wide guard
+    /// (`every_write_goes_through_the_gated_funnel`) scans every source file
+    /// for a second writer and fails the build if one appears.
     fn write_pack(
         &mut self,
         command: Command,
@@ -387,21 +396,10 @@ impl Device {
         // not leave the host at all.
         ensure_verified(command)?;
 
-        // The reference implementation drives this path with `hid_write`
-        // (interrupt OUT). Control `Set_Report` (`send_output_report`) returns
-        // success but the firmware ignores it, so it must never be used here:
-        // a silent no-op is worse than a loud error.
-        self.device
-            .write(pack.as_bytes())
-            .map(|_| ())
-            .map_err(|e| {
-                let message = e.to_string();
-                if crate::error::is_stalled_transport(&message) {
-                    Ss550Error::TransportStalled { detail: message }
-                } else {
-                    Ss550Error::HidIoError(message)
-                }
-            })?;
+        // The transport writes over interrupt OUT. Control `Set_Report`
+        // returns success but the firmware ignores it, so it must never be
+        // used here: a silent no-op is worse than a loud error.
+        self.transport.write_report(pack.as_bytes())?;
 
         // Every accepted report counts as activity: an app that paints keys is
         // already keeping the deck awake, so the heartbeat stays silent.
@@ -482,10 +480,7 @@ impl Device {
         let mut wait = timeout;
 
         while events.len() < MAX_EVENTS_PER_POLL {
-            let read = self
-                .device
-                .read_timeout(&mut buf, duration_to_timeout_ms(wait))
-                .map_err(|e| Ss550Error::HidIoError(e.to_string()))?;
+            let read = self.transport.read_input(&mut buf, wait)?;
 
             if read == 0 {
                 break;
@@ -700,8 +695,8 @@ impl Device {
     pub fn reconnect(&mut self) -> Result<(), Ss550Error> {
         let mut api = HidApi::new().map_err(|e| Ss550Error::HidOpenError(e.to_string()))?;
         wait_until_settled(&mut api, CONNECT_TIMEOUT)?;
-        // Reopen the device with a fresh handle.
-        self.device = Self::open_vendor_handle(&mut api)?;
+        // Reopen the device with a fresh handle, behind a fresh transport.
+        self.transport = Box::new(HidTransport::new(Self::open_vendor_handle(&mut api)?));
         self.initialized = false;
         self.brightness = 100;
         self.last_write = Instant::now();
@@ -774,7 +769,7 @@ impl Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
-        // HidDevice is automatically closed when dropped.
+        // The transport closes the handle when it is dropped.
     }
 }
 
@@ -825,6 +820,8 @@ fn parse_firmware_version(buf: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn parse_firmware_version_extracts_v_string() {
@@ -1081,18 +1078,71 @@ mod tests {
     #[test]
     fn every_write_goes_through_the_gated_funnel() {
         // The gate is only as good as its coverage: every byte that leaves the
-        // host must go through the one gated funnel. Count the write call
-        // sites in the production half of this file — the test module is cut
-        // off first, so this test cannot match its own text.
-        let source = include_str!("connection.rs");
-        let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("this file always has a test module");
+        // host must go through the one gated funnel. This scans **every source
+        // file in the crate**, not one file — the transport lives in its own
+        // module now, so counting `.write(` in `connection.rs` alone would go
+        // blind exactly while a second writer exists.
+        //
+        // Two facts are asserted, and together they are the whole rule:
+        //
+        // 1. the crate has exactly one physical write, in the transport;
+        // 2. it has exactly one call site into that write, in `write_pack`, and
+        //    the verified-command check runs before it.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_sources(&root, &mut files);
+        assert!(!files.is_empty(), "the scan found no source files");
+
+        let mut physical_writes = Vec::new();
+        let mut funnel_calls = Vec::new();
+
+        for file in &files {
+            let text = fs::read_to_string(file).expect("every source file in this crate is UTF-8");
+            // The test module is cut off first: this test names what it looks
+            // for, so it would otherwise match its own text.
+            let production = text.split("#[cfg(test)]").next().unwrap_or_default();
+            let name = file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("<unnamed>");
+
+            physical_writes.extend(repeat_n(name, production.matches(".write(").count()));
+
+            if let Some(call_site) = production.find(".write_report(") {
+                let gate = production.find("ensure_verified(command)?");
+                funnel_calls.push((name, gate.map(|gate| gate < call_site)));
+            }
+        }
+
         assert_eq!(
-            production.matches(".write(").count(),
-            1,
-            "every byte must leave through the single gated funnel"
+            physical_writes,
+            vec!["hid_transport.rs"],
+            "the only physical write must be the transport's write_report"
         );
+        assert_eq!(
+            funnel_calls,
+            vec![("connection.rs", Some(true))],
+            "the transport's write must have exactly one call site, inside the \
+             gated funnel in connection.rs, after the verified-command check"
+        );
+    }
+
+    /// Every `.rs` file under `root`, so the guard cannot go blind when a file
+    /// is added.
+    fn collect_sources(root: &Path, found: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(root).expect("the source directory is readable") {
+            let path = entry.expect("a readable directory entry").path();
+            if path.is_dir() {
+                collect_sources(&path, found);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    /// `value` repeated `count` times, so a count turns into a list the
+    /// assertion can compare exactly.
+    fn repeat_n(value: &str, count: usize) -> Vec<String> {
+        vec![value.to_owned(); count]
     }
 }

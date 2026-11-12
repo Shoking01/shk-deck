@@ -1229,6 +1229,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
+name = "deck-api"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "deranged"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6403,6 +6410,7 @@ name = "ss550-driver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "deck-api",
  "hidapi",
  "image",
  "jpeg-encoder",
