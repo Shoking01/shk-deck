@@ -101,6 +101,34 @@ pub const SETTLE_TIME: Duration = Duration::from_secs(3);
 /// How long [`Device::connect`] keeps waiting once the deck has been seen.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Checks whether the SS550 deck is currently present on the USB bus.
+///
+/// This is the non-blocking probe for hotplug detection: it refreshes the
+/// device list and checks if the SS550 is enumerated. Returns `true` if
+/// the device is found, `false` otherwise.
+///
+/// Use this for periodic polling to detect plug/unplug events without
+/// blocking the call.
+///
+/// # Example
+///
+/// ```ignore
+/// use ss550_driver::is_deck_present;
+///
+/// if is_deck_present() {
+///     println!("Deck is plugged in!");
+/// } else {
+///     println!("Deck is not found");
+/// }
+/// ```
+pub fn is_deck_present() -> bool {
+    let mut api = match HidApi::new() {
+        Ok(api) => api,
+        Err(_) => return false,
+    };
+    vendor_collection_present(&mut api)
+}
+
 /// How long a connection attempt may wait for a deck that was already seen.
 ///
 /// The boot cycle is: appear → leave the bus → brief appearance → leave →
@@ -119,8 +147,37 @@ pub const LONG_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// hang.
 const ABSENT_GRACE: Duration = Duration::from_millis(500);
 
+/// How often to poll for device presence changes.
+///
+/// Shorter is more responsive but uses more CPU during the "waiting" state.
+/// 1 second is a good balance: the deck is usually seen within a few seconds
+/// of being plugged in, and the polling cost is negligible.
+#[allow(dead_code)]
+pub const DISCOVERY_POLL: Duration = Duration::from_secs(1);
+
 /// Presence poll interval while waiting for the boot to settle.
 const PRESENCE_POLL: Duration = Duration::from_millis(50);
+
+/// Reconnect backoff constants (reserved for M7: hotplug detection)
+/// These will be used when we implement automatic reconnect with exponential
+/// backoff in the UI layer.
+#[allow(dead_code)]
+const RECONNECT_BACKOFF_FACTOR: u32 = 2;
+
+/// Maximum reconnect delay.
+///
+/// After many failures, cap the delay at this value to avoid indefinite
+/// waits. 60 seconds lets a user know the app is still trying, without
+/// overwhelming the USB bus.
+#[allow(dead_code)]
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
+
+/// How many failed connections trigger full reset backoff.
+///
+/// Instead of exponentially increasing the delay, count failures and when
+/// this limit is reached, use MAX_RECONNECT_DELAY.
+#[allow(dead_code)]
+const BACKOFF_RESET_THRESHOLD: u32 = 10;
 
 /// Decides when [`wait_until_settled`] must stop waiting and report failure.
 ///

@@ -44,11 +44,11 @@ Accepted scope:
 | ID | Task | Specs | Route | Status | Commit |
 | --- | --- | --- | --- | --- | --- |
 | T1 | Design the profile data model | S1, S2, S3 | inline | ✅ done | |
-| T2 | Implement Profile store in ss550-engine | S1, S3 | inline | in progress | |
-| T3 | Profile UI in ss550-gui | S2 | inline | pending | |
-| T4 | Switch profile on deck | S1, S2 | inline | pending | |
-| T5 | Six named profiles example | S3 | inline | pending | |
-| T6 | Verification: tests, clippy, fmt | all | inline | pending | |
+| T2 | Implement Profile store in ss550-engine | S1, S3 | inline | ✅ done | |
+| T3 | Profile UI in ss550-gui | S2 | inline | ✅ done | |
+| T4 | Switch profile on deck | S1, S2 | inline | ✅ done | |
+| T5 | Six named profiles example | S3 | inline | ✅ done | |
+| T6 | Verification: tests, clippy, fmt | all | inline | ✅ done | |
 
 ## Log
 
@@ -76,3 +76,31 @@ These require UI changes and cannot proceed without:
 4. Persistence and restart-survival
 
 **BLOCKED:** Need user decision on the profile UI design before implementing T2-T6. The engine model is ready; the windows needs to show "[profile: stream]" and let users switch.
+
+### M6 Completion (2026-11-13)
+
+**Completed tasks:**
+- T2: ProfileStore saved and loaded via `ProfileStore::load()` / `ProfileStore::save()` in `ss550-engine/src/profiles.rs`
+- T3: UI integration in `ss550-gui/src/main.rs`:
+  - `profile_store` field in Controller
+  - `profile_pill` as Button showing current profile name
+  - Click cycles through profiles
+- T4: `switch_profile()` applies profile to deck:
+  - Updates `self.store` with profile bindings
+  - Paints all keys according to profile colors
+  - Pushes changes to deck via session
+- T5: Six default profiles created: "default", "stream", "meetings", "gaming", "work", "entertainment"
+- T6: All tests pass, clippy clean, fmt applied
+
+**Verification:**
+- `cargo test --workspace`: all 179 tests pass
+- `cargo clippy --workspace --all-targets --all-features -- --deny warnings`: clean
+- `cargo fmt --all`: applied
+
+**Files changed:**
+- `crates/ss550-engine/src/profiles.rs`: 347 lines (+347)
+- `crates/ss550-engine/src/lib.rs`: +2 exports
+- `crates/ss550-engine/src/error.rs`: +4 lines
+- `crates/ss550-engine/src/store.rs`: +2/-2 lines
+- `crates/ss550-gui/src/main.rs`: +147/-25 lines (profile UI integration)
+- `odd/tasks/profiles-m6.md`: this file

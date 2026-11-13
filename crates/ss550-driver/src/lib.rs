@@ -56,7 +56,7 @@ mod image;
 mod keys;
 
 pub use connection::{
-    ensure_verified, ButtonEvent, Command, Device, LONG_CONNECT_TIMEOUT, PID, VID,
+    ensure_verified, is_deck_present, ButtonEvent, Command, Device, LONG_CONNECT_TIMEOUT, PID, VID,
 };
 pub use deck::Ss550Deck;
 pub use error::Ss550Error;
