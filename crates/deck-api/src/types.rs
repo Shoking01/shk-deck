@@ -310,6 +310,7 @@ pub struct Capabilities {
     clear_key: bool,
     clear_all: bool,
     sleep: bool,
+    keep_alive: bool,
     dials: u16,
 }
 
@@ -327,6 +328,7 @@ impl Capabilities {
         clear_key: false,
         clear_all: false,
         sleep: false,
+        keep_alive: false,
         dials: 0,
     };
 
@@ -399,6 +401,26 @@ impl Capabilities {
         }
     }
 
+    /// States whether the deck has to be kept awake.
+    ///
+    /// A deck that resets itself after a stretch of host silence advertises
+    /// this; the caller then has to call
+    /// [`Deck::keep_alive`](crate::Deck::keep_alive) from its main loop. A deck
+    /// with no such reset does not advertise it, and refusing the call is the
+    /// normal answer.
+    ///
+    /// ```
+    /// use deck_api::Capabilities;
+    ///
+    /// assert!(Capabilities::new().with_keep_alive(true).keep_alive());
+    /// ```
+    pub fn with_keep_alive(self, enabled: bool) -> Self {
+        Self {
+            keep_alive: enabled,
+            ..self
+        }
+    }
+
     /// States how many dials the deck has.
     ///
     /// ```
@@ -455,6 +477,17 @@ impl Capabilities {
     /// ```
     pub fn sleep(&self) -> bool {
         self.sleep
+    }
+
+    /// Whether the deck has to be kept awake.
+    ///
+    /// ```
+    /// use deck_api::Capabilities;
+    ///
+    /// assert!(!Capabilities::new().keep_alive());
+    /// ```
+    pub fn keep_alive(&self) -> bool {
+        self.keep_alive
     }
 
     /// How many dials the deck has.

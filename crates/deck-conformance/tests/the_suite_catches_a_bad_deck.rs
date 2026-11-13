@@ -45,6 +45,8 @@ enum Flaw {
     IgnoresMissingClearAll,
     /// Has no sleep, and accepts it anyway.
     IgnoresMissingSleep,
+    /// Needs no keep-alive, and accepts one anyway.
+    IgnoresMissingKeepAlive,
     /// Has no dials, and accepts any dial.
     AcceptsAnyDial,
     /// Answers with an empty identity.
@@ -78,6 +80,10 @@ const PAIRS: &[(Flaw, &str)] = &[
     (
         Flaw::IgnoresMissingSleep,
         "sleep_without_the_capability_is_refused",
+    ),
+    (
+        Flaw::IgnoresMissingKeepAlive,
+        "keep_alive_without_the_capability_is_refused",
     ),
     (Flaw::AcceptsAnyDial, "a_dial_past_the_count_is_refused"),
     (Flaw::EmptyIdentity, "identity_is_never_an_empty_success"),
@@ -204,6 +210,15 @@ impl Deck for Stub {
         }
         Err(DeckError::Unsupported {
             operation: DeckOperation::Sleep,
+        })
+    }
+
+    fn keep_alive(&mut self) -> Result<(), DeckError> {
+        if self.flaw == Flaw::IgnoresMissingKeepAlive {
+            return Ok(());
+        }
+        Err(DeckError::Unsupported {
+            operation: DeckOperation::KeepAlive,
         })
     }
 
@@ -344,5 +359,17 @@ fn a_deck_with_no_sleep_is_asked_for_one_and_refuses_it() {
         outcome_of(&results, "sleep_without_the_capability_is_refused"),
         Outcome::Pass,
         "a deck that does not advertise sleep has to refuse it, not ignore it"
+    );
+}
+
+#[test]
+fn a_deck_with_no_keep_alive_is_asked_for_one_and_refuses_it() {
+    let mut deck = Stub::clean();
+    let results = run(&mut deck);
+
+    assert_eq!(
+        outcome_of(&results, "keep_alive_without_the_capability_is_refused"),
+        Outcome::Pass,
+        "a deck that never has to be kept awake has to refuse the call, not ignore it"
     );
 }

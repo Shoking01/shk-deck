@@ -174,6 +174,7 @@ impl Deck for Ss550Deck {
             .with_clear_all(true)
             .with_clear_key(false)
             .with_sleep(false)
+            .with_keep_alive(true)
             .with_dials(0)
     }
 
@@ -261,6 +262,17 @@ impl Deck for Ss550Deck {
         Err(DeckError::Unsupported {
             operation: DeckOperation::Sleep,
         })
+    }
+
+    fn keep_alive(&mut self) -> Result<(), DeckError> {
+        // The deck resets itself after ~68 s of host silence and the reset
+        // kills the handle (`docs/troubleshooting/deck-stuck.md` §5.2). The
+        // driver's heartbeat is the proven `DIS`: it is throttled internally,
+        // never fires inside an image upload, and does nothing before the first
+        // paint.
+        self.device
+            .keepalive()
+            .map_err(|error| seam_error(DeckOperation::KeepAlive, error))
     }
 
     fn set_dial(&mut self, dial: u8, _value: u8) -> Result<(), DeckError> {

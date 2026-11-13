@@ -74,6 +74,7 @@ impl Deck for StubDeck {
             .with_brightness(true)
             .with_clear_key(true)
             .with_clear_all(true)
+            .with_keep_alive(true)
     }
 
     fn identity(&self) -> Result<String, DeckError> {
@@ -111,6 +112,11 @@ impl Deck for StubDeck {
         self.refusal(DeckOperation::Sleep)
     }
 
+    fn keep_alive(&mut self) -> Result<(), DeckError> {
+        self.record("keep_alive");
+        self.refusal(DeckOperation::KeepAlive)
+    }
+
     fn set_dial(&mut self, dial: u8, value: u8) -> Result<(), DeckError> {
         self.record(format!("set_dial({dial}, {value})"));
         self.refusal(DeckOperation::SetDial)
@@ -141,6 +147,7 @@ fn the_handle_forwards_every_call_to_the_deck_inside_it() {
     handle.clear_key(KeyId::new(2)).expect("the stub accepts");
     handle.clear_all().expect("the stub accepts");
     handle.sleep().expect("the stub accepts");
+    handle.keep_alive().expect("the stub accepts");
     handle.set_dial(0, 7).expect("the stub accepts");
     handle
         .poll_events(Duration::from_millis(5))
@@ -156,6 +163,7 @@ fn the_handle_forwards_every_call_to_the_deck_inside_it() {
             "clear_key(2)",
             "clear_all",
             "sleep",
+            "keep_alive",
             "set_dial(0, 7)",
             "poll_events(5ms)",
             "reconnect",
@@ -182,6 +190,7 @@ fn the_handle_answers_with_the_capabilities_of_the_deck_inside_it() {
     assert!(capabilities.clear_key());
     assert!(capabilities.clear_all());
     assert!(!capabilities.sleep());
+    assert!(capabilities.keep_alive());
     assert_eq!(capabilities.dial_count(), 0);
 }
 

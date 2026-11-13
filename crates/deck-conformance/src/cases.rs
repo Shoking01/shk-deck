@@ -32,6 +32,7 @@ pub(crate) fn all(deck: &mut dyn Deck) -> Vec<CaseResult> {
         clear_key_without_the_capability_is_refused(deck),
         clear_all_without_the_capability_is_refused(deck),
         sleep_without_the_capability_is_refused(deck),
+        keep_alive_without_the_capability_is_refused(deck),
         a_dial_past_the_count_is_refused(deck),
         identity_is_never_an_empty_success(deck),
     ]
@@ -206,6 +207,23 @@ fn sleep_without_the_capability_is_refused(deck: &mut dyn Deck) -> CaseResult {
         deck.sleep(),
         DeckError::Unsupported {
             operation: DeckOperation::Sleep,
+        },
+    )
+}
+
+/// Keeping the link awake, when the deck does not advertise it.
+fn keep_alive_without_the_capability_is_refused(deck: &mut dyn Deck) -> CaseResult {
+    const NAME: &str = "keep_alive_without_the_capability_is_refused";
+
+    if deck.capabilities().keep_alive() {
+        return CaseResult::not_applicable(NAME, "this deck has to be kept awake");
+    }
+
+    expect_refusal(
+        NAME,
+        deck.keep_alive(),
+        DeckError::Unsupported {
+            operation: DeckOperation::KeepAlive,
         },
     )
 }

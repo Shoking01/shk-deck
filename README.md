@@ -42,13 +42,17 @@ before its bytes leave the host.
 | Path | What it is |
 | --- | --- |
 | `crates/ss550-protocol` | Pure HID codec. No I/O, no clock, no USB. Golden vectors + proptest |
-| `crates/ss550-driver` | Synchronous `hidapi` transport, caching, reconnect, heartbeat |
+| `crates/deck-api` | The deck seam: `Deck` (semantics) over `Transport` (bytes). Names no device, assumes no key count |
+| `crates/deck-conformance` | One suite of eleven cases every deck implementation must pass |
+| `crates/deck-simulator` | A six-key deck and the SS550 wire fake, so the seam is proven without hardware |
+| `crates/ss550-driver` | Synchronous `hidapi` transport, caching, reconnect, heartbeat; the SS550 as a `Deck` |
 | `crates/ss550-engine` | Bindings, persistence, URL/path validation, action runner |
 | `crates/ss550-gui` | The window (GPUI Kit). Its own workspace root |
 | `crates/ss550-tray` | Tray icon, `ShowWindow` hide/restore, logon entry. Its own workspace root, and the **only** crate allowed to call Win32 |
 | `crates/ss550-probe` | Diagnostics used to reverse-engineer the deck |
 | `docs/protocol/` | Wire format, descriptors, input events, image upload, incidents |
 | `docs/troubleshooting/` | The "backlit but black" runbook — read it before touching USB code |
+| `docs/milestones/` | What each milestone delivered, what it left open, and the evidence |
 | `odd/tasks/` | Feature records: specs, tasks, and the evidence behind every claim |
 
 ## Build and test

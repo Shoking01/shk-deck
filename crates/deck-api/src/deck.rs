@@ -59,6 +59,23 @@ pub trait Deck {
     /// [`DeckOperation::Sleep`](crate::DeckOperation::Sleep).
     fn sleep(&mut self) -> Result<(), DeckError>;
 
+    /// Keeps the deck from resetting itself while the host is idle.
+    ///
+    /// A deck that advertises
+    /// [`Capabilities::keep_alive`](crate::Capabilities::keep_alive) implements
+    /// this; the caller calls it from its main loop and the deck is free to
+    /// throttle the write on its own. A deck with no idle reset does not
+    /// advertise the capability, and this default refuses with
+    /// [`DeckError::Unsupported`], naming
+    /// [`DeckOperation::KeepAlive`](crate::DeckOperation::KeepAlive) — a deck
+    /// that claims the capability and forgets to override this is caught by the
+    /// conformance suite instead of silently doing nothing.
+    fn keep_alive(&mut self) -> Result<(), DeckError> {
+        Err(DeckError::Unsupported {
+            operation: crate::DeckOperation::KeepAlive,
+        })
+    }
+
     /// Moves one dial to `value`, from
     /// [`VALUE_MIN`](crate::VALUE_MIN) to [`VALUE_MAX`](crate::VALUE_MAX).
     ///
@@ -144,6 +161,10 @@ impl Deck for DeckHandle {
 
     fn sleep(&mut self) -> Result<(), DeckError> {
         self.inner.sleep()
+    }
+
+    fn keep_alive(&mut self) -> Result<(), DeckError> {
+        self.inner.keep_alive()
     }
 
     fn set_dial(&mut self, dial: u8, value: u8) -> Result<(), DeckError> {

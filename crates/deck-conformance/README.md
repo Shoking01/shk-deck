@@ -1,6 +1,6 @@
 # deck-conformance
 
-One suite of ten cases, run against any deck. The real device and a six-key
+One suite of eleven cases, run against any deck. The real device and a six-key
 simulator pass the same file, so a deck that breaks the contract is caught
 before it reaches a desk.
 
@@ -27,6 +27,7 @@ wants the whole picture, not the first problem.
 | `clear_key_without_the_capability_is_refused` | the same, for a single-key clear |
 | `clear_all_without_the_capability_is_refused` | the same, for clear-all |
 | `sleep_without_the_capability_is_refused` | the same, for sleep |
+| `keep_alive_without_the_capability_is_refused` | the same, for keep-alive |
 | `a_dial_past_the_count_is_refused` | a dial that does not exist is refused, naming how many there are |
 | `identity_is_never_an_empty_success` | an identity is never an empty success; a deck that cannot read one refuses honestly |
 

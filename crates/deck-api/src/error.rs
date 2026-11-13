@@ -36,6 +36,8 @@ pub enum DeckOperation {
     ClearAll,
     /// Putting the deck to sleep.
     Sleep,
+    /// Keeping the deck from resetting itself while the host is idle.
+    KeepAlive,
     /// Moving one dial.
     SetDial,
     /// Reading the key events.
@@ -53,6 +55,7 @@ impl fmt::Display for DeckOperation {
             DeckOperation::ClearKey => "clear_key",
             DeckOperation::ClearAll => "clear_all",
             DeckOperation::Sleep => "sleep",
+            DeckOperation::KeepAlive => "keep_alive",
             DeckOperation::SetDial => "set_dial",
             DeckOperation::PollEvents => "poll_events",
             DeckOperation::Reconnect => "reconnect",
