@@ -21,3 +21,10 @@ third_party/
 # The tooling's own cache: the skill registry it resolves before a task. It is
 # not project content and it changes on its own.
 .atl/
+
+# Local app data (installation directories for built binaries)
+%LOCALAPPDATA%/
+
+# Update script artifacts
+update-steamcraft.bat
+update-steamcraft.ps1
