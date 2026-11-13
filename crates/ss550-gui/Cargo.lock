@@ -1236,6 +1236,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "deck-conformance"
+version = "0.1.0"
+dependencies = [
+ "deck-api",
+]
+
+[[package]]
+name = "deck-simulator"
+version = "0.1.0"
+dependencies = [
+ "deck-api",
+ "deck-conformance",
+ "ss550-protocol",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "deranged"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6431,11 +6448,15 @@ dependencies = [
 name = "ss550-gui"
 version = "0.1.0"
 dependencies = [
+ "deck-api",
+ "deck-simulator",
  "gpui-kit",
+ "jpeg-encoder",
  "raw-window-handle",
  "ss550-driver",
  "ss550-engine",
  "ss550-tray",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
