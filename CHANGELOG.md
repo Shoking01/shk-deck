@@ -7,6 +7,40 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Changed — the window follows whatever deck answers
+- `crates/ss550-gui` no longer asserts which deck it is talking to. The grid
+  comes from `Deck::geometry`, each key image is encoded at `Deck::image_spec`'s
+  own width and height, and every deck-wide control exists only because
+  `Deck::capabilities` says the deck has it. A deck with no brightness never
+  sees a brightness row; a deck with no single-key clear never sees that
+  button, and a call that asks anyway comes back as `DeckError::Unsupported`
+  and is reported, never swallowed.
+- The window holds a `deck_api::DeckHandle` behind a `DeckSession` that reads
+  the deck once per connection. Nothing below it carries a key count of its own:
+  the tile grid, the key picker, the row labels and the "painted N keys" notes
+  all come from the deck's geometry, in display order (top row first), because
+  the hardware counts its rows from the bottom.
+- The texts name the deck in front of them: the header, the window title and the
+  tray tooltip use the connected deck's identity, or its shape (keys, columns,
+  image size, dials) when it does not report one. Before a deck answers the
+  window says so instead of describing a model.
+- The keep-alive is a seam operation now (`Deck::keep_alive`,
+  `Capabilities::keep_alive`, `DeckOperation::KeepAlive`), not a window timer:
+  the trait's default is the typed refusal, so a deck that never resets says so.
+  The conformance suite gained an eleventh case,
+  `keep_alive_without_the_capability_is_refused`, with its falsifying stub.
+- Bindings are stored per deck, in `config_dir()/bindings/<slug>-<fnv64>.json`,
+  keyed by the deck's identity or by its shape when it has none. The pre-M4
+  `bindings.json` is still read, and copied into the per-deck file only when
+  every bound key exists on the deck in front of the window; a file that would
+  need keys the deck does not have is left alone rather than repointed at other
+  keys.
+- `ss550-engine::KeyNumber` no longer carries a `1..=15` range. A key number is
+  a positive 1-based number, and the deck's geometry decides whether the key
+  exists. A window guard scans `crates/ss550-gui/src` for the device name, the
+  product name, the USB id and a standalone key-count literal, so the window
+  cannot quietly start naming a deck again.
+
 ### Added — a seam that lets a second deck drive the same app
 - `crates/deck-api` is the contract every deck answers to: `Deck` (what a deck
   can do) above `Transport` (how its bytes travel). It is a leaf crate — its
@@ -19,7 +53,7 @@ messages; the file below is a human summary, not a substitute for
 - `crates/ss550-driver` now sits on the seam as `Ss550Deck`, a `Deck` over a
   `Transport`. The bytes still leave through one gated funnel after the
   verified-command check — the gate did not move — and the crate-wide guard now
-  watches every source file instead of one.
+  watches every `.rs` file in the crate, `src/` and `tests/`, instead of one.
 - `crates/deck-conformance` holds one suite of ten cases, run against any
   `Deck`. No case paints a key, so the same suite is safe on a desk. Each case
   is paired with a stub that breaks exactly one rule, and the pairing is
@@ -27,13 +61,23 @@ messages; the file below is a human summary, not a substitute for
   every case has a flaw that breaks it.
 - `crates/deck-simulator` holds the second profile: a six-key deck, two rows of
   three, 72×72 images, no brightness — plus the SS550 wire fake, which decodes
-  real packs so the driver runs in CI without a device.
+  real packs so the driver runs in CI without a device. Four tests in
+  `tests/ss550_deck_over_the_wire.rs` put `Ss550Deck` on that fake and paint a
+  key, set brightness and clear it, decode a press, and watch a command the
+  registry forbids write nothing, so the claim is exercised rather than
+  asserted.
 - `crates/ss550-engine` no longer knows what a physical key is.
   `KeyNumber::key()` and `KeyNumber::from_key()` are gone, and with them the
   engine's dependency on the driver. The conversions carried a silent
   fallback: a number that could not be converted became the bottom-left key
   instead of an error. A guard fails if the driver, the fallback or either
   conversion comes back.
+
+### Removed — a key geometry helper with no callers
+- `Key::position()` computed `(index / 5, index % 5)`, which is the SS550's
+  five-wide grid written as a formula. The grid belongs to `deck_api::Geometry`
+  now, the helper had no callers, and leaving it would have been a trap for the
+  first deck that is not five keys wide. It is gone rather than corrected.
 
 ### Fixed — the release build opened a console window
 - The GUI binary was linked as a console subsystem. Windows creates a console

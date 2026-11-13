@@ -167,9 +167,11 @@ Honest list. Items marked *out of scope for v1* are decisions, not debts.
 - **The hardware-in-loop run is still open**: the `hardware-tests` feature
   exists and the test compiles, but it has never run against a deck on a
   dedicated test unit (M3's last open line).
-- **The app is bound to the SS550**: 15 keys, a 5-wide geometry and 100×100
-  images are hardcoded in the driver, the engine and the window. The seam is
-  M3, the deck-agnostic window is M4, and a real second deck is M9.
+- **The window follows the deck; the rest of the app still knows it is an
+  SS550**: the grid, the image size, the offered controls and the texts come
+  from the `Deck` in front of the window (M4), and bindings are stored per deck
+  — but the provider that opens the deck is still the SS550 one, and a real
+  second deck is M9.
 - **No profile push**: the host does not manage named sets of key images; the
   `ICO`/`ULEND` path is static-only and unverified.
 - **No hotplug watcher and no automatic reconnect**: unplugging the deck needs
@@ -276,7 +278,8 @@ no-op — the same rule M1 put on the command gate.
   silently.
 - `Key::position()` computes the geometry as `index / 5` and `index % 5`
   (`crates/ss550-driver/src/keys.rs`), which splits the rows wherever a deck
-  is not 5 wide.
+  is not 5 wide. **Removed in M3**: the helper had no callers, and
+  `deck_api::Geometry` owns a deck's grid now.
 - The window asserts 15 keys, a 5-wide grid and 100×100 images in about ten
   places, including the strings `PAINT ALL 15 KEYS` and
   `Redragon StreamCraft · 15 LCD keys · USB 0200:3000`.
@@ -319,9 +322,18 @@ driver now sits on the seam as `Ss550Deck`, a `Deck` over a `Transport`, and
 the suite is green over two profiles. The three guards are green: the seam
 names no device, the seam assumes no key count, and the driver writes through
 exactly one gated funnel — the gate did not move, and the crate-wide guard now
-watches every source file instead of one. The engine no longer knows what a
-physical key is: the two conversions are gone and so is its dependency on the
-driver.
+watches every source file instead of one.The engine no longer knows what a physical key is: the two conversions are gone
+and so is its dependency on the driver.
+
+The wire fake carries the real driver, which is what makes it a second
+implementation rather than a copy of the tests: four cases in
+`crates/deck-simulator/tests/ss550_deck_over_the_wire.rs` put `Ss550Deck` on
+`Ss550WireFake` and paint a key, set brightness and clear it, decode a press,
+and watch a forbidden command write nothing. The writer guard scans every
+`.rs` file in the driver crate, `src/` and `tests/`, so the "whole crate" is
+literal, and the second hardcoded geometry — `Key::position()` — is gone. The
+audit, what it found missing and how each piece was closed are recorded in
+`docs/milestones/M3-deck-seam.md`.
 
 Two lines of the "done when" stay open, and both are honest:
 
@@ -347,6 +359,14 @@ it.
 **Done when** the same window drives the 6-key profile with no SS550 literal
 left in `crates/ss550-gui`, and an operation that profile does not support
 returns its typed error.
+
+**Status: done** (2026-11-12, `feature/deck-seam`). See
+`docs/milestones/M4-deck-agnostic-window.md`. The window holds a `DeckHandle`
+behind a `DeckSession`; the grid, the image size, the controls and the texts
+come from the deck, bindings live in one file per deck, and a guard scans
+`crates/ss550-gui/src` for the device name, the product name, the USB id and a
+standalone key-count literal. The keep-alive became a seam operation, so the
+conformance suite grew an eleventh case.
 
 ### M5 — Measure the performance budgets
 
