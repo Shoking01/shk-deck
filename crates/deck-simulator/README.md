@@ -37,6 +37,11 @@ the driver actually put on the wire — not just what it returned. A failed writ
 or read is reported and never reaches the transcript, and an image transfer is
 one entry however many packs it takes.
 
+`tests/ss550_deck_over_the_wire.rs` is the join that matters: the **real**
+`Ss550Deck` over this fake, painting, clearing, reading a press and being
+refused, with no `hidapi` in the graph. That is what the "runs in CI" claim in
+the table above rests on.
+
 ## Tests
 
 ```text

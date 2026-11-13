@@ -134,9 +134,10 @@ item, `cargo fmt` and zero clippy warnings. Artifacts in English.
 | T2 | `deck-conformance`: the shared suite - ten cases, none of which paints a key, each falsified by exactly one stub flaw and checked in both directions - and its own no-device/no-key-count guard | S3, S10 | inline | done | `5c5cdf6` (review approved, authority burned) + `425d3a5` (review findings) |
 | T3 | `ss550-driver`: the SS550 as a `Deck` over a `Transport` - including the image adapter (the driver takes an encoded `ButtonImage`, the seam takes raw bytes plus a key), which must refuse the key range and then the image length before it builds or decodes anything, because the suite asserts both refusals and their numbers - and declaring `clear_key`/`sleep`/`identity` as typed refusals where the verified registry forbids them - plus the crate-wide writer guard and the hardware test behind the feature | S1, S3, S4, S6, S7, S10 | delegated | done | `f13d403` |
 | T4 | `deck-simulator`: the SS550 wire fake and the 6-key deck, both passing the suite | S2, S3, S10 | delegated | done | `c4bfd6e` |
-| T5 | `ss550-engine`: drop the driver's `Key` and the silent fallback | S8, S10 | inline | pending | — |
-| T6 | Docs: the plan's guard 2 amendment, the changelog, the crate READMEs | S4, S10 | inline | pending | — |
-| T7 | Seam check: the whole suite, fmt, clippy, and the per-commit assessment | S6 | inline | pending | — |
+| T4b | `deck-simulator`: the real driver over the wire fake, so S2's CI claim is exercised | S2, S10 | inline | done | uncommitted |
+| T5 | `ss550-engine`: drop the driver's `Key` and the silent fallback | S8, S10 | inline | done | `317e0e7` |
+| T6 | Docs: the plan's guard 2 amendment, the changelog, the crate READMEs | S4, S10 | inline | done | `9fcd517` |
+| T7 | Seam check: the whole suite, fmt, clippy, and the per-commit assessment | S6 | inline | done | uncommitted |
 
 Route note: T3 and T4 are two independent units of behaviour with disjoint edit
 surfaces (`crates/ss550-driver/**` and `crates/deck-simulator/**`), each of
@@ -326,3 +327,33 @@ T3's risk line is **item 5 (dependencies)**: the driver's manifest gained
 dependencies inside this workspace — no external crate and no version change —
 but the manifest changed, so the line is declared and an independent verifier
 runs over the diff before the native review.
+
+L16 - 2026-11-12, the seam closed and M3 left one line open. Reading the branch
+against S2 and S6 found one claim that was documented but not exercised: the
+wire fake decodes real packs, but nothing put the real driver on top of it.
+`Ss550WireFake` was only ever fed by hand-built packs in `tests/wire_fake.rs`,
+and `deck-simulator` did not depend on `ss550-driver` at all — while
+`deck-simulator/README.md`, `ss550-driver/src/lib.rs` and the changelog all said
+the driver ran in CI over it. T4b closes that: a dev-dependency (the driver
+only, plus `jpeg-encoder` for a real image) and
+`tests/ss550_deck_over_the_wire.rs`, four cases — paint, brightness plus
+clear, press decoding, and a gate refusal that writes nothing. The driver's
+upload, its single wake, its `CLE 0xFF` and its key numbering are now pinned
+against bytes it produced, not bytes a test wrote.
+
+The other two corrections are smaller and both come from the same audit:
+
+1. `Key::position()` — the second "hardcoded today" item — had no callers and
+   still split rows at five. Deleted rather than corrected, because the grid is
+   `deck_api::Geometry`'s now.
+2. The writer guard claimed to scan "the whole crate" but started at `src/`.
+   It now starts at the manifest directory and skips only `target/`, so `src/`
+   and `tests/` are both covered and the sentence is true.
+
+Evidence for the closure: `cargo test --workspace` green (including the four
+new cases and both guard tests), `cargo clippy --workspace --all-targets
+--all-features -- --deny warnings` clean, `cargo fmt --all --check` clean, and
+`cargo test --features hardware-tests --no-run` compiles. The hardware line
+stays open and unchanged: `cargo test --features hardware-tests -- --ignored`
+has still not run against a deck on a dedicated unit, and this branch did not
+try — a test that opens the daily driver is exactly what S6 forbids.

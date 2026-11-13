@@ -1078,19 +1078,20 @@ mod tests {
     #[test]
     fn every_write_goes_through_the_gated_funnel() {
         // The gate is only as good as its coverage: every byte that leaves the
-        // host must go through the one gated funnel. This scans **every source
-        // file in the crate**, not one file — the transport lives in its own
-        // module now, so counting `.write(` in `connection.rs` alone would go
-        // blind exactly while a second writer exists.
+        // host must go through the one gated funnel. This scans **every `.rs`
+        // file in the crate**, `src/` and `tests/`, not one file — the
+        // transport lives in its own module now, so counting `.write(` in
+        // `connection.rs` alone would go blind exactly while a second writer
+        // exists.
         //
         // Two facts are asserted, and together they are the whole rule:
         //
         // 1. the crate has exactly one physical write, in the transport;
         // 2. it has exactly one call site into that write, in `write_pack`, and
         //    the verified-command check runs before it.
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut files = Vec::new();
-        collect_sources(&root, &mut files);
+        collect_sources(root, &mut files);
         assert!(!files.is_empty(), "the scan found no source files");
 
         let mut physical_writes = Vec::new();
@@ -1128,11 +1129,15 @@ mod tests {
     }
 
     /// Every `.rs` file under `root`, so the guard cannot go blind when a file
-    /// is added.
+    /// is added. A build directory is the one thing skipped: its files are
+    /// copies, and counting them would not say anything about this crate.
     fn collect_sources(root: &Path, found: &mut Vec<PathBuf>) {
         for entry in fs::read_dir(root).expect("the source directory is readable") {
             let path = entry.expect("a readable directory entry").path();
             if path.is_dir() {
+                if path.file_name().is_some_and(|name| name == "target") {
+                    continue;
+                }
                 collect_sources(&path, found);
             } else if path.extension().is_some_and(|ext| ext == "rs") {
                 found.push(path);

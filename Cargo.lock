@@ -235,6 +235,8 @@ version = "0.1.0"
 dependencies = [
  "deck-api",
  "deck-conformance",
+ "jpeg-encoder",
+ "ss550-driver",
  "ss550-protocol",
  "thiserror",
 ]
