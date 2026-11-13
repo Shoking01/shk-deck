@@ -6,11 +6,16 @@ use crate::ActionError;
 
 /// A deck key, addressed by the **1-based number shown in the UI**.
 ///
-/// Key 1 is the bottom-left key and key 15 the top-right one. The number is
-/// the whole identity: the engine does not know which device the keys belong
-/// to, so it cannot turn a number into a physical key, and it does not guess
-/// one when the number is out of range — a key that does not exist is an
-/// error, never a silent fallback to another key.
+/// Key 1 is the first key in the deck's own order and the highest number is the
+/// deck's key count. The number is the whole identity: the engine does not know
+/// which device the keys belong to, so it cannot turn a number into a physical
+/// key, and it does not guess one when the number is out of range — a key that
+/// does not exist is an error, never a silent fallback to another key.
+///
+/// A **number** is valid as long as it is at least 1. Whether that key exists is
+/// a question only the deck can answer, with its geometry, so the engine keeps
+/// no upper bound of its own: a window driving a six-key deck and a window
+/// driving a larger one use the same engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "u8")]
 pub struct KeyNumber(u8);
@@ -19,20 +24,17 @@ impl KeyNumber {
     /// The lowest valid key number.
     pub const MIN: u8 = 1;
 
-    /// The highest valid key number.
-    pub const MAX: u8 = 15;
-
-    /// Builds a key number, rejecting anything outside `1..=15`.
+    /// Builds a key number, rejecting zero.
     ///
     /// ```
     /// use ss550_engine::KeyNumber;
     ///
     /// assert_eq!(KeyNumber::new(1).expect("valid").get(), 1);
     /// assert!(KeyNumber::new(0).is_err());
-    /// assert!(KeyNumber::new(16).is_err());
+    /// assert!(KeyNumber::new(200).is_ok());
     /// ```
     pub fn new(number: u8) -> Result<Self, ActionError> {
-        if (Self::MIN..=Self::MAX).contains(&number) {
+        if number >= Self::MIN {
             Ok(Self(number))
         } else {
             Err(ActionError::KeyOutOfRange(number))
@@ -82,10 +84,10 @@ mod tests {
     #[test]
     fn rejects_numbers_outside_the_deck() {
         assert!(KeyNumber::new(0).is_err());
-        assert!(KeyNumber::new(16).is_err());
-        assert!(KeyNumber::new(255).is_err());
         assert!(KeyNumber::new(1).is_ok());
         assert!(KeyNumber::new(15).is_ok());
+        assert!(KeyNumber::new(16).is_ok());
+        assert!(KeyNumber::new(255).is_ok());
     }
 
     #[test]

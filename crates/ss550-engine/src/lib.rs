@@ -8,7 +8,9 @@
 //!
 //! - [`Action`] — the catalogue of what a key can do: run a program
 //!   ([`Action::Launch`]) or open a URL ([`Action::OpenUrl`]).
-//! - [`KeyNumber`] — a deck key addressed the way the UI shows it, 1 to 15.
+//! - [`KeyNumber`] — a deck key addressed the way the UI shows it: 1, 2, 3,
+//!   up to the deck's own key count. The engine keeps no upper bound; whether a
+//!   key exists is the geometry's answer.
 //! - [`ActionStore`] — the bindings, saved as JSON and loaded on startup.
 //! - [`ActionRunner`] — runs actions on a background thread so the UI never
 //!   waits for one.
@@ -42,7 +44,7 @@ pub mod runner;
 pub mod store;
 
 pub use action::{validate_url, Action};
-pub use config::{bindings_path, config_dir};
+pub use config::{bindings_path, bindings_path_for, config_dir};
 pub use error::ActionError;
 pub use key::KeyNumber;
 pub use runner::{command_for, run_action, ActionRunner, CommandSpec};
