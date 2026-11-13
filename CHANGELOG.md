@@ -7,6 +7,128 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Changed — the window follows whatever deck answers
+- `crates/ss550-gui` no longer asserts which deck it is talking to. The grid
+  comes from `Deck::geometry`, each key image is encoded at `Deck::image_spec`'s
+  own width and height, and every deck-wide control exists only because
+  `Deck::capabilities` says the deck has it. A deck with no brightness never
+  sees a brightness row; a deck with no single-key clear never sees that
+  button, and a call that asks anyway comes back as `DeckError::Unsupported`
+  and is reported, never swallowed.
+- The window holds a `deck_api::DeckHandle` behind a `DeckSession` that reads
+  the deck once per connection. Nothing below it carries a key count of its own:
+  the tile grid, the key picker, the row labels and the "painted N keys" notes
+  all come from the deck's geometry, in display order (top row first), because
+  the hardware counts its rows from the bottom.
+- The texts name the deck in front of them: the header, the window title and the
+  tray tooltip use the connected deck's identity, or its shape (keys, columns,
+  image size, dials) when it does not report one. Before a deck answers the
+  window says so instead of describing a model.
+- The keep-alive is a seam operation now (`Deck::keep_alive`,
+  `Capabilities::keep_alive`, `DeckOperation::KeepAlive`), not a window timer:
+  the trait's default is the typed refusal, so a deck that never resets says so.
+  The conformance suite gained an eleventh case,
+  `keep_alive_without_the_capability_is_refused`, with its falsifying stub.
+- Bindings are stored per deck, in `config_dir()/bindings/<slug>-<fnv64>.json`,
+  keyed by the deck's identity or by its shape when it has none. The pre-M4
+  `bindings.json` is still read, and copied into the per-deck file only when
+  every bound key exists on the deck in front of the window; a file that would
+  need keys the deck does not have is left alone rather than repointed at other
+  keys.
+- `ss550-engine::KeyNumber` no longer carries a `1..=15` range. A key number is
+  a positive 1-based number, and the deck's geometry decides whether the key
+  exists. A window guard scans `crates/ss550-gui/src` for the device name, the
+  product name, the USB id and a standalone key-count literal, so the window
+  cannot quietly start naming a deck again.
+
+### Added — a seam that lets a second deck drive the same app
+- `crates/deck-api` is the contract every deck answers to: `Deck` (what a deck
+  can do) above `Transport` (how its bytes travel). It is a leaf crate — its
+  only dependency is `thiserror` — and it names no device and assumes no key
+  count, with two guards that fail the build if either creeps in.
+- An operation a deck cannot do returns a typed error (`DeckError::Unsupported`)
+  and never a silent no-op: a caller that cannot tell "done" from "not
+  possible" has no way to tell the user anything useful. A brightness outside
+  the accepted range is refused, not clamped.
+- `crates/ss550-driver` now sits on the seam as `Ss550Deck`, a `Deck` over a
+  `Transport`. The bytes still leave through one gated funnel after the
+  verified-command check — the gate did not move — and the crate-wide guard now
+  watches every `.rs` file in the crate, `src/` and `tests/`, instead of one.
+- `crates/deck-conformance` holds one suite of ten cases, run against any
+  `Deck`. No case paints a key, so the same suite is safe on a desk. Each case
+  is paired with a stub that breaks exactly one rule, and the pairing is
+  checked in both directions: the flaw fails that case and only that case, and
+  every case has a flaw that breaks it.
+- `crates/deck-simulator` holds the second profile: a six-key deck, two rows of
+  three, 72×72 images, no brightness — plus the SS550 wire fake, which decodes
+  real packs so the driver runs in CI without a device. Four tests in
+  `tests/ss550_deck_over_the_wire.rs` put `Ss550Deck` on that fake and paint a
+  key, set brightness and clear it, decode a press, and watch a command the
+  registry forbids write nothing, so the claim is exercised rather than
+  asserted.
+- `crates/ss550-engine` no longer knows what a physical key is.
+  `KeyNumber::key()` and `KeyNumber::from_key()` are gone, and with them the
+  engine's dependency on the driver. The conversions carried a silent
+  fallback: a number that could not be converted became the bottom-left key
+  instead of an error. A guard fails if the driver, the fallback or either
+  conversion comes back.
+
+### Removed — a key geometry helper with no callers
+- `Key::position()` computed `(index / 5, index % 5)`, which is the SS550's
+  five-wide grid written as a formula. The grid belongs to `deck_api::Geometry`
+  now, the helper had no callers, and leaving it would have been a trap for the
+  first deck that is not five keys wide. It is gone rather than corrected.
+
+### Fixed — the release build opened a console window
+- The GUI binary was linked as a console subsystem. Windows creates a console
+  window for such an executable no matter how it is started — double-click, the
+  autostart entry, or a terminal — and a tray application must not have one.
+  `crates/ss550-gui/src/main.rs` now carries
+  `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`.
+- The attribute is release-only on purpose: debug builds keep the console, so
+  `cargo run` still shows output and panics while developing.
+- Measured on the release artifact: `OptionalHeader.Subsystem` went from `3`
+  (CONSOLE) to `2` (GUI), and launching the installed copy creates no `conhost`
+  window. A test pins the attribute and cuts the test module off before reading
+  the source, so it cannot pass by matching its own literal.
+- Without the console, a release-mode panic would have no visible trace. The
+  diagnostic log below is what replaced it: a panic now writes itself to a file
+  before the process goes down.
+
+### Added — the controller keeps a diagnostic log
+- `crates/ss550-gui/src/diagnostics.rs` appends to
+  `%APPDATA%\ss550\ss550.log`: one `started` line per run, one `quit` line when
+  the tray's Quit is used, and the message and location of a panic, written by a
+  hook before the process goes down. A `started` line with no matching `quit`
+  means the process did not leave through the tray's Quit — an unexpected exit,
+  a logoff, or an "End task". It narrows the search; it does not prove a crash.
+- Control characters in a message are escaped, so a panic payload cannot forge a
+  second line, including a fake `quit`. Each line is built in full and written in
+  one call, so a panic on a worker thread cannot interleave with a line already
+  being written.
+- The log rotates at 1 MB into `ss550.log.old`, keeping one previous file. The
+  cap is soft: when a viewer or an indexer holds the file open, Windows refuses
+  the rename and the log keeps growing until the lock clears, then the next run
+  rotates it. Truncating instead would delete the only crash evidence a release
+  build produces, so it is not done. The log sits next to `bindings.json`, so
+  `SS550_CONFIG_DIR` moves both.
+- Nothing in the log path can fail the app: an unwritable log is an unwritable
+  log, and the controller keeps running.
+- Opening it is deliberately quiet: five clicks on the version line at the
+  bottom of `STEP 4 · RUN IN THE BACKGROUND` open the file in Notepad, and the
+  log records that the viewer started rather than that it displayed the file.
+  Notepad is named explicitly — a clean Windows has no `.log` association, so
+  `start` would do nothing — and launched as `%SystemRoot%\System32\notepad.exe`,
+  so the lookup cannot pick up a planted `notepad.exe` from the current directory.
+  That guarantee holds whenever `SystemRoot` is set; the stripped-environment
+  fallback to the bare name gives it up, and is documented as such.
+- Seventeen tests cover the timestamp conversion including a leap day, line
+  framing and every escaping shape, all three panic payload shapes, rotation at,
+  below and exactly on the bound, a log that cannot rotate keeping its evidence,
+  the small-file case, both Notepad branches, and the five-click boundary.
+  Verified live: `2026-11-11T16:42:59Z started v0.1.0 (hidden=true)` in the real
+  path, and Notepad opened the file from the absolute path.
+
 ### Added — the registry of commands a deck has proven
 - `docs/protocol/verified.md` is the safe-mode list: one row per command the
   protocol crate can encode, with the tag on the wire, whether a test deck has
@@ -75,6 +197,23 @@ messages; the file below is a human summary, not a substitute for
   byte: the prefix sweep cuts random bytes, which do not spell `ACK`, and the
   framed input was always full length, so the short-but-enveloped report was
   never exercised before this.
+
+### Changed — the performance budgets are measured
+
+- `PLAN.md` §7 now has a measured column, not a "not measured" placeholder.
+  The numbers are from a release build on this machine, with cold, warm and
+  idle runs, over the wire fake for latency and repaint, and from the running
+  app for idle cost.
+- Added `crates/ss550-perf`: a tool that produces the same numbers on any
+  machine that builds the release binary. Subcommands: `startup`, `idle`,
+  `latency`, `repaint`. Each has documentation; tests for parsing, median
+  calculation and report formatting.
+- `ss550-gui` now records its own startup timing: "first frame after N ms"
+  and "render N in X ms" (sub-millisecond precision). A `DECK_CONTROLLER_NO_DECK`
+  environment variable skips deck enumeration, so measurements never touch
+  the device.
+- Added `NO_DECK_ENV` constant in `ss550-engine::config`, exported for use by
+  the performance tool.
 
 ### Documentation — `PLAN.md` describes the project that exists
 - The old `PLAN.md` planned a different application: egui as the primary GUI
@@ -641,6 +780,41 @@ messages; the file below is a human summary, not a substitute for
   --all-features -- -D warnings`, and release builds pass on Windows
   (rustc 1.99.0).
 
+### Added — the seam between a deck and its bytes
+- `crates/deck-api` is the new contract between **what a deck can do** and
+  **how its bytes travel**: a `Deck` trait (geometry, image spec, capabilities,
+  identity, painting, clearing, key events) above a `Transport` trait (write a
+  report, read an input report, read a control report).
+- A deck that cannot do something refuses it with a typed
+  `DeckError::Unsupported`. Accepting a call it cannot honour is worse than
+  refusing it: the user gets a key that does nothing and no way to find out
+  why.
+- `KeyId` is 0-based and `Geometry::position` derives the row and the column
+  from the deck's own geometry, so no layer has to assume five columns.
+- The crate names no device, and a test keeps it that way: it fails when the
+  string `ss550` appears anywhere in the seam's source. The guard was proved
+  by leaking the name on purpose and watching it fail.
+- The contract was sealed before anything consumed it, so the three crates
+  above it code against one shape and not three:
+  - `Geometry::new(key_count, columns)` derives the rows, so a deck cannot
+    publish a grid that contradicts its own key count.
+  - `Capabilities` is built by naming each capability, and every capability
+    has an operation behind it — `sleep` and `set_dial` are now operations of
+    the trait, and `dials` is a capability the trait can act on.
+  - A brightness or a dial position outside `0..=100` is refused with
+    `DeckError::ValueOutOfRange`. It is never clamped: a clamped request is a
+    request that changed without telling anyone.
+  - `DeckError::Unsupported` names the refused operation with the
+    `DeckOperation` type instead of a free-form string, so a typo cannot
+    change the message the user reads.
+  - `Transport::read_input` takes a `Duration`, the same unit the deck layer
+    uses, and "nothing arrived" has one answer everywhere: zero bytes read,
+    not an error.
+- The seam's guards now cover **the whole crate**, manifest and tests
+  included, and the seam's own handle is covered by behaviour tests: a stub
+  deck records what it was asked to do, and the test fails if the handle
+  forwards anything to the wrong call.
+
 ### Known limitations — Fase 1 close-out
 - **Live verification of input events.** Button presses were verified one-at-a-time
   on hardware, but we have not exercised many presses in quick succession nor
@@ -648,15 +822,7 @@ messages; the file below is a human summary, not a substitute for
 - **No event stream (button presses) exposed as a stream type.** Consumers must
   call `poll_events(Duration::ZERO)` in a loop; an async variant could be added
   later with `tokio::fs::File` wrappers.
-- **No automatic reconnection on handle death.** Apps must catch
-  `Ss550Error::TransportStalled`, call `reconnect()`, `initialize()`, then
-  `repaint_all()`. This is a conscious design: the caller decides when to pay
-  the ~3 s settle wait. A transparent reconnection mode could be added behind
-  a flag if needed.
-- **No profile push (`ICO`/`ULEND` is static-only).** The deck accepts image
-  data but the host does not yet manage "profiles" (named sets of key images).
-- **No hotplug watcher.** Apps must poll `Device::connect()` or use external
-  device-notifier crates.
+- **No plugin sandbox.** Plugins cannot access filesystem/network without user permission.
 - **No async transport (`nusb`/`tokio` deferred; `hidapi` sync is the Phase 1
   baseline**, but `poll_events` with non-zero timeout could unblock on a thread
   pool, enabling a simple async façade).

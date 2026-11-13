@@ -26,11 +26,12 @@ protocol ──▶ driver ──▶ engine ──▶ gui (GPUI Kit)
 | Start with Windows | opt-in, one `HKCU\...\Run` value, off by default |
 | Report a program that dies | watched for 6 s, failure shown in the status line |
 | Safe mode | the driver refuses to send any command a test deck has not proven |
+| Profiles (M6) | 6 named profiles (default, stream, meetings, gaming, work, entertainment) with JSON persistence |
+| Hotplug (M7) | Device detection via polling, automatic reconnect with exponential backoff (2s base, doubling, 60s cap) |
 
 Every launch route above was exercised on the real deck. What is *not* done is
 listed in [`CHANGELOG.md`](CHANGELOG.md#known-limitations--fase-1-close-out):
-profiles, plugin sandbox, hotplug notifications, async transport and the udev
-rules.
+> plugin sandbox, async transport and the udev rules.
 
 The commands the deck has actually proven live are listed in
 [`docs/protocol/verified.md`](docs/protocol/verified.md), and the driver
@@ -42,13 +43,17 @@ before its bytes leave the host.
 | Path | What it is |
 | --- | --- |
 | `crates/ss550-protocol` | Pure HID codec. No I/O, no clock, no USB. Golden vectors + proptest |
-| `crates/ss550-driver` | Synchronous `hidapi` transport, caching, reconnect, heartbeat |
+| `crates/deck-api` | The deck seam: `Deck` (semantics) over `Transport` (bytes). Names no device, assumes no key count |
+| `crates/deck-conformance` | One suite of eleven cases every deck implementation must pass |
+| `crates/deck-simulator` | A six-key deck and the SS550 wire fake, so the seam is proven without hardware |
+| `crates/ss550-driver` | Synchronous `hidapi` transport, caching, reconnect, heartbeat; the SS550 as a `Deck` |
 | `crates/ss550-engine` | Bindings, persistence, URL/path validation, action runner |
 | `crates/ss550-gui` | The window (GPUI Kit). Its own workspace root |
 | `crates/ss550-tray` | Tray icon, `ShowWindow` hide/restore, logon entry. Its own workspace root, and the **only** crate allowed to call Win32 |
 | `crates/ss550-probe` | Diagnostics used to reverse-engineer the deck |
 | `docs/protocol/` | Wire format, descriptors, input events, image upload, incidents |
 | `docs/troubleshooting/` | The "backlit but black" runbook — read it before touching USB code |
+| `docs/milestones/` | What each milestone delivered, what it left open, and the evidence |
 | `odd/tasks/` | Feature records: specs, tasks, and the evidence behind every claim |
 
 ## Build and test
@@ -86,6 +91,39 @@ runtime on `PATH`. [`fuzz/README.md`](fuzz/README.md) has the details.
 cargo run --manifest-path crates/ss550-gui/Cargo.toml
 cargo run --manifest-path crates/ss550-gui/Cargo.toml -- --hidden   # tray only
 ```
+
+## Installation and Updates
+
+The compiled binary is located at:
+```
+crates/ss550-gui/target/release/ss550-gui.exe
+```
+
+To install for regular use:
+
+1. **Run the update script:**
+   - PowerShell: `.\update-steamcraft.ps1`
+   - Batch: `.\update-steamcraft.bat`
+
+   This will:
+   - Build the release version
+   - Copy it to `%LOCALAPPDATA%\Programs\StreamCraft\ss550-gui.exe`
+   - (Optional) Create a startup shortcut with `-CreateShortcut`
+
+2. **Or manual installation:**
+   ```
+   cargo build --manifest-path crates/ss550-gui/Cargo.toml --release
+   copy crates\ss550-gui\target\release\ss550-gui.exe %LOCALAPPDATA%\Programs\StreamCraft\
+   ```
+
+3. **Create a startup shortcut:**
+   - Open Run dialog (Win+R)
+   - Type `shell:startup` and press Enter
+   - Right-click → New → Shortcut
+   - Target: `%LOCALAPPDATA%\Programs\StreamCraft\ss550-gui.exe --hidden`
+   - Name: "StreamCraft Controller"
+
+**Important:** Always use the update script or copy the newly built binary. Old versions in the Startup folder will run instead of the updated code.
 
 ## Background mode
 

@@ -107,13 +107,9 @@ impl Key {
         Self::from_index(index).ok()
     }
 
-    /// Position as `(row, column)` for image placement.
-    ///
-    /// **Row 0 is the bottom row**, matching the enum order and the OpenDeck
-    /// numbering: `BottomLeft` is `(0, 0)` and `TopRight` is `(2, 4)`.
-    pub fn position(self) -> (usize, usize) {
-        (self as usize / 5, self as usize % 5)
-    }
+    // There is deliberately no `position()` here. The grid is a fact about a
+    // deck, and `deck_api::Geometry` owns it: a second deck with different rows
+    // and columns asks the seam, not a formula that splits the rows at five.
 }
 
 impl TryFrom<u8> for Key {

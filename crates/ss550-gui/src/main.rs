@@ -1,4 +1,4 @@
-//! SS550 StreamCraft Controller — a GPUI Kit desktop UI.
+//! A GPUI Kit desktop window that drives a deck through the deck seam.
 //!
 //! Run with:
 //!
@@ -6,19 +6,29 @@
 //! cargo run --manifest-path crates/ss550-gui/Cargo.toml
 //! ```
 //!
-//! The window shows the physical 3x5 deck. Every key is a coloured tile that
-//! says its own number, the colour it is showing and the action bound to it,
-//! so the screen always matches what the hardware is doing.
+//! The window shows the deck that is plugged in, whatever it is: the grid, the
+//! image size and the controls all come from the deck's own `Deck` profile.
+//! Every key is a coloured tile that says its own number, the colour it is
+//! showing and the action bound to it, so the screen always matches what the
+//! hardware is doing.
 //!
 //! Pressing a key on the deck lights its tile and runs the action bound to it,
-//! on a background thread. Bindings are kept in
-//! `%APPDATA%\ss550\bindings.json` (or `$SS550_CONFIG_DIR/bindings.json`).
+//! on a background thread. Bindings are kept per deck, in the app's own
+//! configuration folder.
+
+// The release build is a GUI binary: Windows creates a console window for a
+// console-subsystem executable no matter how it is started, and a tray
+// application must not have one. Debug builds keep the console so `cargo run`
+// still shows output and panics while developing.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![deny(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::time::{Duration, Instant};
 
+use deck_api::{ButtonState, DeckError, KeyId};
 use gpui_kit::component::{
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     form::Field,
@@ -27,28 +37,59 @@ use gpui_kit::component::{
     ActiveTheme as _, Theme, ThemeMode,
 };
 use gpui_kit::{
-    div, px, rgb, size, AnyWindowHandle, AppContext as _, ClickEvent, Context, Entity, FontWeight,
-    Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, WindowBounds, WindowOptions,
+    div, px, rgb, size, AnyElement, AnyWindowHandle, AppContext as _, ClickEvent, Context, Entity,
+    FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, WindowBounds,
+    WindowOptions,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use ss550_driver::{ButtonImage, ButtonState, Device, LONG_CONNECT_TIMEOUT};
+use ss550_driver::{is_deck_present, LONG_CONNECT_TIMEOUT};
 use ss550_engine::{Action, ActionRunner, ActionStore, KeyNumber};
 use ss550_tray::{autostart, install, TrayCommand, TrayHost};
+
+mod diagnostics;
+mod provider;
+mod session;
+
+/// Clicks on the version line that open the diagnostic log.
+///
+/// The trigger is hidden on purpose: this is a support tool, not a feature, and
+/// a button for it would invite clicks that answer nothing.
+const VERSION_CLICKS_TO_REVEAL: u8 = 5;
+
+/// Counts one click on the version line and says whether the reveal is due.
+///
+/// Split out from the window so the boundary — four clicks do nothing, the
+/// fifth reveals and starts over — is testable without starting a viewer.
+fn advance_clicks(clicks: u8) -> (u8, bool) {
+    let next = clicks.saturating_add(1);
+    if next < VERSION_CLICKS_TO_REVEAL {
+        (next, false)
+    } else {
+        (0, true)
+    }
+}
 
 /// Hex colour as GPUI `Hsla`.
 fn color(hex: u32) -> Hsla {
     rgb(hex).into()
 }
 
-/// Number of keys on the SS550 v3.
-const KEY_COUNT: usize = 15;
-
 /// Colour the user can paint with.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Paint {
     White,
     Red,
+}
+
+impl Paint {
+    /// The colour this paint puts on a key, as an image encoder sees it.
+    fn rgb(self) -> [u8; 3] {
+        match self {
+            Paint::White => [0xE4, 0xE4, 0xE7],
+            Paint::Red => [0xDC, 0x26, 0x26],
+        }
+    }
 }
 
 /// What a key currently shows on the deck.
@@ -91,16 +132,6 @@ enum Link {
     Lost,
 }
 
-/// Rows as they appear on the physical deck, top row first.
-///
-/// The driver numbers keys bottom-left origin (`0..14`), so the display order
-/// is reversed vertically: the top row of the device is `10..=14`.
-const DECK_ROWS: [(&str, [usize; 5]); 3] = [
-    ("TOP ROW  ·  keys 11 to 15", [10, 11, 12, 13, 14]),
-    ("MIDDLE ROW  ·  keys 6 to 10", [5, 6, 7, 8, 9]),
-    ("BOTTOM ROW  ·  keys 1 to 5", [0, 1, 2, 3, 4]),
-];
-
 /// How often the deck is polled for key presses.
 ///
 /// The poll is non-blocking, so this only costs a read that usually returns
@@ -109,6 +140,26 @@ const POLL: Duration = Duration::from_millis(50);
 
 /// How often connection results, retries and the heartbeat are handled.
 const TICK: Duration = Duration::from_millis(500);
+
+/// How many frames the window records before it only records slow ones.
+///
+/// The first frames are what startup costs, and they are worth a line each.
+/// After that the log would become a frame dump, so only a frame long enough to
+/// be seen gets recorded — which is the one a support report needs.
+const FRAMES_LOGGED: u32 = 20;
+
+/// A frame long enough to be visible as a hitch, and therefore worth logging.
+const SLOW_FRAME: Duration = Duration::from_millis(50);
+
+/// A duration as a plain number with one decimal, in milliseconds.
+///
+/// A frame is not a whole number of milliseconds: the first frames of this
+/// window cost well under 1 ms, and rounding those to `0 ms` would report a
+/// frame that never happens. One decimal keeps a sub-millisecond frame
+/// readable, and the log stays a log rather than a benchmark.
+fn ms_text(cost: Duration) -> String {
+    format!("{:.1}", cost.as_secs_f64() * 1000.0)
+}
 
 /// Minimum delay between two connection attempts.
 ///
@@ -119,18 +170,21 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Outcome of one connection attempt, produced by the connector worker.
 enum Attempt {
-    /// The deck answered and was initialized.
-    Connected { generation: u64, device: Device },
+    /// The deck answered and is ready to be spoken to.
+    Connected {
+        generation: u64,
+        deck: ss550_driver::Ss550Deck,
+    },
     /// The attempt failed; the error is shown to the user.
     Failed {
         generation: u64,
-        error: ss550_driver::Ss550Error,
+        error: provider::ConnectError,
     },
 }
 
 /// Runs connection attempts on a dedicated thread.
 ///
-/// [`Device::connect`] blocks for seconds while it waits for the deck's boot
+/// Opening a deck blocks for seconds while it waits for the boot
 /// re-enumeration to settle, so it must never run on the UI thread.
 ///
 /// The attempt waits [`LONG_CONNECT_TIMEOUT`] on purpose: the deck's boot is
@@ -139,18 +193,9 @@ enum Attempt {
 /// phase of the boot, over and over.
 fn connector_worker(commands: Receiver<u64>, results: Sender<Attempt>) {
     while let Ok(generation) = commands.recv() {
-        let attempt = match Device::connect_with_timeout(LONG_CONNECT_TIMEOUT) {
-            Ok(mut device) => match device.initialize() {
-                Ok(()) => Attempt::Connected { generation, device },
-                Err(err) => Attempt::Failed {
-                    generation,
-                    error: err,
-                },
-            },
-            Err(err) => Attempt::Failed {
-                generation,
-                error: err,
-            },
+        let attempt = match provider::connect(LONG_CONNECT_TIMEOUT) {
+            Ok(deck) => Attempt::Connected { generation, deck },
+            Err(error) => Attempt::Failed { generation, error },
         };
 
         if results.send(attempt).is_err() {
@@ -161,13 +206,17 @@ fn connector_worker(commands: Receiver<u64>, results: Sender<Attempt>) {
 }
 
 struct Controller {
-    device: Option<Device>,
+    /// The deck in front of the window, once one answered.
+    session: Option<session::DeckSession>,
     link: Link,
     note: SharedString,
     paint: Paint,
-    slots: [Slot; KEY_COUNT],
+    /// What each key shows, in the deck's own key order.
+    slots: Vec<Slot>,
     /// Keys held down right now, for the tile highlight.
-    pressed: [bool; KEY_COUNT],
+    pressed: Vec<bool>,
+    /// The brightness the window last asked for.
+    brightness: u8,
     /// Commands for the connector worker. Bounded to one pending request.
     commands: SyncSender<u64>,
     /// Results coming back from the connector worker.
@@ -182,9 +231,12 @@ struct Controller {
     attempts: u32,
     /// When the connection and heartbeat work last ran.
     last_tick: Instant,
+    /// When it's safe to try reconnecting again (for backoff).
+    reconnect_at: Instant,
     /// What every key does, and where it is saved.
     store: ActionStore,
-    store_path: PathBuf,
+    /// Where this deck's bindings live, once a deck answered.
+    store_path: Option<PathBuf>,
     /// Runs bound actions off the UI thread.
     runner: ActionRunner,
     /// The key the bindings panel is editing.
@@ -206,6 +258,14 @@ struct Controller {
     starts_with_windows: bool,
     /// Why the sign-in entry does not work, when it is there but broken.
     autostart_note: Option<String>,
+    /// Clicks on the version line, until they add up to the reveal.
+    version_clicks: u8,
+    /// Frames the window has built, for the startup and hitch timings.
+    frames: u32,
+    /// True when the window was told not to look for a deck at all.
+    blind: bool,
+    /// Profile management for this deck.
+    profile_store: ss550_engine::ProfileStore,
 }
 
 impl Controller {
@@ -213,24 +273,28 @@ impl Controller {
         let (commands, command_rx) = mpsc::sync_channel::<u64>(1);
         let (result_tx, results) = mpsc::channel::<Attempt>();
 
-        let worker_error = match std::thread::Builder::new()
-            .name("ss550-connector".to_string())
-            .spawn(move || connector_worker(command_rx, result_tx))
-        {
-            Ok(_) => None,
-            Err(err) => Some(format!("Could not start the connection worker: {err}")),
+        // A measurement or support run can ask the window not to look for a
+        // deck. Then no device is opened at all — not even enumerated — which
+        // is the only way to time the window while the deck on the desk is
+        // already in use, and the only way to paint nothing by accident.
+        let blind = std::env::var_os(ss550_engine::config::NO_DECK_ENV).is_some();
+        let worker_error = if blind {
+            drop((command_rx, result_tx));
+            None
+        } else {
+            match std::thread::Builder::new()
+                .name("deck-connector".to_string())
+                .spawn(move || connector_worker(command_rx, result_tx))
+            {
+                Ok(_) => None,
+                Err(err) => Some(format!("Could not start the connection worker: {err}")),
+            }
         };
 
-        // A broken bindings file must never keep the app from opening: the app
-        // starts with no bindings and says why.
-        let store_path = ss550_engine::bindings_path();
-        let (store, store_error) = match ActionStore::load(&store_path) {
-            Ok(store) => (store, None),
-            Err(error) => (
-                ActionStore::new(),
-                Some(format!("Bindings not loaded: {error}")),
-            ),
-        };
+        // Bindings belong to a deck, and the deck is only known once it
+        // answers, so the store starts empty and is loaded on connect.
+        let store = ActionStore::new();
+        let store_path = None;
 
         let program_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("C:\\Windows\\notepad.exe"));
@@ -244,7 +308,7 @@ impl Controller {
 
         // The tray icon is what keeps the controller alive with no window on
         // screen. Without it the app still runs, but only as a window.
-        let (tray, tray_error) = match TrayHost::spawn("StreamCraft SS550 Controller") {
+        let (tray, tray_error) = match TrayHost::spawn("Deck Controller") {
             Ok(host) => (Some(host), None),
             Err(error) => (None, Some(format!("Tray icon not available: {error}"))),
         };
@@ -308,18 +372,21 @@ impl Controller {
         .detach();
 
         let mut controller = Self {
-            device: None,
-            link: Link::Connecting,
+            session: None,
+            link: if blind {
+                Link::Waiting
+            } else {
+                Link::Connecting
+            },
             note: match worker_error {
                 Some(err) => err.into(),
-                None => match store_error {
-                    Some(err) => err.into(),
-                    None => "Looking for the deck…".into(),
-                },
+                None if blind => "Started without looking for a deck.".into(),
+                None => "Looking for the deck…".into(),
             },
             paint: Paint::White,
-            slots: [Slot::Off; KEY_COUNT],
-            pressed: [false; KEY_COUNT],
+            slots: Vec::new(),
+            pressed: Vec::new(),
+            brightness: deck_api::VALUE_MAX,
             commands,
             results,
             generation: 0,
@@ -327,6 +394,7 @@ impl Controller {
             last_attempt: None,
             attempts: 0,
             last_tick: Instant::now(),
+            reconnect_at: Instant::now(),
             store,
             store_path,
             runner: ActionRunner::new(),
@@ -341,6 +409,10 @@ impl Controller {
             window_handle,
             starts_with_windows,
             autostart_note,
+            version_clicks: 0,
+            frames: 0,
+            blind,
+            profile_store: ss550_engine::ProfileStore::new(),
         };
 
         // Look for the deck right away: its settle window starts the moment
@@ -354,22 +426,16 @@ impl Controller {
         let attempts: Vec<Attempt> = self.results.try_iter().collect();
         for attempt in attempts {
             match attempt {
-                Attempt::Connected { generation, device } => {
+                Attempt::Connected { generation, deck } => {
                     if generation != self.generation {
                         // A newer request replaced this one; its result wins.
                         continue;
                     }
                     self.pending = false;
                     self.attempts = 0;
-                    self.device = Some(device);
-                    self.link = Link::Connected;
-
-                    let slot = self.paint.slot();
-                    self.apply_all(slot);
-                    if self.device.is_some() {
-                        self.note =
-                            format!("Connected — all 15 keys painted {}.", slot_name(slot)).into();
-                    }
+                    // Reset backoff on successful connection
+                    self.reconnect_at = Instant::now();
+                    self.adopt(deck);
                 }
                 Attempt::Failed { generation, error } => {
                     if generation != self.generation {
@@ -379,19 +445,19 @@ impl Controller {
                     let message = error.to_string();
 
                     match error {
-                        ss550_driver::Ss550Error::DeviceNotFound { .. } => {
+                        provider::ConnectError::NotFound(_) => {
                             // The deck is simply not there. This is not a
                             // failure: the app keeps looking for it.
                             self.link = Link::Waiting;
                             self.note = format!(
-                                "{message} — the deck is not on the USB bus. \
+                                "{message} — the deck is not on the bus. \
                                  Retrying every {} s (attempt {}).",
                                 RETRY_INTERVAL.as_secs(),
                                 self.attempts
                             )
                             .into();
                         }
-                        _ => {
+                        provider::ConnectError::Other(_) => {
                             self.link = Link::Lost;
                             self.note = format!(
                                 "{message} — retrying every {} s (attempt {}).",
@@ -406,10 +472,115 @@ impl Controller {
         }
     }
 
+    /// Takes the deck that just answered and loads the bindings that belong to
+    /// it.
+    ///
+    /// Everything sized by the deck — the tile slots, the pressed flags, the
+    /// selected key — is built here from the deck's own geometry, once. Nothing
+    /// below has a key count of its own.
+    fn adopt(&mut self, deck: ss550_driver::Ss550Deck) {
+        let session = session::DeckSession::new(Box::new(deck));
+        let key_count = session.key_count();
+
+        let path = ss550_engine::bindings_path_for(session.key());
+        let (store, note) = self.load_store(&path, &session);
+
+        // Load profiles for this deck
+        let deck_key = session.key().to_string();
+        let config_dir = ss550_engine::config_dir();
+        let loaded_store = ss550_engine::ProfileStore::load(&deck_key, &config_dir).unwrap_or_else(|_| ss550_engine::ProfileStore::new());
+        self.profile_store = loaded_store;
+
+        self.store = store;
+        self.store_path = Some(path);
+        self.slots = vec![Slot::Off; key_count];
+        self.pressed = vec![false; key_count];
+        if !key_exists(&session, self.selected_key) {
+            self.selected_key = KeyNumber::default();
+        }
+        self.session = Some(session);
+        self.link = Link::Connected;
+
+        // Apply the active profile on connect
+        if let Some(profile) = self.profile_store.active_profile() {
+            self.store = profile.bindings.clone();
+            let slot = self.paint_from_profile(&profile, key_count);
+            let default_colour = self.paint.rgb();
+            self.apply_all_with_colors(slot, &profile.colors, default_colour, key_count);
+        } else {
+            let slot = self.paint.slot();
+            self.apply_all(slot);
+        }
+        
+        if self.session.is_some() {
+            self.note = match note {
+                Some(note) => note.into(),
+                None => format!(
+                    "Connected — profile '{}' active.",
+                    self.profile_store.active_name().unwrap_or("default")
+                ).into(),
+            };
+        }
+    }
+
+    /// Loads the bindings for one deck.
+    ///
+    /// The per-deck file is the one this build writes. The pre-M4 file — one
+    /// file for every deck — is read once and copied over only when every key
+    /// it binds exists on the deck in front of the window: a binding that would
+    /// have nowhere to go is not silently repointed at another key, and it is
+    /// not thrown away either.
+    fn load_store(
+        &self,
+        path: &std::path::Path,
+        session: &session::DeckSession,
+    ) -> (ActionStore, Option<String>) {
+        if path.exists() {
+            return match ActionStore::load(path) {
+                Ok(store) => (store, None),
+                Err(error) => (
+                    ActionStore::new(),
+                    Some(format!("Bindings not loaded: {error}")),
+                ),
+            };
+        }
+
+        let legacy = ss550_engine::bindings_path();
+        if legacy == path || !legacy.exists() {
+            return (ActionStore::new(), None);
+        }
+
+        match ActionStore::load(&legacy) {
+            Ok(store)
+                if store
+                    .bindings()
+                    .iter()
+                    .all(|binding| key_exists(session, binding.key)) =>
+            {
+                let note = store
+                    .save(path)
+                    .err()
+                    .map(|error| format!("Bindings were read but not copied: {error}"));
+                (store, note)
+            }
+            Ok(_) => (
+                ActionStore::new(),
+                Some(
+                    "The saved bindings belong to a different deck, so they were left alone."
+                        .to_string(),
+                ),
+            ),
+            Err(error) => (
+                ActionStore::new(),
+                Some(format!("Bindings not loaded: {error}")),
+            ),
+        }
+    }
+
     /// Asks for a new attempt when the deck is missing and the retry
     /// interval has elapsed.
     fn request_attempt_if_due(&mut self) {
-        if self.device.is_some() || self.pending {
+        if self.session.is_some() || self.pending {
             return;
         }
         if let Some(last) = self.last_attempt {
@@ -426,6 +597,11 @@ impl Controller {
     /// request was made in the meantime, the old result is dropped instead
     /// of replacing a fresh handle with a stale one.
     fn request_attempt(&mut self) {
+        if self.blind {
+            // The window was told not to look for a deck, and that includes
+            // the retries: nothing is opened until it is started without it.
+            return;
+        }
         let generation = self.generation + 1;
         if self.commands.try_send(generation).is_err() {
             // A request is already queued: it will produce a fresh attempt.
@@ -438,62 +614,83 @@ impl Controller {
         self.link = Link::Connecting;
     }
 
-    fn disconnect(&mut self, err: ss550_driver::Ss550Error) {
-        self.device = None;
+    /// Drops the deck after its bytes stopped moving.
+    ///
+    /// Everything sized by the deck goes with it, so nothing in the window can
+    /// index a grid that is no longer there.
+    fn drop_deck(&mut self) {
+        self.session = None;
+        self.slots.clear();
+        self.pressed.clear();
         self.link = Link::Lost;
-        self.note = format!("Connection lost: {err} — reconnecting automatically.").into();
     }
 
-    /// Sends one key image to the deck.
-    fn send(&mut self, idx: usize, slot: Slot) {
-        if self.device.is_none() {
-            self.note = "Not connected. Press RECONNECT first.".into();
+    /// Switches to a new profile and applies it to the deck.
+    fn switch_profile(&mut self, name: &str) {
+        if let Err(e) = self.profile_store.activate(name) {
+            self.note = format!("Failed to switch profile: {e}").into();
             return;
         }
 
-        let key = idx as u8;
-        let image = match slot {
-            Slot::White => ButtonImage::white(key),
-            Slot::Red => ButtonImage::red(key),
-            Slot::Off => return,
-        };
-        let image = match image {
-            Ok(image) => image,
-            Err(err) => {
-                self.note = format!("Could not build the image: {err}").into();
-                return;
+        // If deck is connected, apply the profile
+        if let Some(session) = self.session.as_mut() {
+            // Get profile data before mutating self.store
+            let profile_data = self.profile_store.active_profile();
+            
+            if let Some(profile) = profile_data {
+                // Apply bindings
+                self.store = profile.bindings.clone();
+                
+                // Paint all keys according to profile colors or slot
+                let key_count = session.key_count();
+                let slot = self.paint_from_profile(&profile, key_count);
+                let default_colour = self.paint.rgb();
+                self.apply_all_with_colors(slot, &profile.colors, default_colour, key_count);
+                
+                self.note = format!("Switched to profile: {name}").into();
             }
-        };
-
-        let result = match self.device.as_mut() {
-            Some(device) => device.set_key_image(image),
-            None => return,
-        };
-        match result {
-            Ok(()) => self.slots[idx] = slot,
-            Err(err) => self.disconnect(err),
+        } else {
+            self.note = format!("Switched to profile: {name} (bindings will apply on connect)").into();
         }
     }
 
-    fn paint_key(&mut self, idx: usize) {
+    /// Determines the paint slot from a profile (uses per-key color override if available).
+    fn paint_from_profile(&self, profile: &ss550_engine::Profile, _key_count: usize) -> Slot {
+        // Default slot based on profile's slot name
+        let slot_name = profile.slot_name();
+        if slot_name == "red" {
+            Slot::Red
+        } else {
+            Slot::White
+        }
+    }
+
+    /// Reports what went wrong, and drops the deck only when the bytes failed.
+    ///
+    /// A typed refusal is the deck answering: the link is fine, and the window
+    /// must not claim it lost a deck that just told it exactly what it cannot
+    /// do. Transport failure is the only thing that means the link is gone.
+    fn report(&mut self, error: session::SessionError) {
+        let lost = matches!(error, session::SessionError::Deck(DeckError::Transport(_)));
+        if lost {
+            self.drop_deck();
+            self.note = format!("Connection lost: {error} — reconnecting automatically.").into();
+        } else {
+            self.note = error.to_string().into();
+        }
+    }
+
+    /// [`Controller::report`] for the calls that already speak `DeckError`.
+    fn report_deck(&mut self, error: DeckError) {
+        self.report(session::SessionError::Deck(error));
+    }
+
+    /// Paints one key with the colour picked in step 1.
+    fn paint_key(&mut self, index: usize) {
         let slot = self.paint.slot();
-        self.send(idx, slot);
-        self.note = format!("Key {} painted {}.", idx + 1, slot_name(slot)).into();
-    }
-
-    fn apply_all(&mut self, slot: Slot) {
-        for idx in 0..KEY_COUNT {
-            self.send(idx, slot);
-            if self.device.is_none() {
-                return;
-            }
-        }
-        self.note = format!("All 15 keys painted {}.", slot_name(slot)).into();
-    }
-
-    fn clear_all(&mut self) {
-        let result = match self.device.as_mut() {
-            Some(device) => device.clear_all(),
+        let colour = self.paint.rgb();
+        let result = match self.session.as_mut() {
+            Some(session) => session.paint(index, colour),
             None => {
                 self.note = "Not connected. Press RECONNECT first.".into();
                 return;
@@ -501,20 +698,122 @@ impl Controller {
         };
         match result {
             Ok(()) => {
-                self.slots = [Slot::Off; KEY_COUNT];
-                self.note = "All keys cleared (blank).".into();
+                if let Some(entry) = self.slots.get_mut(index) {
+                    *entry = slot;
+                }
+                self.note = format!("Key {} painted {}.", index + 1, slot_name(slot)).into();
             }
-            Err(err) => self.disconnect(err),
+            Err(error) => self.report(error),
         }
     }
 
-    fn heartbeat(&mut self) {
-        let result = match self.device.as_mut() {
-            Some(device) => device.keepalive(),
-            None => return,
+    /// Blanks the key the bindings panel is editing.
+    ///
+    /// Only offered when the deck advertises single-key clear; a deck that
+    /// cannot do it would refuse the call, and the refusal is what the window
+    /// reports rather than a key that keeps showing its old image.
+    fn clear_painted_key(&mut self, index: usize) {
+        let result = match self.session.as_mut() {
+            Some(session) => session.clear_key(index),
+            None => {
+                self.note = "Not connected. Press RECONNECT first.".into();
+                return;
+            }
         };
-        if let Err(err) = result {
-            self.disconnect(err);
+        match result {
+            Ok(()) => {
+                if let Some(entry) = self.slots.get_mut(index) {
+                    *entry = Slot::Off;
+                }
+                self.note = format!("Key {} cleared (blank).", index + 1).into();
+            }
+            Err(error) => self.report(error),
+        }
+    }
+
+    /// Paints every key with one colour.
+    fn apply_all(&mut self, slot: Slot) {
+        let colour = self.paint.rgb();
+        let key_count = self.session.as_ref().map_or(0, |s| s.key_count());
+        self.apply_all_with_colors(slot, &BTreeMap::new(), colour, key_count)
+    }
+
+    /// Paints every key, with optional per-key color overrides.
+    fn apply_all_with_colors(&mut self, slot: Slot, color_overrides: &BTreeMap<u16, [u8; 3]>, default_colour: [u8; 3], key_count: usize) {
+        let Some(session) = self.session.as_mut() else {
+            self.note = "Not connected. Press RECONNECT first.".into();
+            return;
+        };
+        let mut failure = None;
+        for index in 0..key_count {
+            // Use override color if available, otherwise use the default colour
+            let key_color = color_overrides
+                .get(&(index as u16 + 1))
+                .copied()
+                .unwrap_or(default_colour);
+            
+            if let Err(error) = session.paint(index, key_color) {
+                failure = Some(error);
+                break;
+            }
+        }
+
+        match failure {
+            Some(error) => self.report(error),
+            None => {
+                self.slots = vec![slot; key_count];
+                self.note = format!("All {key_count} keys painted {}.", slot_name(slot)).into();
+            }
+        }
+    }
+
+    /// Blanks every key at once.
+    fn clear_all(&mut self) {
+        let result = match self.session.as_mut() {
+            Some(session) => session.clear_all(),
+            None => {
+                self.note = "Not connected. Press RECONNECT first.".into();
+                return;
+            }
+        };
+        match result {
+            Ok(()) => {
+                self.slots.fill(Slot::Off);
+                self.note = "All keys cleared (blank).".into();
+            }
+            Err(error) => self.report_deck(error),
+        }
+    }
+
+    /// Sets the display brightness, when the deck has one.
+    fn set_brightness(&mut self, value: u8) {
+        let result = match self.session.as_mut() {
+            Some(session) => session.set_brightness(value),
+            None => {
+                self.note = "Not connected. Press RECONNECT first.".into();
+                return;
+            }
+        };
+        match result {
+            Ok(()) => {
+                self.brightness = value;
+                self.note = format!("Brightness set to {value}%.").into();
+            }
+            Err(error) => self.report_deck(error),
+        }
+    }
+
+    /// Keeps a deck that resets itself from resetting.
+    ///
+    /// A deck that never resets is not asked: the capability decides, so the
+    /// heartbeat is not a call the window makes and then has to explain away.
+    fn heartbeat(&mut self) {
+        let result = match self.session.as_mut() {
+            Some(session) if session.capabilities().keep_alive() => session.keep_alive(),
+            _ => return,
+        };
+        if let Err(error) = result {
+            self.report_deck(error);
         }
     }
 
@@ -524,13 +823,14 @@ impl Controller {
     /// non-blocking, so this runs on every tick without ever stalling the
     /// window.
     fn poll_deck(&mut self) -> bool {
-        let Some(device) = self.device.as_mut() else {
-            return false;
+        let result = match self.session.as_mut() {
+            Some(session) => session.poll_events(Duration::ZERO),
+            None => return false,
         };
-        let events = match device.poll_events(Duration::ZERO) {
+        let events = match result {
             Ok(events) => events,
-            Err(err) => {
-                self.disconnect(err);
+            Err(error) => {
+                self.report_deck(error);
                 return true;
             }
         };
@@ -539,13 +839,19 @@ impl Controller {
         }
 
         for event in events {
-            let idx = event.key.to_index() as usize;
-            match event.state {
+            let index = usize::from(event.key().index());
+            match event.state() {
                 ButtonState::Pressed => {
-                    self.pressed[idx] = true;
-                    self.run_bound_action(idx);
+                    if let Some(held) = self.pressed.get_mut(index) {
+                        *held = true;
+                    }
+                    self.run_bound_action(index);
                 }
-                ButtonState::Released => self.pressed[idx] = false,
+                ButtonState::Released => {
+                    if let Some(held) = self.pressed.get_mut(index) {
+                        *held = false;
+                    }
+                }
             }
         }
         true
@@ -587,8 +893,42 @@ impl Controller {
     /// Connection results, retries and the heartbeat, at the slower rate.
     fn maintain(&mut self) {
         self.collect_attempts();
-        self.request_attempt_if_due();
+
+        // Hotplug detection: check if deck was unexpectedly disconnected
+        if self.session.is_some() && !is_deck_present() {
+            self.handle_disconnect();
+        }
+
+        // Try to reconnect if disconnected and backoff allows
+        if self.session.is_none() && !self.pending {
+            if Instant::now() >= self.reconnect_at {
+                self.request_attempt();
+            }
+        }
+
         self.heartbeat();
+    }
+
+    /// Handles an unexpected disconnect with exponential backoff.
+    fn handle_disconnect(&mut self) {
+        self.drop_deck();
+        self.attempts = self.attempts.saturating_add(1);
+
+        // Calculate backoff: 2s, 4s, 8s, 16s..., capped at 60s
+        let base_delay = Duration::from_secs(2);
+        let backoff = if self.attempts <= 10 {
+            base_delay * (1u32 << (self.attempts.saturating_sub(1)))
+        } else {
+            Duration::from_secs(60)
+        };
+        self.reconnect_at = Instant::now() + backoff;
+
+        self.note = format!(
+            "Connection lost: deck disconnected. Retrying in {}s (attempt {}).",
+            backoff.as_secs(),
+            self.attempts
+        )
+        .into();
     }
 
     /// Does what the user asked for in the tray menu.
@@ -607,7 +947,12 @@ impl Controller {
                     self.show_window(cx);
                     changed = true;
                 }
-                TrayCommand::Quit => cx.quit(),
+                TrayCommand::Quit => {
+                    // This line, and the `started` line without it, are how the
+                    // log tells a deliberate exit from a crash.
+                    diagnostics::record("quit from the tray");
+                    cx.quit()
+                }
             }
         }
         changed
@@ -629,6 +974,22 @@ impl Controller {
         if let Some(hwnd) = self.native {
             let _ = ss550_tray::hide_window(hwnd);
         }
+    }
+
+    /// Opens the diagnostic log once the version line has been clicked enough.
+    ///
+    /// The app has no console in release, so the log is the only place a panic
+    /// or a strange exit leaves a trace. Reaching it is deliberately quiet.
+    fn reveal_log(&mut self) {
+        let (clicks, due) = advance_clicks(self.version_clicks);
+        self.version_clicks = clicks;
+        if !due {
+            return;
+        }
+        self.note = match diagnostics::reveal() {
+            Ok(()) => "Opened the log file.".into(),
+            Err(error) => error.into(),
+        };
     }
 
     /// Turns the Windows sign-in entry on or off.
@@ -744,25 +1105,38 @@ impl Controller {
             },
         };
 
+        let Some(path) = self.store_path.clone() else {
+            self.note = "No deck is connected, so a binding has no deck to belong to yet.".into();
+            return;
+        };
+
         match self.store.set(self.selected_key, action) {
-            Ok(()) => match self.store.save(&self.store_path) {
-                Ok(()) => {
-                    let summary = self
-                        .store
-                        .get(self.selected_key)
-                        .map(Action::summary)
-                        .unwrap_or_default();
-                    self.note =
-                        format!("Key #{} saved — {summary}.", self.selected_key.get()).into();
+            Ok(()) => {
+                // Save the profile with updated bindings
+                if let Some(session) = self.session.as_ref() {
+                    let deck_key = session.key().to_string();
+                    let config_dir = ss550_engine::config_dir();
+                    let _ = self.profile_store.update_bindings(&self.store, &deck_key, &config_dir);
                 }
-                Err(err) => {
-                    self.note = format!(
-                        "Key #{} was bound, but the file was not saved: {err}",
-                        self.selected_key.get()
-                    )
-                    .into();
+                match self.store.save(&path) {
+                    Ok(()) => {
+                        let summary = self
+                            .store
+                            .get(self.selected_key)
+                            .map(Action::summary)
+                            .unwrap_or_default();
+                        self.note =
+                            format!("Key #{} saved — {summary}.", self.selected_key.get()).into();
+                    }
+                    Err(err) => {
+                        self.note = format!(
+                            "Key #{} was bound, but the file was not saved: {err}",
+                            self.selected_key.get()
+                        )
+                        .into();
+                    }
                 }
-            },
+            }
             Err(err) => {
                 self.note = format!("Key #{} was not bound: {err}", self.selected_key.get()).into();
             }
@@ -771,8 +1145,12 @@ impl Controller {
 
     /// Removes the selected key's binding and saves the file.
     fn clear_binding(&mut self) {
+        let Some(path) = self.store_path.clone() else {
+            self.note = "No deck is connected, so there is no binding file to clear.".into();
+            return;
+        };
         match self.store.remove(self.selected_key) {
-            Some(_) => match self.store.save(&self.store_path) {
+            Some(_) => match self.store.save(&path) {
                 Ok(()) => {
                     self.note = format!(
                         "Key #{} cleared — it does nothing now.",
@@ -794,6 +1172,24 @@ impl Controller {
             }
         }
     }
+
+    /// Records what a frame cost, while that is worth a line.
+    ///
+    /// The first frames are the startup number; after them only a frame long
+    /// enough to be seen as a hitch is recorded. Logging every frame forever
+    /// would bury a crash report under a frame dump nobody reads.
+    fn log_frame(&mut self, cost: Duration) {
+        self.frames = self.frames.saturating_add(1);
+        if self.frames == 1 {
+            diagnostics::record(&format!(
+                "first frame after {} ms",
+                diagnostics::since_start().as_millis()
+            ));
+        }
+        if self.frames <= FRAMES_LOGGED || cost >= SLOW_FRAME {
+            diagnostics::record(&format!("render {} in {} ms", self.frames, ms_text(cost)));
+        }
+    }
 }
 
 fn slot_name(slot: Slot) -> &'static str {
@@ -801,6 +1197,42 @@ fn slot_name(slot: Slot) -> &'static str {
         Slot::White => "white",
         Slot::Red => "red",
         Slot::Off => "off",
+    }
+}
+
+/// Whether a binding's key exists on the deck in front of the window.
+///
+/// The engine keeps no upper bound of its own: a key number is valid as long as
+/// it is at least 1, and whether the deck has it is the geometry's answer.
+fn key_exists(session: &session::DeckSession, number: KeyNumber) -> bool {
+    let index = u16::from(number.get().saturating_sub(1));
+    session.geometry().contains(KeyId::new(index))
+}
+
+/// The 1-based binding number for a deck key, when the deck has that key.
+fn binding_number(session: &session::DeckSession, index: usize) -> Option<KeyNumber> {
+    let key = u16::try_from(index).ok()?;
+    if !session.geometry().contains(KeyId::new(key)) {
+        return None;
+    }
+    KeyNumber::new(u8::try_from(key + 1).ok()?).ok()
+}
+
+/// The label above one display row: where it sits, and the keys in it.
+///
+/// The row count comes from the deck, so a deck with two rows and a deck with
+/// five get the right words without the window knowing either number.
+fn row_label(depth: usize, total: usize, keys: &[usize]) -> String {
+    let place = if depth == 0 {
+        "TOP ROW"
+    } else if depth + 1 == total {
+        "BOTTOM ROW"
+    } else {
+        "MIDDLE ROW"
+    };
+    match (keys.first(), keys.last()) {
+        (Some(first), Some(last)) => format!("{place} · keys {} to {}", first + 1, last + 1),
+        _ => place.to_string(),
     }
 }
 
@@ -921,7 +1353,7 @@ fn picker_button(
 
 fn section_title(text: &'static str, cx: &mut Context<Controller>) -> impl IntoElement {
     div()
-        .text_size(px(15.))
+        .text_size(px(14.))
         .font_weight(FontWeight::BOLD)
         .text_color(cx.theme().foreground)
         .child(text)
@@ -936,6 +1368,9 @@ fn hint(text: impl Into<SharedString>, cx: &mut Context<Controller>) -> impl Int
 
 impl Render for Controller {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Measured from here to the finished tree: that is what the window
+        // spends to put a frame on screen, and what startup is made of.
+        let frame_started = Instant::now();
         let background = cx.theme().background;
         let foreground = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
@@ -948,6 +1383,53 @@ impl Render for Controller {
             Link::Waiting => (color(0xf59e0b), color(0x18181b), "WAITING FOR DECK"),
             Link::Lost => (color(0xdc2626), color(0xffffff), "CONNECTION LOST"),
         };
+
+        // The header names the deck in front of the window, and nothing else.
+        // Before one answers there is no deck to name, so the window says so
+        // instead of describing a model it may not be talking to.
+        let (deck_title, deck_subtitle) = match self.session.as_ref() {
+            Some(session) => {
+                let geometry = session.geometry();
+                let spec = session.image_spec();
+                let mut subtitle = format!(
+                    "{} keys · {} columns · {}x{} images",
+                    geometry.key_count(),
+                    geometry.columns(),
+                    spec.width(),
+                    spec.height()
+                );
+                let dials = session.capabilities().dial_count();
+                if dials > 0 {
+                    subtitle.push_str(&format!(" · {dials} dials"));
+                }
+                (SharedString::from(session.label().to_string()), subtitle)
+            }
+            None => (
+                SharedString::from("No deck yet"),
+                "Plug a deck in; this window follows whatever answers.".to_string(),
+            ),
+        };
+
+        // Active profile display - shows current profile or "no profile"
+        let profile_text = self.profile_store.active_name().unwrap_or("default");
+        let profile_pill = Button::new("profile-switcher")
+            .secondary()
+            .label(format!("PROFILE: {profile_text}"))
+            .on_click(cx.listener(|this: &mut Controller, _: &ClickEvent, _, cx| {
+                // Cycle to next profile on click - determine next profile first
+                let next_name = {
+                    let profiles: Vec<String> = this.profile_store.profile_names();
+                    let current = this.profile_store.active_name().map(|s| s.to_string());
+                    let next = profiles.iter().position(|p| Some(p.as_str()) == current.as_deref()).map(|i| (i + 1) % profiles.len());
+                    next.and_then(|i| profiles.get(i).cloned())
+                };
+                
+                // Now we can mutate since we've extracted all needed info
+                if let Some(name) = next_name {
+                    this.switch_profile(&name);
+                    cx.notify();
+                }
+            }));
 
         let is_dark = cx.theme().mode.is_dark();
         let theme_toggle = Button::new("theme-toggle")
@@ -1008,68 +1490,81 @@ impl Render for Controller {
                 cx.notify();
             }));
 
-        // What each key does, by tile index, for the labels on the deck.
-        let binding_summaries: Vec<Option<SharedString>> = (0..KEY_COUNT)
-            .map(|idx| {
-                KeyNumber::new(idx as u8 + 1)
-                    .ok()
-                    .and_then(|number| self.store.get(number))
-                    .map(|action| SharedString::from(action.summary()))
+        // What each key does, by tile index, for the labels on the deck. The
+        // range comes from the deck, not from a key count written here.
+        let key_count = self
+            .session
+            .as_ref()
+            .map_or(0, session::DeckSession::key_count);
+        let binding_summaries: Vec<Option<SharedString>> = self
+            .session
+            .as_ref()
+            .map(|session| {
+                (0..key_count)
+                    .map(|index| {
+                        binding_number(session, index)
+                            .and_then(|number| self.store.get(number))
+                            .map(|action| SharedString::from(action.summary()))
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
 
-        let mut rows = Vec::with_capacity(DECK_ROWS.len());
-        for (row_label, keys) in DECK_ROWS {
-            let tiles = keys
-                .iter()
-                .map(|&idx| {
-                    key_tile(
-                        idx,
-                        self.slots[idx],
-                        self.pressed[idx],
-                        binding_summaries[idx].clone(),
-                        cx,
-                    )
-                })
-                .collect::<Vec<_>>();
-            rows.push(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(muted)
-                            .child(row_label),
-                    )
-                    .child(div().flex().flex_row().gap(px(10.)).children(tiles)),
-            );
+        let mut rows = Vec::new();
+        if let Some(session) = self.session.as_ref() {
+            for (depth, keys) in session.rows().iter().enumerate() {
+                let tiles = keys
+                    .iter()
+                    .map(|&index| {
+                        key_tile(
+                            index,
+                            self.slots.get(index).copied().unwrap_or(Slot::Off),
+                            self.pressed.get(index).copied().unwrap_or(false),
+                            binding_summaries.get(index).cloned().flatten(),
+                            cx,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                rows.push(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(muted)
+                                .child(row_label(depth, session.rows().len(), keys)),
+                        )
+                        .child(div().flex().flex_row().gap(px(10.)).children(tiles)),
+                );
+            }
         }
 
         // ── Bindings panel ────────────────────────────────────────────
         let mut picker_rows = Vec::new();
-        for (_, keys) in DECK_ROWS {
-            let mut buttons = Vec::new();
-            for &idx in keys.iter() {
-                let Ok(number) = KeyNumber::new(idx as u8 + 1) else {
-                    continue;
-                };
-                buttons.push(picker_button(
-                    idx,
-                    number,
-                    number == self.selected_key,
-                    self.store.get(number).is_some(),
-                    cx,
-                ));
+        if let Some(session) = self.session.as_ref() {
+            for keys in session.rows() {
+                let mut buttons = Vec::new();
+                for &index in keys {
+                    let Some(number) = binding_number(session, index) else {
+                        continue;
+                    };
+                    buttons.push(picker_button(
+                        index,
+                        number,
+                        number == self.selected_key,
+                        self.store.get(number).is_some(),
+                        cx,
+                    ));
+                }
+                picker_rows.push(div().flex().flex_row().gap(px(6.)).children(buttons));
             }
-            picker_rows.push(div().flex().flex_row().gap(px(6.)).children(buttons));
         }
 
         let launch_selected = self.draft == DraftKind::Launch;
         let url_selected = self.draft == DraftKind::OpenUrl;
-
         let kind_launch = Button::new("draft-launch")
             .secondary()
             .label(if launch_selected {
@@ -1179,6 +1674,20 @@ impl Render for Controller {
             Some(note) => background_section.child(hint(note.clone(), cx)),
             None => background_section,
         };
+        // The version line is the quiet way into the diagnostic log. It reads
+        // as a stamp, not as a control, so nothing invites a click.
+        let background_section = background_section.child(
+            div()
+                .id("version-line")
+                .cursor_pointer()
+                .text_size(px(12.))
+                .text_color(cx.theme().muted_foreground.opacity(0.55))
+                .child(format!("v{}", env!("CARGO_PKG_VERSION")))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.reveal_log();
+                    cx.notify();
+                })),
+        );
 
         let bindings_panel = div()
             .flex()
@@ -1216,9 +1725,158 @@ impl Render for Controller {
             .child(draft_fields)
             .child(div().flex().flex_row().gap(px(8.)).child(save).child(clear))
             .child(hint(
-                format!("Bindings are saved to {}", self.store_path.display()),
+                match &self.store_path {
+                    Some(path) => format!("Bindings are saved to {}", path.display()),
+                    None => "Bindings are saved once a deck answers.".to_string(),
+                },
                 cx,
             ));
+
+        // ── Deck-wide controls, offered only where the deck has them ───
+        //
+        // The window does not decide what a deck can do: the deck's own
+        // capabilities decide which buttons exist. A deck without brightness
+        // never sees a brightness row, so nothing offers a control that could
+        // only be refused.
+        let capabilities = self
+            .session
+            .as_ref()
+            .map_or(deck_api::Capabilities::default(), |session| {
+                session.capabilities()
+            });
+        let paint_all_label = format!("PAINT ALL {key_count} KEYS");
+
+        let mut controls: Vec<AnyElement> = Vec::new();
+        controls.push(
+            Button::new("paint-all")
+                .primary()
+                .label(paint_all_label)
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    let slot = this.paint.slot();
+                    this.apply_all(slot);
+                    cx.notify();
+                }))
+                .into_any_element(),
+        );
+        if capabilities.clear_key() {
+            controls.push(
+                Button::new("clear-selected-key")
+                    .secondary()
+                    .label("CLEAR SELECTED KEY")
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        let index = usize::from(this.selected_key.get().saturating_sub(1));
+                        this.clear_painted_key(index);
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if capabilities.clear_all() {
+            controls.push(
+                Button::new("clear-all")
+                    .danger()
+                    .label("CLEAR ALL (BLANK)")
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.clear_all();
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if capabilities.keep_alive() {
+            controls.push(
+                Button::new("keepalive")
+                    .secondary()
+                    .label("KEEP ALIVE · SEND ONE NOW")
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.heartbeat();
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
+        controls.push(
+            Button::new("reconnect")
+                .secondary()
+                .label("RECONNECT")
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.drop_deck();
+                    this.link = Link::Connecting;
+                    this.attempts = 0;
+                    this.note = "Reconnecting…".into();
+                    this.request_attempt();
+                    cx.notify();
+                }))
+                .into_any_element(),
+        );
+        controls.push(
+            Button::new("hide")
+                .secondary()
+                .label("HIDE · KEEPS RUNNING")
+                .on_click(cx.listener(|this, _: &ClickEvent, _, _| {
+                    this.hide_window();
+                }))
+                .into_any_element(),
+        );
+
+        let mut wide_hint = String::from("PAINT ALL uses the colour from step 1.");
+        if capabilities.clear_key() {
+            wide_hint.push_str(" CLEAR SELECTED KEY blanks the key the bindings panel is editing.");
+        }
+        if capabilities.clear_all() {
+            wide_hint.push_str(" CLEAR ALL blanks every key.");
+        }
+        if capabilities.keep_alive() {
+            wide_hint.push_str(
+                " The app keeps the deck awake by itself and sends a heartbeat on its own; \
+                 KEEP ALIVE just sends one by hand.",
+            );
+        }
+        if !capabilities.brightness() {
+            wide_hint.push_str(" This deck has no brightness control, so none is offered.");
+        }
+        wide_hint.push_str(
+            " RECONNECT looks for the deck again. HIDE takes the window off the screen and out \
+             of the taskbar; the app keeps running in the notification area and still runs your \
+             keys.",
+        );
+
+        let brightness_row: Vec<AnyElement> = if capabilities.brightness() {
+            let mut buttons = Vec::new();
+            for value in [25_u8, 50, 75, 100] {
+                let label = if self.brightness == value {
+                    format!("{value}%  ✓")
+                } else {
+                    format!("{value}%")
+                };
+                buttons.push(
+                    Button::new(SharedString::from(format!("brightness-{value}")))
+                        .secondary()
+                        .label(label)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.set_brightness(value);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+            vec![div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(muted)
+                        .child("BRIGHTNESS"),
+                )
+                .children(buttons)
+                .into_any_element()]
+        } else {
+            Vec::new()
+        };
 
         // ── Left column: paint controls and the deck ──────────────────
         let left_column = div()
@@ -1268,66 +1926,10 @@ impl Render for Controller {
                     .flex_wrap()
                     .items_center()
                     .gap(px(10.))
-                    .child(
-                        Button::new("paint-all")
-                            .primary()
-                            .label("PAINT ALL 15 KEYS")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                let slot = this.paint.slot();
-                                this.apply_all(slot);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("clear-all")
-                            .danger()
-                            .label("CLEAR ALL (BLANK)")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.clear_all();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("keepalive")
-                            .secondary()
-                            .label("KEEP ALIVE · SEND ONE NOW")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.heartbeat();
-                                this.note = "Heartbeat sent.".into();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("reconnect")
-                            .secondary()
-                            .label("RECONNECT")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.device = None;
-                                this.link = Link::Connecting;
-                                this.attempts = 0;
-                                this.note = "Reconnecting…".into();
-                                this.request_attempt();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("hide")
-                            .secondary()
-                            .label("HIDE · KEEPS RUNNING")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, _| {
-                                this.hide_window();
-                            })),
-                    ),
+                    .children(controls),
             )
-            .child(hint(
-                "PAINT ALL uses the colour from step 1. CLEAR ALL blanks every key. \
-                 KEEP ALIVE sends one heartbeat by hand. The app keeps the deck \
-                 awake by itself and reconnects when the deck comes back. \
-                 HIDE takes the window off the screen and out of the taskbar; the \
-                 app keeps running in the notification area, keeps the deck awake \
-                 and still runs your keys.",
-                cx,
-            ))
+            .child(hint(wide_hint, cx))
+            .children(brightness_row)
             // Status line
             .child(
                 div()
@@ -1340,7 +1942,7 @@ impl Render for Controller {
                     .child(self.note.clone()),
             );
 
-        div()
+        let root = div()
             .flex()
             .flex_col()
             .size_full()
@@ -1365,12 +1967,9 @@ impl Render for Controller {
                                 div()
                                     .text_size(px(26.))
                                     .font_weight(FontWeight::BOLD)
-                                    .child("StreamCraft SS550"),
+                                    .child(deck_title),
                             )
-                            .child(hint(
-                                "Redragon StreamCraft · 15 LCD keys · USB 0200:3000",
-                                cx,
-                            )),
+                            .child(hint(deck_subtitle, cx)),
                     )
                     .child(
                         div()
@@ -1379,6 +1978,7 @@ impl Render for Controller {
                             .items_center()
                             .gap(px(10.))
                             .child(theme_toggle)
+                            .child(profile_pill)
                             .child(
                                 div()
                                     .px(px(14.))
@@ -1408,7 +2008,10 @@ impl Render for Controller {
                             .child(bindings_panel)
                             .child(background_section),
                     ),
-            )
+            );
+
+        self.log_frame(frame_started.elapsed());
+        root
     }
 }
 
@@ -1425,8 +2028,20 @@ fn native_handle(window: &Window) -> Option<isize> {
 }
 
 fn main() {
+    // The clock starts before anything else our own code does, so the startup
+    // line measures the whole process, not just the part after the log opened.
+    diagnostics::mark_start();
+
+    // The log and the panic hook come first: a failure while the window is
+    // being built is exactly the kind that used to leave no trace.
+    diagnostics::install_panic_hook();
+
     // Started by Windows: the controller lives in the tray with no window.
     let hidden = std::env::args().any(|argument| argument == autostart::HIDDEN_FLAG);
+    diagnostics::record(&format!(
+        "started v{} (hidden={hidden})",
+        env!("CARGO_PKG_VERSION")
+    ));
 
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
@@ -1450,10 +2065,154 @@ fn main() {
                 } else {
                     window.activate_window();
                 }
-                window.set_window_title("StreamCraft SS550 Controller");
+                window.set_window_title("Deck Controller");
                 Theme::change(ThemeMode::Dark, Some(window), cx);
                 cx.new(|cx| Controller::new(window, cx))
             })
             .expect("failed to open the controller window");
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::advance_clicks;
+
+    #[test]
+    fn the_version_line_reveals_on_the_fifth_click() {
+        let mut clicks = 0;
+        for _ in 0..4 {
+            let (next, due) = advance_clicks(clicks);
+            clicks = next;
+            assert!(!due, "the reveal must wait for the fifth click");
+        }
+        let (next, due) = advance_clicks(clicks);
+        assert!(due, "the fifth click must reveal");
+        assert_eq!(next, 0, "the counter starts over after a reveal");
+    }
+
+    #[test]
+    fn the_release_binary_is_a_windows_gui() {
+        // A console-subsystem binary gets a console window from Windows no
+        // matter how it is started: double-click, the autostart entry, or a
+        // terminal. This app is a tray application, so the release build must
+        // be the GUI subsystem. Debug builds keep the console on purpose, so
+        // `cargo run` still shows output and panics while developing.
+        //
+        // The test module is cut off first, so this assertion cannot match the
+        // literal it contains and pass while the attribute is gone.
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(
+            production
+                .contains(r#"#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]"#),
+            "the release binary must be a GUI subsystem, not a console one"
+        );
+    }
+
+    #[test]
+    fn the_window_never_names_the_deck_it_drives() {
+        // The window follows whatever deck answers: a model name, a vendor, a
+        // USB id or a key count written here is a claim about hardware the
+        // window has no right to make. The needles are spelled in pieces so
+        // this file does not match itself.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        sources(&root, &mut files);
+        assert!(!files.is_empty(), "no sources under {}", root.display());
+
+        let forbidden = [
+            ["SS", "550"].concat(),
+            ["Stream", "Craft"].concat(),
+            ["Red", "ragon"].concat(),
+            ["0200", ":3000"].concat(),
+        ];
+        let key_count: String = ['1', '5'].iter().collect();
+        let mut problems = Vec::new();
+
+        for path in files {
+            let name = path
+                .strip_prefix(&root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(error) => {
+                    problems.push(format!("{name}: unreadable: {error}"));
+                    continue;
+                }
+            };
+
+            for (line, body) in text.lines().enumerate() {
+                for needle in &forbidden {
+                    if body.contains(needle.as_str()) {
+                        problems.push(format!("{name}:{}: names the deck ({needle})", line + 1));
+                    }
+                }
+            }
+
+            for number in integer_literals(&text) {
+                if number == key_count {
+                    problems.push(format!(
+                        "{name}: uses the key count as a literal ({number})"
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            problems.is_empty(),
+            "the window must follow the deck, not name it:\n{}",
+            problems.join("\n")
+        );
+    }
+
+    /// Every `.rs` file under `dir`, recursively.
+    fn sources(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                sources(&path, found);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    /// The whole-number literals in `text`, so a key count can be spotted
+    /// without flagging a pixel size that happens to share the digits.
+    fn integer_literals(text: &str) -> Vec<String> {
+        let bytes = text.as_bytes();
+        let mut numbers = Vec::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            if !bytes[at].is_ascii_digit() {
+                at += 1;
+                continue;
+            }
+            let start = at;
+            let mut fractional = false;
+            while at < bytes.len() {
+                match bytes[at] {
+                    b'0'..=b'9' => at += 1,
+                    b'.' if at + 1 < bytes.len() && bytes[at + 1].is_ascii_digit() => {
+                        fractional = true;
+                        at += 1;
+                    }
+                    _ => break,
+                }
+            }
+            let previous = if start == 0 { b' ' } else { bytes[start - 1] };
+            let attached = previous.is_ascii_alphanumeric() || previous == b'_' || previous == b'.';
+            // `px(15.)` is a size, not a key count: a trailing dot is a float.
+            let trailing_dot = at < bytes.len() && bytes[at] == b'.';
+            if !attached && !fractional && !trailing_dot {
+                numbers.push(text[start..at].to_string());
+            }
+        }
+        numbers
+    }
 }

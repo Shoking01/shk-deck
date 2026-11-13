@@ -1229,6 +1229,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
+name = "deck-api"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "deck-conformance"
+version = "0.1.0"
+dependencies = [
+ "deck-api",
+]
+
+[[package]]
+name = "deck-simulator"
+version = "0.1.0"
+dependencies = [
+ "deck-api",
+ "deck-conformance",
+ "ss550-protocol",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "deranged"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6403,6 +6427,7 @@ name = "ss550-driver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "deck-api",
  "hidapi",
  "image",
  "jpeg-encoder",
@@ -6416,7 +6441,6 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "ss550-driver",
  "thiserror 2.0.21",
 ]
 
@@ -6424,11 +6448,15 @@ dependencies = [
 name = "ss550-gui"
 version = "0.1.0"
 dependencies = [
+ "deck-api",
+ "deck-simulator",
  "gpui-kit",
+ "jpeg-encoder",
  "raw-window-handle",
  "ss550-driver",
  "ss550-engine",
  "ss550-tray",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

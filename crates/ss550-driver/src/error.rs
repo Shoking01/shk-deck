@@ -1,5 +1,6 @@
 //! Error types for ss550-driver.
 
+use deck_api::TransportError;
 use ss550_protocol::ProtocolError;
 use thiserror::Error;
 
@@ -90,6 +91,23 @@ impl From<ProtocolError> for Ss550Error {
             },
             ProtocolError::InvalidMode(m) => Self::Protocol(format!("Invalid mode {m}")),
             ProtocolError::MalformedInputReport(m) => Self::MalformedInputReport(m),
+        }
+    }
+}
+
+/// Carries a transport failure into the driver's error type.
+///
+/// A stalled endpoint keeps its own variant, because the recovery is different
+/// from an ordinary I/O failure: the deck has halted until it is power cycled
+/// (`docs/troubleshooting/deck-stuck.md`).
+impl From<TransportError> for Ss550Error {
+    fn from(err: TransportError) -> Self {
+        match err {
+            TransportError::Stalled(detail) => Self::TransportStalled { detail },
+            TransportError::Io(message) => Self::HidIoError(message),
+            // `TransportError` is non-exhaustive: a transport this crate has
+            // never seen is still an I/O failure here.
+            other => Self::HidIoError(other.to_string()),
         }
     }
 }

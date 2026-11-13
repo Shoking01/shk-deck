@@ -146,6 +146,56 @@ missing executable, remove, restore) passes as an ignored test:
 ignored because it writes to the real `HKCU` key and to `LOCALAPPDATA`, and it
 puts back anything it found there.
 
+## Diagnostics
+
+The release build is a GUI subsystem with no console, so a panic or a sudden
+exit would otherwise leave no trace. The app writes an append-only log instead:
+
+```text
+%APPDATA%\ss550\ss550.log
+```
+
+- Every run appends a `started` line, and the tray's `Quit` appends a `quit`
+  line. A `started` line with no matching `quit` means the process did not leave
+  through the tray's Quit. That is what an unexpected exit looks like, but it is
+  a narrowed search rather than a verdict: a logoff, a shutdown or an "End task"
+  kills the process without running that handler either.
+- A panic writes its message and location before the process goes down, then
+  hands the panic to the previous hook, so debug builds still print it to the
+  console. Control characters in the message are escaped, so a payload cannot
+  forge a second line — including a fake `quit`.
+- The log rotates at 1 MB: the full file becomes `ss550.log.old` and a fresh one
+  starts. One old file is kept, never a growing pile. The cap is soft on purpose:
+  when a viewer or an indexer holds the file open, Windows refuses the rename and
+  the log keeps growing until the lock clears, and the next run rotates it then.
+  Truncating instead would delete the current log — the only crash evidence a
+  release build produces — to satisfy a size limit nobody is waiting on.
+- Each line is built in full and written in one call, so a panic on a worker
+  thread cannot interleave with a line already being written.
+- Writing the log can never fail the app. A log that cannot be written is a log
+  that cannot be written, and the controller keeps running.
+- `SS550_CONFIG_DIR` moves the whole directory, log included — the log sits next
+  to `bindings.json`.
+
+**Opening it.** There is no button. Click the version line at the bottom of
+`STEP 4 · RUN IN THE BACKGROUND` five times and the log opens in Notepad; the
+status line says whether it started, and the log records the same thing — the
+viewer's launch, not that it managed to display the file. The trigger is hidden
+on purpose: this is a support tool, not a feature, and a button would invite
+clicks that answer nothing.
+
+Notepad is chosen explicitly rather than through the `.log` file association. A
+clean Windows has no association for `.log` at all, so `start` would do nothing.
+It is also launched as `%SystemRoot%\System32\notepad.exe`, so the lookup does not
+walk the process's current directory, where a planted `notepad.exe` would
+otherwise run with the controller's privileges. That holds whenever `SystemRoot`
+is set, which is every interactive Windows session; the stripped-environment
+fallback to the bare name gives it up, and a missing `notepad.exe` at the
+absolute path reports the reason instead of falling back to the weaker lookup.
+
+**Verified live**: `2026-11-11T16:22:23Z started v0.1.0 (hidden=true)` landed in
+the real path with UTC correct, and `notepad <log>` opened the file.
+
 ## Connection lifetime
 
 The app is meant to be opened and forgotten. It connects on its own, keeps the

@@ -5,8 +5,8 @@ use thiserror::Error;
 /// Everything that can go wrong around an action or its bindings.
 #[derive(Debug, Error)]
 pub enum ActionError {
-    /// The key number is outside the 15 keys the deck has.
-    #[error("key number {0} is out of range (1-15)")]
+    /// The key number is not a valid 1-based number.
+    #[error("key number {0} is out of range (it must be at least 1)")]
     KeyOutOfRange(u8),
 
     /// A launch action has no program to run.
@@ -81,4 +81,8 @@ pub enum ActionError {
     /// The background runner is no longer accepting actions.
     #[error("the action runner has stopped")]
     RunnerStopped,
+
+    /// A profile operation failed for a named reason.
+    #[error("{0}")]
+    ProfileError(String),
 }

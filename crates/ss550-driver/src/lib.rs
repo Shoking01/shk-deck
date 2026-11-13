@@ -11,6 +11,18 @@
 //! - Query device identity
 //! - Read key presses and releases ([`Device::poll_events`])
 //!
+//! ## Two faces, one gate
+//!
+//! [`Ss550Deck`] is the model behind the [`deck_api::Deck`] seam: key count,
+//! grid, image spec, capabilities and typed refusals, with no mention of bytes.
+//! [`Device`] is the concrete handle the first milestone exposed and the window
+//! still uses. Both sit on the same connection, and both write through the same
+//! verified-command gate — the seam is an adapter, not a second driver.
+//!
+//! Every byte goes through a [`deck_api::Transport`], so the whole stack runs
+//! over a fake in tests and in the simulator, and a plain `cargo test` never
+//! opens a device.
+//!
 //! ## Example
 //!
 //! ```no_run
@@ -37,13 +49,16 @@
 #![deny(unsafe_code)]
 
 mod connection;
+mod deck;
 mod error;
+mod hid_transport;
 mod image;
 mod keys;
 
 pub use connection::{
-    ensure_verified, ButtonEvent, Command, Device, LONG_CONNECT_TIMEOUT, PID, VID,
+    ensure_verified, is_deck_present, ButtonEvent, Command, Device, LONG_CONNECT_TIMEOUT, PID, VID,
 };
+pub use deck::Ss550Deck;
 pub use error::Ss550Error;
 pub use image::{ButtonImage, Rotation};
 pub use keys::Key;
@@ -84,5 +99,15 @@ mod tests {
         assert_eq!(keys::open_deck_to_firmware(10), 11);
         // Bottom-right (OpenDeck key 4) should map to firmware key 5
         assert_eq!(keys::open_deck_to_firmware(4), 5);
+    }
+
+    #[test]
+    fn the_handles_can_still_cross_threads() {
+        // The window keeps a `Device` in an entity it owns. Putting the bytes
+        // behind a boxed transport must not cost the handle its `Send`, or the
+        // seam would be a regression for the one caller that already exists.
+        fn assert_send<T: Send>() {}
+        assert_send::<Device>();
+        assert_send::<Ss550Deck>();
     }
 }
