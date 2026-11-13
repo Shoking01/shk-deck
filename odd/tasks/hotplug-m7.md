@@ -51,82 +51,82 @@ Accepted scope:
 | --- | --- | --- | --- | --- | --- |
 | T1 | Add `is_deck_present()` to driver | S1 | inline | ✅ done | 9abd9a7 |
 | T2 | Implement hotplug detection constants | S1, S2 | inline | ✅ done | 9abd9a7 |
-| T3 | Integrate hotplug polling into Controller | S1, S2, S3 | inline | in progress | |
-| T4 | Add automatic reconnect with backoff | S1, S2 | inline | pending | |
-| T5 | Update UI to show connection states | S3 | inline | pending | |
-| T6 | Verification: tests, clippy, fmt | all | inline | pending | |
+| T3 | Integrate hotplug polling into Controller | S1, S2, S3 | inline | ✅ done | 138427f |
+| T4 | Add automatic reconnect with backoff | S1, S2 | inline | ✅ done | 138427f |
+| T5 | Update UI to show connection states | S3 | inline | ✅ done | |
+| T6 | Verification: tests, clippy, fmt | all | inline | ✅ done | |
 
 ## Log
 
 L1 - 2026-11-13, user request: "Completar M7 (Hotplug)"
 
-L2 - Implementation notes:
-- hidapi 2.6 supports device enumeration via `refresh_devices()` and `device_list()`
-- We added `is_deck_present()` in `ss550-driver` as a non-blocking probe
-- Added reconnect backoff constants for exponential backoff
-- Created M7 task document for hotplug and auto-reconnect feature
+L2 - Implementation completed:
 
-### Current state
+### Completed Implementation
 
-**Implemented (ready to use):**
-- T1: `is_deck_present()` function added to `ss550-driver/src/connection.rs`
-- T2: Constants `DISCOVERY_POLL`, `RECONNECT_BACKOFF_FACTOR`, `MAX_RECONNECT_DELAY`, `BACKOFF_RESET_THRESHOLD` added
+**T1 - `is_deck_present()` function added:**
+- Location: `crates/ss550-driver/src/connection.rs:164-184`
+- Non-blocking probe using `HidApi::new()` and `vendor_collection_present()`
+- Returns `true` if SS550 is enumerated on the USB bus
 
-**What remains to implement:**
-- T3: Integrate hotplug polling into Controller - need to update `maint()` to check device presence
-- T4: Add automatic reconnect with backoff - need to track consecutive failures and apply exponential delay
-- T5: Update UI to show connection states - need to update status pill display
+**T2 - Hotplug constants added:**
+- `DISCOVERY_POLL`: 1 second polling interval for device presence
+- `RECONNECT_BACKOFF_FACTOR`: 2 (doubling factor)
+- `MAX_RECONNECT_DELAY`: 60 seconds cap
+- `BACKOFF_RESET_THRESHOLD`: 10 failures before max delay
 
-**Code analysis:**
-The current implementation has a worker thread that handles connection attempts. The hotplug detection will work as follows:
-1. In `maint()`, after collecting attempts, check if deck is present with `is_deck_present()`
-2. If deck is not present but we have a session, call `drop_deck()` and schedule reconnect
-3. Use exponential backoff based on consecutive failure count
-4. Reset backoff counter on successful connection
+**T3 - Controller integration:**
+- Modified `maint()` to check device presence via `is_deck_present()`
+- Added `handle_disconnect()` method for exponential backoff
+- Added `reconnect_at` field to track next reconnect time
 
-**Files modified:**
+**T4 - Exponential backoff:**
+- 2s base delay, doubling after each failure (2s, 4s, 8s, 16s...)
+- Capped at 60 seconds maximum
+- Counter reset on successful connection
+
+**T5 - UI state display:**
+- Status pill already shows: CONNECTED (green), CONNECTING (amber), WAITING FOR DECK (amber), CONNECTION LOST (red)
+- Message line shows detailed backoff info when connection is lost
+- Profile switching already integrated (from M6)
+
+**T6 - Verification:**
+- All tests pass: `cargo test --workspace`
+- Clippy clean: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- Code formatted: `cargo fmt --all`
+
+### Files Changed
+
 - `crates/ss550-driver/src/connection.rs`: +57 lines (is_deck_present function)
 - `crates/ss550-driver/src/lib.rs`: +1 line (export is_deck_present)
+- `crates/ss550-gui/src/main.rs`: +41 lines (hotplug integration, backoff logic)
+- `odd/tasks/hotplug-m7.md`: this file
 
-## Implementation Notes
+### How Hotplug Works
 
-### How hotplug will work
+1. **Device detection**: Every 1 second (DISCOVERY_POLL), `maint()` calls `is_deck_present()` to check if the SS550 is on the USB bus
 
-The `Link` enum already has the right states:
-- `Connecting` - deck not found, attempt in progress
-- `Waiting` - deck not on bus, retries every 2s
-- `Connected` - deck is ready
-- `Lost` - connection died, need to reconnect
+2. **Disconnect handling**: If we have a session but `is_deck_present()` returns false, `handle_disconnect()` is called:
+   - Sets `link` to `Link::Lost`
+   - Increments failure counter
+   - Calculates exponential backoff delay
+   - Updates `self.note` with retry timing message
 
-The fix is in the `maint()` function:
-```rust
-fn maintain(&mut self) {
-    self.collect_attempts();
-    
-    // NEW: Check for unexpected disconnect
-    if self.session.is_some() && !is_deck_present() {
-        self.drop_deck();
-        self.attempts = 0;  // Reset for backoff
-    }
-    
-    // NEW: Check for reconnect opportunity
-    if self.session.is_none() && !self.pending {
-        // Apply backoff delay
-        if let Some(last) = self.last_attempt {
-            let delay = self.calculate_backoff();
-            if last.elapsed() < delay {
-                return;  // Not time to reconnect yet
-            }
-        }
-        self.request_attempt();
-    }
-    
-    self.heartbeat();
-}
-```
+3. **Reconnect logic**: When `session` is `None` and `pending` is `false`:
+   - Checks if current time >= `reconnect_at`
+   - If so, requests a new connection attempt via `request_attempt()`
 
-## Key Learnings
+4. **Backoff calculation**: 
+   ```
+   delay = 2s * (2^(failures-1)) = 2s, 4s, 8s, 16s, 32s...
+   cap at 60s after 10 failures
+   ```
+
+5. **Reset on success**: On successful connection, `attempts` and `reconnect_at` are reset
+
+### Key Learnings
 
 - hidapi does not provide true hotplug events on Windows without external crates
 - Polling every 1-2 seconds is reliable and low-impact
 - Exponential backoff prevents USB bus spam when devices are unplugged
+- The existing `Link` enum states (Connecting, Waiting, Connected, Lost) map perfectly to UI display
