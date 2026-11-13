@@ -13,7 +13,8 @@ echo.
 
 set "PROJECT_ROOT=C:\Users\quiro\Downloads\Adrian\Trabajo\Portfolio\REA RD"
 set "SOURCE=%PROJECT_ROOT%\crates\ss550-gui\target\release\ss550-gui.exe"
-set "INSTALL_DIR=%LOCALAPPDATA%\Programs\StreamCraft"
+REM Use ss550 directory for compatibility with existing installations
+set "INSTALL_DIR=%LOCALAPPDATA%\Programs\ss550"
 set "INSTALL_FILE=%INSTALL_DIR%\ss550-gui.exe"
 
 REM Change to project directory

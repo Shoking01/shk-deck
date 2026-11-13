@@ -17,7 +17,8 @@ function Write-Error { Write-Host "[ERROR] " -ForegroundColor Red -NoNewline; Wr
 # Paths
 $ProjectRoot = "C:\Users\quiro\Downloads\Adrian\Trabajo\Portfolio\REA RD"
 $SourceFile = Join-Path $ProjectRoot "crates\ss550-gui\target\release\ss550-gui.exe"
-$InstallDir = Join-Path $env:LOCALAPPDATA "Programs\StreamCraft"
+# Use ss550 directory for compatibility with existing installations
+$InstallDir = Join-Path $env:LOCALAPPDATA "Programs\ss550"
 $InstallFile = Join-Path $InstallDir "ss550-gui.exe"
 
 Write-Info "Updating StreamCraft Controller..."
