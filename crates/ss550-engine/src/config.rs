@@ -9,6 +9,14 @@ use std::path::PathBuf;
 /// the app at a folder of their own.
 pub const CONFIG_DIR_ENV: &str = "SS550_CONFIG_DIR";
 
+/// The environment variable that keeps the window from looking for a deck.
+///
+/// Set it to any value and the window opens, renders and never opens a device.
+/// It exists for two reasons: a timing run cannot paint the deck on the desk,
+/// and a support report can be produced on a machine with no hardware. It is
+/// read once, when the window is built, and never written by the app.
+pub const NO_DECK_ENV: &str = "DECK_CONTROLLER_NO_DECK";
+
 /// The folder the app owns inside the user's configuration.
 const APP_DIR: &str = "ss550";
 

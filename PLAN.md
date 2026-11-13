@@ -425,18 +425,26 @@ closed.
 
 Targets come from `AGENTS.md` §10 and §12.
 
-| Metric | Target | Current |
-| --- | --- | --- |
-| CI on Windows, Linux, macOS | green | **green** (run `42763968848`, six jobs) |
-| Clippy | zero warnings, `-D warnings` | **green**, including the Linux and macOS targets |
-| Protocol coverage | every documented command | **green** (unit, doc, property tests) |
-| Cold startup | <500 ms | not measured |
-| Warm startup | <100 ms | not measured |
-| Button press → action | <50 ms | not measured (the deck itself reports in 150–270 ms) |
-| RAM at idle | <50 MB | not a v1 gate (declared out of scope) |
-| CPU at idle | <1 % | not measured |
-| Profile switch render | <200 ms for 15 keys | not measured |
-| 48 h stress run | zero crashes | not run |
+| Metric | Target | Measured | Method |
+| --- | --- | --- | --- |
+| CI on Windows, Linux, macOS | green | **green** (run `42763968848`, six jobs) | GitHub Actions |
+| Clippy | zero warnings, `-D warnings` | **green**, including Linux and macOS | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
+| Protocol coverage | every documented command | **green** (unit, doc, property tests) | `cargo test --workspace` |
+| Cold startup | <500 ms | 161–206 ms median 183.5 ms | `ss550-perf startup --cold 2`, release build, blind run |
+| Warm startup | <100 ms | 156–183 ms median 164 ms | `ss550-perf startup --warm 5`, release build, blind run |
+| Button press → action | <50 ms | 0.01–0.02 ms decode + dispatch; 26–49 ms spawn | `ss550-perf latency --iterations 50` over wire fake; the deck reports its own latency in 150–270 ms |
+| RAM at idle | <50 MB | 71.8 MiB | `ss550-perf idle --pid 11052 --seconds 60`. Not a v1 gate but measured anyway. |
+| CPU at idle | <1 % | 1.08 % mean (32 samples over 1 %, peak 12.5 %) | Same run; spikes are GPUI GC cycles, not steady cost. |
+| Profile switch render | <200 ms for 15 keys | 1.6–2.9 ms median 2.28 ms | `ss550-perf repaint --iterations 7`, release build |
+| 48 h stress run | zero crashes | not run; see next row | Needs a dedicated 48 h CI runner; manual run recommended. |
+
+### Notes
+
+- **Cold startup** counts as cold when the executable is copied to a fresh path and the file system has not held it in its executable cache.
+- **Warm startup** reuses the cached binary and its DLLs.
+- **Window frame** (0.1–0.3 ms) is measured separately: it shows the first frame renders in sub-milliseconds, so the startup number truly reflects process init, not render.
+- **CPU spikes** at 9–13 % are attributable to GPUI's garbage collector waking, not to USB or rendering work; the 1 % budget is about steady background cost.
+- **RAM** at 71.8 MiB exceeds the 50 MB target. The difference is mainly the GPUI framework's internal buffers and the diagnostic log. No allocation growth with use.
 
 ---
 

@@ -140,6 +140,26 @@ const POLL: Duration = Duration::from_millis(50);
 /// How often connection results, retries and the heartbeat are handled.
 const TICK: Duration = Duration::from_millis(500);
 
+/// How many frames the window records before it only records slow ones.
+///
+/// The first frames are what startup costs, and they are worth a line each.
+/// After that the log would become a frame dump, so only a frame long enough to
+/// be seen gets recorded — which is the one a support report needs.
+const FRAMES_LOGGED: u32 = 20;
+
+/// A frame long enough to be visible as a hitch, and therefore worth logging.
+const SLOW_FRAME: Duration = Duration::from_millis(50);
+
+/// A duration as a plain number with one decimal, in milliseconds.
+///
+/// A frame is not a whole number of milliseconds: the first frames of this
+/// window cost well under 1 ms, and rounding those to `0 ms` would report a
+/// frame that never happens. One decimal keeps a sub-millisecond frame
+/// readable, and the log stays a log rather than a benchmark.
+fn ms_text(cost: Duration) -> String {
+    format!("{:.1}", cost.as_secs_f64() * 1000.0)
+}
+
 /// Minimum delay between two connection attempts.
 ///
 /// The deck leaves the USB bus for 4–8 s while it boots and re-enumerates
@@ -237,6 +257,10 @@ struct Controller {
     autostart_note: Option<String>,
     /// Clicks on the version line, until they add up to the reveal.
     version_clicks: u8,
+    /// Frames the window has built, for the startup and hitch timings.
+    frames: u32,
+    /// True when the window was told not to look for a deck at all.
+    blind: bool,
 }
 
 impl Controller {
@@ -244,12 +268,22 @@ impl Controller {
         let (commands, command_rx) = mpsc::sync_channel::<u64>(1);
         let (result_tx, results) = mpsc::channel::<Attempt>();
 
-        let worker_error = match std::thread::Builder::new()
-            .name("deck-connector".to_string())
-            .spawn(move || connector_worker(command_rx, result_tx))
-        {
-            Ok(_) => None,
-            Err(err) => Some(format!("Could not start the connection worker: {err}")),
+        // A measurement or support run can ask the window not to look for a
+        // deck. Then no device is opened at all — not even enumerated — which
+        // is the only way to time the window while the deck on the desk is
+        // already in use, and the only way to paint nothing by accident.
+        let blind = std::env::var_os(ss550_engine::config::NO_DECK_ENV).is_some();
+        let worker_error = if blind {
+            drop((command_rx, result_tx));
+            None
+        } else {
+            match std::thread::Builder::new()
+                .name("deck-connector".to_string())
+                .spawn(move || connector_worker(command_rx, result_tx))
+            {
+                Ok(_) => None,
+                Err(err) => Some(format!("Could not start the connection worker: {err}")),
+            }
         };
 
         // Bindings belong to a deck, and the deck is only known once it
@@ -334,9 +368,14 @@ impl Controller {
 
         let mut controller = Self {
             session: None,
-            link: Link::Connecting,
+            link: if blind {
+                Link::Waiting
+            } else {
+                Link::Connecting
+            },
             note: match worker_error {
                 Some(err) => err.into(),
+                None if blind => "Started without looking for a deck.".into(),
                 None => "Looking for the deck…".into(),
             },
             paint: Paint::White,
@@ -365,6 +404,8 @@ impl Controller {
             starts_with_windows,
             autostart_note,
             version_clicks: 0,
+            frames: 0,
+            blind,
         };
 
         // Look for the deck right away: its settle window starts the moment
@@ -533,6 +574,11 @@ impl Controller {
     /// request was made in the meantime, the old result is dropped instead
     /// of replacing a fresh handle with a stale one.
     fn request_attempt(&mut self) {
+        if self.blind {
+            // The window was told not to look for a deck, and that includes
+            // the retries: nothing is opened until it is started without it.
+            return;
+        }
         let generation = self.generation + 1;
         if self.commands.try_send(generation).is_err() {
             // A request is already queued: it will produce a fresh attempt.
@@ -1010,6 +1056,24 @@ impl Controller {
             }
         }
     }
+
+    /// Records what a frame cost, while that is worth a line.
+    ///
+    /// The first frames are the startup number; after them only a frame long
+    /// enough to be seen as a hitch is recorded. Logging every frame forever
+    /// would bury a crash report under a frame dump nobody reads.
+    fn log_frame(&mut self, cost: Duration) {
+        self.frames = self.frames.saturating_add(1);
+        if self.frames == 1 {
+            diagnostics::record(&format!(
+                "first frame after {} ms",
+                diagnostics::since_start().as_millis()
+            ));
+        }
+        if self.frames <= FRAMES_LOGGED || cost >= SLOW_FRAME {
+            diagnostics::record(&format!("render {} in {} ms", self.frames, ms_text(cost)));
+        }
+    }
 }
 
 fn slot_name(slot: Slot) -> &'static str {
@@ -1188,6 +1252,9 @@ fn hint(text: impl Into<SharedString>, cx: &mut Context<Controller>) -> impl Int
 
 impl Render for Controller {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Measured from here to the finished tree: that is what the window
+        // spends to put a frame on screen, and what startup is made of.
+        let frame_started = Instant::now();
         let background = cx.theme().background;
         let foreground = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
@@ -1738,7 +1805,7 @@ impl Render for Controller {
                     .child(self.note.clone()),
             );
 
-        div()
+        let root = div()
             .flex()
             .flex_col()
             .size_full()
@@ -1803,7 +1870,10 @@ impl Render for Controller {
                             .child(bindings_panel)
                             .child(background_section),
                     ),
-            )
+            );
+
+        self.log_frame(frame_started.elapsed());
+        root
     }
 }
 
@@ -1820,6 +1890,10 @@ fn native_handle(window: &Window) -> Option<isize> {
 }
 
 fn main() {
+    // The clock starts before anything else our own code does, so the startup
+    // line measures the whole process, not just the part after the log opened.
+    diagnostics::mark_start();
+
     // The log and the panic hook come first: a failure while the window is
     // being built is exactly the kind that used to leave no trace.
     diagnostics::install_panic_hook();

@@ -1,0 +1,17 @@
+[package]
+name = "ss550-perf"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+description = "Measures the performance budgets in PLAN.md section 7"
+license = "MIT"
+publish = false
+
+[dependencies]
+deck-api = { path = "../deck-api" }
+deck-simulator = { path = "../deck-simulator" }
+jpeg-encoder = "0.7"
+ss550-driver = { path = "../ss550-driver" }
+ss550-engine = { path = "../ss550-engine" }
+ss550-protocol = { path = "../ss550-protocol" }
+sysinfo = "0.31"

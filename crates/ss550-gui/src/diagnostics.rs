@@ -16,7 +16,8 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The log's name inside the app's config directory.
 const LOG_FILE: &str = "ss550.log";
@@ -26,6 +27,32 @@ const PREVIOUS_FILE: &str = "ss550.log.old";
 
 /// Rotate before a line would push the file past this size.
 const MAX_BYTES: u64 = 1_000_000;
+
+/// The moment the process started, for the startup and frame timings.
+///
+/// Set once, from `main`, as early as our own code can run. A `OnceLock`
+/// rather than an atomic integer because the value is an `Instant`, which has
+/// no portable integer form; the timing is diagnostic, not an epoch.
+///
+/// Not a `LazyLock<Instant>`: that would start the clock the first time
+/// anything asks for it, so the very first call — the first frame — would read
+/// zero and the startup number would be measured from the wrong place. An
+/// explicit [`mark_start`] puts the start before everything it has to time.
+static STARTED: OnceLock<Instant> = OnceLock::new();
+
+/// Marks the start of the process, so later timings can be measured from it.
+///
+/// The first call wins. Calling it again cannot move the start, which is what
+/// keeps a second call from making startup look faster than it was.
+pub fn mark_start() {
+    let _ = STARTED.set(Instant::now());
+}
+
+/// How long the process has been running, or zero when nothing marked the
+/// start.
+pub fn since_start() -> Duration {
+    STARTED.get().map(Instant::elapsed).unwrap_or_default()
+}
 
 /// The log's full path, next to `bindings.json`.
 fn log_path() -> PathBuf {
@@ -428,5 +455,30 @@ mod tests {
         let text = fs::read_to_string(&path).expect("the log was written");
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(text.lines().count(), 2, "got: {text:?}");
+    }
+
+    #[test]
+    fn the_process_clock_only_moves_forward() {
+        mark_start();
+        let first = since_start();
+        std::thread::sleep(Duration::from_millis(2));
+        let second = since_start();
+        assert!(
+            second >= first,
+            "the clock went backwards: {second:?} < {first:?}"
+        );
+    }
+
+    #[test]
+    fn marking_the_start_again_cannot_move_it_forward() {
+        mark_start();
+        let first = since_start();
+        std::thread::sleep(Duration::from_millis(2));
+        mark_start();
+        let second = since_start();
+        assert!(
+            second >= first,
+            "a second mark restarted the clock: {second:?} < {first:?}"
+        );
     }
 }

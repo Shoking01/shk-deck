@@ -198,6 +198,23 @@ messages; the file below is a human summary, not a substitute for
   framed input was always full length, so the short-but-enveloped report was
   never exercised before this.
 
+### Changed — the performance budgets are measured
+
+- `PLAN.md` §7 now has a measured column, not a "not measured" placeholder.
+  The numbers are from a release build on this machine, with cold, warm and
+  idle runs, over the wire fake for latency and repaint, and from the running
+  app for idle cost.
+- Added `crates/ss550-perf`: a tool that produces the same numbers on any
+  machine that builds the release binary. Subcommands: `startup`, `idle`,
+  `latency`, `repaint`. Each has documentation; tests for parsing, median
+  calculation and report formatting.
+- `ss550-gui` now records its own startup timing: "first frame after N ms"
+  and "render N in X ms" (sub-millisecond precision). A `DECK_CONTROLLER_NO_DECK`
+  environment variable skips deck enumeration, so measurements never touch
+  the device.
+- Added `NO_DECK_ENV` constant in `ss550-engine::config`, exported for use by
+  the performance tool.
+
 ### Documentation — `PLAN.md` describes the project that exists
 - The old `PLAN.md` planned a different application: egui as the primary GUI
   with GPUI as a fallback, a `ss550-ui` / `action-engine` / `plugins/` layout,
