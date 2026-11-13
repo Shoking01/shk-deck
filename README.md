@@ -92,6 +92,39 @@ cargo run --manifest-path crates/ss550-gui/Cargo.toml
 cargo run --manifest-path crates/ss550-gui/Cargo.toml -- --hidden   # tray only
 ```
 
+## Installation and Updates
+
+The compiled binary is located at:
+```
+crates/ss550-gui/target/release/ss550-gui.exe
+```
+
+To install for regular use:
+
+1. **Run the update script:**
+   - PowerShell: `.\update-steamcraft.ps1`
+   - Batch: `.\update-steamcraft.bat`
+
+   This will:
+   - Build the release version
+   - Copy it to `%LOCALAPPDATA%\Programs\StreamCraft\ss550-gui.exe`
+   - (Optional) Create a startup shortcut with `-CreateShortcut`
+
+2. **Or manual installation:**
+   ```
+   cargo build --manifest-path crates/ss550-gui/Cargo.toml --release
+   copy crates\ss550-gui\target\release\ss550-gui.exe %LOCALAPPDATA%\Programs\StreamCraft\
+   ```
+
+3. **Create a startup shortcut:**
+   - Open Run dialog (Win+R)
+   - Type `shell:startup` and press Enter
+   - Right-click → New → Shortcut
+   - Target: `%LOCALAPPDATA%\Programs\StreamCraft\ss550-gui.exe --hidden`
+   - Name: "StreamCraft Controller"
+
+**Important:** Always use the update script or copy the newly built binary. Old versions in the Startup folder will run instead of the updated code.
+
 ## Background mode
 
 The window is a settings panel, not the app. Closing it hides it; the process,
