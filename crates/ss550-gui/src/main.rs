@@ -23,6 +23,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![deny(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::time::{Duration, Instant};
@@ -261,6 +262,8 @@ struct Controller {
     frames: u32,
     /// True when the window was told not to look for a deck at all.
     blind: bool,
+    /// Profile management for this deck.
+    profile_store: ss550_engine::ProfileStore,
 }
 
 impl Controller {
@@ -406,6 +409,7 @@ impl Controller {
             version_clicks: 0,
             frames: 0,
             blind,
+            profile_store: ss550_engine::ProfileStore::new(),
         };
 
         // Look for the deck right away: its settle window starts the moment
@@ -476,6 +480,12 @@ impl Controller {
         let path = ss550_engine::bindings_path_for(session.key());
         let (store, note) = self.load_store(&path, &session);
 
+        // Load profiles for this deck
+        let deck_key = session.key().to_string();
+        let config_dir = ss550_engine::config_dir();
+        let loaded_store = ss550_engine::ProfileStore::load(&deck_key, &config_dir).unwrap_or_else(|_| ss550_engine::ProfileStore::new());
+        self.profile_store = loaded_store;
+
         self.store = store;
         self.store_path = Some(path);
         self.slots = vec![Slot::Off; key_count];
@@ -486,16 +496,24 @@ impl Controller {
         self.session = Some(session);
         self.link = Link::Connected;
 
-        let slot = self.paint.slot();
-        self.apply_all(slot);
+        // Apply the active profile on connect
+        if let Some(profile) = self.profile_store.active_profile() {
+            self.store = profile.bindings.clone();
+            let slot = self.paint_from_profile(&profile, key_count);
+            let default_colour = self.paint.rgb();
+            self.apply_all_with_colors(slot, &profile.colors, default_colour, key_count);
+        } else {
+            let slot = self.paint.slot();
+            self.apply_all(slot);
+        }
+        
         if self.session.is_some() {
             self.note = match note {
                 Some(note) => note.into(),
                 None => format!(
-                    "Connected — all {key_count} keys painted {}.",
-                    slot_name(slot)
-                )
-                .into(),
+                    "Connected — profile '{}' active.",
+                    self.profile_store.active_name().unwrap_or("default")
+                ).into(),
             };
         }
     }
@@ -602,6 +620,46 @@ impl Controller {
         self.link = Link::Lost;
     }
 
+    /// Switches to a new profile and applies it to the deck.
+    fn switch_profile(&mut self, name: &str) {
+        if let Err(e) = self.profile_store.activate(name) {
+            self.note = format!("Failed to switch profile: {e}").into();
+            return;
+        }
+
+        // If deck is connected, apply the profile
+        if let Some(session) = self.session.as_mut() {
+            // Get profile data before mutating self.store
+            let profile_data = self.profile_store.active_profile();
+            
+            if let Some(profile) = profile_data {
+                // Apply bindings
+                self.store = profile.bindings.clone();
+                
+                // Paint all keys according to profile colors or slot
+                let key_count = session.key_count();
+                let slot = self.paint_from_profile(&profile, key_count);
+                let default_colour = self.paint.rgb();
+                self.apply_all_with_colors(slot, &profile.colors, default_colour, key_count);
+                
+                self.note = format!("Switched to profile: {name}").into();
+            }
+        } else {
+            self.note = format!("Switched to profile: {name} (bindings will apply on connect)").into();
+        }
+    }
+
+    /// Determines the paint slot from a profile (uses per-key color override if available).
+    fn paint_from_profile(&self, profile: &ss550_engine::Profile, _key_count: usize) -> Slot {
+        // Default slot based on profile's slot name
+        let slot_name = profile.slot_name();
+        if slot_name == "red" {
+            Slot::Red
+        } else {
+            Slot::White
+        }
+    }
+
     /// Reports what went wrong, and drops the deck only when the bytes failed.
     ///
     /// A typed refusal is the deck answering: the link is fine, and the window
@@ -671,14 +729,25 @@ impl Controller {
     /// Paints every key with one colour.
     fn apply_all(&mut self, slot: Slot) {
         let colour = self.paint.rgb();
+        let key_count = self.session.as_ref().map_or(0, |s| s.key_count());
+        self.apply_all_with_colors(slot, &BTreeMap::new(), colour, key_count)
+    }
+
+    /// Paints every key, with optional per-key color overrides.
+    fn apply_all_with_colors(&mut self, slot: Slot, color_overrides: &BTreeMap<u16, [u8; 3]>, default_colour: [u8; 3], key_count: usize) {
         let Some(session) = self.session.as_mut() else {
             self.note = "Not connected. Press RECONNECT first.".into();
             return;
         };
-        let key_count = session.key_count();
         let mut failure = None;
         for index in 0..key_count {
-            if let Err(error) = session.paint(index, colour) {
+            // Use override color if available, otherwise use the default colour
+            let key_color = color_overrides
+                .get(&(index as u16 + 1))
+                .copied()
+                .unwrap_or(default_colour);
+            
+            if let Err(error) = session.paint(index, key_color) {
                 failure = Some(error);
                 break;
             }
@@ -1003,24 +1072,32 @@ impl Controller {
         };
 
         match self.store.set(self.selected_key, action) {
-            Ok(()) => match self.store.save(&path) {
-                Ok(()) => {
-                    let summary = self
-                        .store
-                        .get(self.selected_key)
-                        .map(Action::summary)
-                        .unwrap_or_default();
-                    self.note =
-                        format!("Key #{} saved — {summary}.", self.selected_key.get()).into();
+            Ok(()) => {
+                // Save the profile with updated bindings
+                if let Some(session) = self.session.as_ref() {
+                    let deck_key = session.key().to_string();
+                    let config_dir = ss550_engine::config_dir();
+                    let _ = self.profile_store.update_bindings(&self.store, &deck_key, &config_dir);
                 }
-                Err(err) => {
-                    self.note = format!(
-                        "Key #{} was bound, but the file was not saved: {err}",
-                        self.selected_key.get()
-                    )
-                    .into();
+                match self.store.save(&path) {
+                    Ok(()) => {
+                        let summary = self
+                            .store
+                            .get(self.selected_key)
+                            .map(Action::summary)
+                            .unwrap_or_default();
+                        self.note =
+                            format!("Key #{} saved — {summary}.", self.selected_key.get()).into();
+                    }
+                    Err(err) => {
+                        self.note = format!(
+                            "Key #{} was bound, but the file was not saved: {err}",
+                            self.selected_key.get()
+                        )
+                        .into();
+                    }
                 }
-            },
+            }
             Err(err) => {
                 self.note = format!("Key #{} was not bound: {err}", self.selected_key.get()).into();
             }
@@ -1293,6 +1370,27 @@ impl Render for Controller {
                 "Plug a deck in; this window follows whatever answers.".to_string(),
             ),
         };
+
+        // Active profile display - shows current profile or "no profile"
+        let profile_text = self.profile_store.active_name().unwrap_or("default");
+        let profile_pill = Button::new("profile-switcher")
+            .secondary()
+            .label(format!("PROFILE: {profile_text}"))
+            .on_click(cx.listener(|this: &mut Controller, _: &ClickEvent, _, cx| {
+                // Cycle to next profile on click - determine next profile first
+                let next_name = {
+                    let profiles: Vec<String> = this.profile_store.profile_names();
+                    let current = this.profile_store.active_name().map(|s| s.to_string());
+                    let next = profiles.iter().position(|p| Some(p.as_str()) == current.as_deref()).map(|i| (i + 1) % profiles.len());
+                    next.and_then(|i| profiles.get(i).cloned())
+                };
+                
+                // Now we can mutate since we've extracted all needed info
+                if let Some(name) = next_name {
+                    this.switch_profile(&name);
+                    cx.notify();
+                }
+            }));
 
         let is_dark = cx.theme().mode.is_dark();
         let theme_toggle = Button::new("theme-toggle")
@@ -1841,6 +1939,7 @@ impl Render for Controller {
                             .items_center()
                             .gap(px(10.))
                             .child(theme_toggle)
+                            .child(profile_pill)
                             .child(
                                 div()
                                     .px(px(14.))

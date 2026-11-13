@@ -40,6 +40,7 @@ pub mod action;
 pub mod config;
 pub mod error;
 pub mod key;
+pub mod profiles;
 pub mod runner;
 pub mod store;
 
@@ -47,5 +48,6 @@ pub use action::{validate_url, Action};
 pub use config::{bindings_path, bindings_path_for, config_dir};
 pub use error::ActionError;
 pub use key::KeyNumber;
+pub use profiles::{create_default_profiles, Profile, ProfileStore};
 pub use runner::{command_for, run_action, ActionRunner, CommandSpec};
 pub use store::{ActionStore, Binding, STORE_VERSION};

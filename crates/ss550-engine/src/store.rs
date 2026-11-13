@@ -22,7 +22,7 @@ pub struct Binding {
 }
 
 /// Every binding the user has set, ordered by key number.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionStore {
     bindings: Vec<Binding>,
 }

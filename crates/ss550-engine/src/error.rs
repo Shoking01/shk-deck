@@ -81,4 +81,8 @@ pub enum ActionError {
     /// The background runner is no longer accepting actions.
     #[error("the action runner has stopped")]
     RunnerStopped,
+
+    /// A profile operation failed for a named reason.
+    #[error("{0}")]
+    ProfileError(String),
 }
