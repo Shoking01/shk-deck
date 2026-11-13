@@ -26,11 +26,12 @@ protocol ──▶ driver ──▶ engine ──▶ gui (GPUI Kit)
 | Start with Windows | opt-in, one `HKCU\...\Run` value, off by default |
 | Report a program that dies | watched for 6 s, failure shown in the status line |
 | Safe mode | the driver refuses to send any command a test deck has not proven |
+| Profiles (M6) | 6 named profiles (default, stream, meetings, gaming, work, entertainment) with JSON persistence |
+| Hotplug (M7) | Device detection via polling, automatic reconnect with exponential backoff (2s base, doubling, 60s cap) |
 
 Every launch route above was exercised on the real deck. What is *not* done is
 listed in [`CHANGELOG.md`](CHANGELOG.md#known-limitations--fase-1-close-out):
-profiles, plugin sandbox, hotplug notifications, async transport and the udev
-rules.
+> plugin sandbox, async transport and the udev rules.
 
 The commands the deck has actually proven live are listed in
 [`docs/protocol/verified.md`](docs/protocol/verified.md), and the driver

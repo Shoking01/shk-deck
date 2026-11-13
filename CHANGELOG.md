@@ -822,15 +822,7 @@ messages; the file below is a human summary, not a substitute for
 - **No event stream (button presses) exposed as a stream type.** Consumers must
   call `poll_events(Duration::ZERO)` in a loop; an async variant could be added
   later with `tokio::fs::File` wrappers.
-- **No automatic reconnection on handle death.** Apps must catch
-  `Ss550Error::TransportStalled`, call `reconnect()`, `initialize()`, then
-  `repaint_all()`. This is a conscious design: the caller decides when to pay
-  the ~3 s settle wait. A transparent reconnection mode could be added behind
-  a flag if needed.
-- **No profile push (`ICO`/`ULEND` is static-only).** The deck accepts image
-  data but the host does not yet manage "profiles" (named sets of key images).
-- **No hotplug watcher.** Apps must poll `Device::connect()` or use external
-  device-notifier crates.
+- **No plugin sandbox.** Plugins cannot access filesystem/network without user permission.
 - **No async transport (`nusb`/`tokio` deferred; `hidapi` sync is the Phase 1
   baseline**, but `poll_events` with non-zero timeout could unblock on a thread
   pool, enabling a simple async façade).
