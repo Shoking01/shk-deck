@@ -43,7 +43,7 @@ use gpui_kit::{
     WindowOptions,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use ss550_driver::LONG_CONNECT_TIMEOUT;
+use ss550_driver::{is_deck_present, LONG_CONNECT_TIMEOUT};
 use ss550_engine::{Action, ActionRunner, ActionStore, KeyNumber};
 use ss550_tray::{autostart, install, TrayCommand, TrayHost};
 
@@ -231,6 +231,8 @@ struct Controller {
     attempts: u32,
     /// When the connection and heartbeat work last ran.
     last_tick: Instant,
+    /// When it's safe to try reconnecting again (for backoff).
+    reconnect_at: Instant,
     /// What every key does, and where it is saved.
     store: ActionStore,
     /// Where this deck's bindings live, once a deck answered.
@@ -392,6 +394,7 @@ impl Controller {
             last_attempt: None,
             attempts: 0,
             last_tick: Instant::now(),
+            reconnect_at: Instant::now(),
             store,
             store_path,
             runner: ActionRunner::new(),
@@ -430,6 +433,8 @@ impl Controller {
                     }
                     self.pending = false;
                     self.attempts = 0;
+                    // Reset backoff on successful connection
+                    self.reconnect_at = Instant::now();
                     self.adopt(deck);
                 }
                 Attempt::Failed { generation, error } => {
@@ -888,8 +893,42 @@ impl Controller {
     /// Connection results, retries and the heartbeat, at the slower rate.
     fn maintain(&mut self) {
         self.collect_attempts();
-        self.request_attempt_if_due();
+
+        // Hotplug detection: check if deck was unexpectedly disconnected
+        if self.session.is_some() && !is_deck_present() {
+            self.handle_disconnect();
+        }
+
+        // Try to reconnect if disconnected and backoff allows
+        if self.session.is_none() && !self.pending {
+            if Instant::now() >= self.reconnect_at {
+                self.request_attempt();
+            }
+        }
+
         self.heartbeat();
+    }
+
+    /// Handles an unexpected disconnect with exponential backoff.
+    fn handle_disconnect(&mut self) {
+        self.drop_deck();
+        self.attempts = self.attempts.saturating_add(1);
+
+        // Calculate backoff: 2s, 4s, 8s, 16s..., capped at 60s
+        let base_delay = Duration::from_secs(2);
+        let backoff = if self.attempts <= 10 {
+            base_delay * (1u32 << (self.attempts.saturating_sub(1)))
+        } else {
+            Duration::from_secs(60)
+        };
+        self.reconnect_at = Instant::now() + backoff;
+
+        self.note = format!(
+            "Connection lost: deck disconnected. Retrying in {}s (attempt {}).",
+            backoff.as_secs(),
+            self.attempts
+        )
+        .into();
     }
 
     /// Does what the user asked for in the tray menu.

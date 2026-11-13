@@ -49,9 +49,9 @@ Accepted scope:
 
 | ID | Task | Specs | Route | Status | Commit |
 | --- | --- | --- | --- | --- | --- |
-| T1 | Add `is_deck_present()` to driver | S1 | inline | ✅ done | |
-| T2 | Implement hotplug detection constants | S1, S2 | inline | ✅ done | |
-| T3 | Integrate hotplug polling into Controller | S1, S2, S3 | inline | pending | |
+| T1 | Add `is_deck_present()` to driver | S1 | inline | ✅ done | 9abd9a7 |
+| T2 | Implement hotplug detection constants | S1, S2 | inline | ✅ done | 9abd9a7 |
+| T3 | Integrate hotplug polling into Controller | S1, S2, S3 | inline | in progress | |
 | T4 | Add automatic reconnect with backoff | S1, S2 | inline | pending | |
 | T5 | Update UI to show connection states | S3 | inline | pending | |
 | T6 | Verification: tests, clippy, fmt | all | inline | pending | |
@@ -63,26 +63,67 @@ L1 - 2026-11-13, user request: "Completar M7 (Hotplug)"
 L2 - Implementation notes:
 - hidapi 2.6 supports device enumeration via `refresh_devices()` and `device_list()`
 - We added `is_deck_present()` in `ss550-driver` as a non-blocking probe
-- Connection logic in `connector_worker` will be reused/reworked
-- Backoff strategy: 2s base, doubling after each failure, cap at 60s
+- Added reconnect backoff constants for exponential backoff
+- Created M7 task document for hotplug and auto-reconnect feature
 
-## Implementation Plan
+### Current state
 
-### Phase 1: Add hotspot detection to driver
+**Implemented (ready to use):**
+- T1: `is_deck_present()` function added to `ss550-driver/src/connection.rs`
+- T2: Constants `DISCOVERY_POLL`, `RECONNECT_BACKOFF_FACTOR`, `MAX_RECONNECT_DELAY`, `BACKOFF_RESET_THRESHOLD` added
 
-- Add `is_deck_present()` function that checks if the SS550 is enumerated
-- Already implemented in `crates/ss550-driver/src/connection.rs`
+**What remains to implement:**
+- T3: Integrate hotplug polling into Controller - need to update `maint()` to check device presence
+- T4: Add automatic reconnect with backoff - need to track consecutive failures and apply exponential delay
+- T5: Update UI to show connection states - need to update status pill display
 
-### Phase 2: Integrate into Controller
+**Code analysis:**
+The current implementation has a worker thread that handles connection attempts. The hotplug detection will work as follows:
+1. In `maint()`, after collecting attempts, check if deck is present with `is_deck_present()`
+2. If deck is not present but we have a session, call `drop_deck()` and schedule reconnect
+3. Use exponential backoff based on consecutive failure count
+4. Reset backoff counter on successful connection
 
-- Replace the current `request_attempt_if_due()` polling with presence-based detection
-- Add connection state tracking with explicit states
-- Implement exponential backoff logic
+**Files modified:**
+- `crates/ss550-driver/src/connection.rs`: +57 lines (is_deck_present function)
+- `crates/ss550-driver/src/lib.rs`: +1 line (export is_deck_present)
 
-### Phase 3: UI updates
+## Implementation Notes
 
-- Update status pill to show different states
-- Add reconnect logic on device disappearance
+### How hotplug will work
+
+The `Link` enum already has the right states:
+- `Connecting` - deck not found, attempt in progress
+- `Waiting` - deck not on bus, retries every 2s
+- `Connected` - deck is ready
+- `Lost` - connection died, need to reconnect
+
+The fix is in the `maint()` function:
+```rust
+fn maintain(&mut self) {
+    self.collect_attempts();
+    
+    // NEW: Check for unexpected disconnect
+    if self.session.is_some() && !is_deck_present() {
+        self.drop_deck();
+        self.attempts = 0;  // Reset for backoff
+    }
+    
+    // NEW: Check for reconnect opportunity
+    if self.session.is_none() && !self.pending {
+        // Apply backoff delay
+        if let Some(last) = self.last_attempt {
+            let delay = self.calculate_backoff();
+            if last.elapsed() < delay {
+                return;  // Not time to reconnect yet
+            }
+        }
+        self.request_attempt();
+    }
+    
+    self.heartbeat();
+}
+```
 
 ## Key Learnings
 
