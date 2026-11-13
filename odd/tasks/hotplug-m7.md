@@ -130,3 +130,26 @@ L2 - Implementation completed:
 - Polling every 1-2 seconds is reliable and low-impact
 - Exponential backoff prevents USB bus spam when devices are unplugged
 - The existing `Link` enum states (Connecting, Waiting, Connected, Lost) map perfectly to UI display
+
+## Binary Location
+
+The compiled binary is located at:
+```
+crates/ss550-gui/target/release/ss550-gui.exe
+```
+
+To use with auto-start:
+1. Copy the binary to a permanent location (e.g., `C:\Program Files\StreamCraft Controller\`)
+2. Create a shortcut in the Windows Startup folder:
+   - `shell:startup` (run from Run dialog)
+   - Right-click → New → Shortcut
+   - Target: `C:\Program Files\StreamCraft Controller\ss550-gui.exe`
+
+## Post-M7 Status
+
+M6 and M7 are **COMPLETE**:
+- ✅ M6 (Profiles): 6 named profiles with JSON persistence
+- ✅ M7 (Hotplug): Device detection + auto-reconnect with exponential backoff
+
+All tests pass (179+ total), clippy clean, release build successful.
+- The existing `Link` enum states (Connecting, Waiting, Connected, Lost) map perfectly to UI display
