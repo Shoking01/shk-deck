@@ -110,6 +110,18 @@ impl Paint {
     }
 }
 
+/// The flat colours a profile paints, for the keys that show one.
+///
+/// A key whose appearance is an image is absent on purpose: the colour path must
+/// never paint over a picture the profile asked for.
+fn profile_solids(profile: &ss550_engine::Profile) -> BTreeMap<u16, [u8; 3]> {
+    profile
+        .appearance
+        .iter()
+        .filter_map(|(key, appearance)| appearance.rgb().map(|rgb| (*key, rgb)))
+        .collect()
+}
+
 /// Which kind of action the bindings panel is editing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DraftKind {
@@ -514,7 +526,7 @@ impl Controller {
             self.store = profile.bindings.clone();
             let slot = self.paint_from_profile(&profile, key_count);
             let default_colour = self.paint.rgb();
-            self.apply_all_with_colors(slot, &profile.colors, default_colour, key_count);
+            self.apply_all_with_colors(slot, &profile_solids(&profile), default_colour, key_count);
         } else {
             let slot = self.paint.slot();
             self.apply_all(slot);
@@ -660,7 +672,12 @@ impl Controller {
                 let key_count = session.key_count();
                 let slot = self.paint_from_profile(&profile, key_count);
                 let default_colour = self.paint.rgb();
-                self.apply_all_with_colors(slot, &profile.colors, default_colour, key_count);
+                self.apply_all_with_colors(
+                    slot,
+                    &profile_solids(&profile),
+                    default_colour,
+                    key_count,
+                );
 
                 self.note = format!("Switched to profile: {name}").into();
             }

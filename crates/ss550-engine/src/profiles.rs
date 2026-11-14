@@ -17,20 +17,31 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::appearance::Appearance;
 use crate::error::ActionError;
 use crate::store::ActionStore;
 
-/// A profile with its name, bindings and key colors.
+/// A profile with its name, bindings and what each key shows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
     /// The profile name, shown in the UI.
     pub name: String,
     /// What each key does.
     pub bindings: ActionStore,
-    /// What color each key shows, as RGB (0-255). Not all keys need to be listed.
-    #[serde(default)]
+    /// What each key shows, by the key number the UI uses. A key that is not
+    /// listed falls back to [`Profile::slot`]. This is the only source of
+    /// truth for a key's appearance.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub appearance: BTreeMap<u16, Appearance>,
+    /// The flat colour a key shows when [`Profile::appearance`] has no entry
+    /// for it.
+    ///
+    /// Legacy on purpose: profiles written before M6 stored their colours here,
+    /// as `key -> rgb`. It is read and migrated into [`Profile::appearance`] on
+    /// load, and written empty from then on, so the two can never disagree.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub colors: BTreeMap<u16, [u8; 3]>,
-    /// The slot (color theme) this profile uses when not painting a specific color.
+    /// The slot (colour theme) this profile uses when not painting a specific colour.
     /// "white", "red", or "blank" (which is white).
     #[serde(skip_serializing_if = "String::is_empty", default = "default_slot")]
     pub slot: String,
@@ -42,14 +53,45 @@ impl Profile {
         Self {
             name: name.into(),
             bindings: ActionStore::new(),
+            appearance: BTreeMap::new(),
             colors: BTreeMap::new(),
             slot: String::new(),
         }
     }
 
-    /// Returns the color for a key, or None if using the slot color.
+    /// Creates a profile whose keys show these flat colours.
+    pub fn with_solids(name: &str, slot: &str, solids: &[(u16, [u8; 3])]) -> Self {
+        Self {
+            name: name.to_string(),
+            bindings: ActionStore::new(),
+            appearance: solids
+                .iter()
+                .map(|(key, rgb)| (*key, Appearance::solid(*rgb)))
+                .collect(),
+            colors: BTreeMap::new(),
+            slot: slot.to_string(),
+        }
+    }
+
+    /// The colour for a key that shows one, or `None` when it shows an image or
+    /// nothing of its own.
     pub fn key_color(&self, key_number: u16) -> Option<[u8; 3]> {
-        self.colors.get(&key_number).copied()
+        self.appearance.get(&key_number).and_then(Appearance::rgb)
+    }
+
+    /// What this key shows, when the profile says.
+    pub fn appearance_for(&self, key_number: u16) -> Option<&Appearance> {
+        self.appearance.get(&key_number)
+    }
+
+    /// Moves a legacy `colors` entry into `appearance`, keeping anything the
+    /// appearance already says about that key.
+    fn migrate_legacy_colors(&mut self) {
+        for (key, rgb) in std::mem::take(&mut self.colors) {
+            self.appearance
+                .entry(key)
+                .or_insert(Appearance::Solid { rgb });
+        }
     }
 
     /// Returns the slot name (white, red, etc.)
@@ -161,15 +203,23 @@ impl ProfileStore {
         self.active().cloned()
     }
 
-    /// Paints all keys according to the active profile.
-    /// Returns (bindings, key_colors, slot) to apply to the deck.
+    /// The flat colours the active profile paints, for the keys that show one.
+    ///
+    /// A key showing an image is absent here on purpose: a caller that only
+    /// knows about colours cannot paint over an image by accident.
     pub fn active_profile_colors(&self) -> Option<(ActionStore, BTreeMap<u16, [u8; 3]>, String)> {
         let active = self.active()?;
-        Some((
-            active.bindings.clone(),
-            active.colors.clone(),
-            active.slot.clone(),
-        ))
+        let solids = active
+            .appearance
+            .iter()
+            .filter_map(|(key, appearance)| appearance.rgb().map(|rgb| (*key, rgb)))
+            .collect();
+        Some((active.bindings.clone(), solids, active.slot.clone()))
+    }
+
+    /// The appearance of every key the active profile says something about.
+    pub fn active_profile_appearance(&self) -> Option<BTreeMap<u16, Appearance>> {
+        Some(self.active()?.appearance.clone())
     }
 
     /// Saves this store to disk, keyed by the deck's slug.
@@ -199,101 +249,71 @@ impl ProfileStore {
             return Ok(Self::new());
         }
         let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&text).map_err(|e| e.to_string())
+        let mut store: Self = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        for profile in store.profiles.values_mut() {
+            profile.migrate_legacy_colors();
+        }
+        Ok(store)
     }
 }
 
 /// Creates six profile templates.
 pub fn create_default_profiles() -> BTreeMap<String, Profile> {
     let mut map = BTreeMap::new();
+    let mut add = |profile: Profile| {
+        map.insert(profile.name.clone(), profile);
+    };
 
     // default: blank slate
-    map.insert(
-        "default".to_string(),
-        Profile {
-            name: "default".to_string(),
-            bindings: ActionStore::new(),
-            colors: BTreeMap::new(),
-            slot: "white".to_string(),
-        },
-    );
+    add(Profile::new("default"));
 
     // stream: common streaming actions
-    let stream = ActionStore::new();
-    map.insert(
-        "stream".to_string(),
-        Profile {
-            name: "stream".to_string(),
-            bindings: stream,
-            colors: BTreeMap::from([
-                (1, [255, 0, 0]),   // Start/Stop Stream (red)
-                (2, [0, 255, 0]),   // Mute (green)
-                (3, [0, 0, 255]),   // Camera (blue)
-                (4, [255, 255, 0]), // Stop Recording (yellow)
-                (5, [255, 0, 255]), // Switch Scene (magenta)
-            ]),
-            slot: "red".to_string(),
-        },
-    );
+    add(Profile::with_solids(
+        "stream",
+        "red",
+        &[
+            (1, [255, 0, 0]),   // Start/Stop Stream (red)
+            (2, [0, 255, 0]),   // Mute (green)
+            (3, [0, 0, 255]),   // Camera (blue)
+            (4, [255, 255, 0]), // Stop Recording (yellow)
+            (5, [255, 0, 255]), // Switch Scene (magenta)
+        ],
+    ));
 
     // meetings: zoom/teamspeak/etc
-    let meetings = ActionStore::new();
-    map.insert(
-        "meetings".to_string(),
-        Profile {
-            name: "meetings".to_string(),
-            bindings: meetings,
-            colors: BTreeMap::from([
-                (1, [255, 0, 0]),   // Leave Meeting (red)
-                (2, [0, 255, 0]),   // Mute (green)
-                (3, [0, 0, 255]),   // Webcam (blue)
-                (4, [255, 255, 0]), // Share Screen (yellow)
-            ]),
-            slot: "white".to_string(),
-        },
-    );
+    add(Profile::with_solids(
+        "meetings",
+        "white",
+        &[
+            (1, [255, 0, 0]),   // Leave Meeting (red)
+            (2, [0, 255, 0]),   // Mute (green)
+            (3, [0, 0, 255]),   // Webcam (blue)
+            (4, [255, 255, 0]), // Share Screen (yellow)
+        ],
+    ));
 
     // gaming: switch game profile
-    let gaming = ActionStore::new();
-    map.insert(
-        "gaming".to_string(),
-        Profile {
-            name: "gaming".to_string(),
-            bindings: gaming,
-            colors: BTreeMap::from([(1, [200, 0, 0]), (2, [0, 200, 0]), (3, [0, 0, 200])]),
-            slot: "red".to_string(),
-        },
-    );
+    add(Profile::with_solids(
+        "gaming",
+        "red",
+        &[(1, [200, 0, 0]), (2, [0, 200, 0]), (3, [0, 0, 200])],
+    ));
 
     // work: productivity tools
-    let work = ActionStore::new();
-    map.insert(
-        "work".to_string(),
-        Profile {
-            name: "work".to_string(),
-            bindings: work,
-            colors: BTreeMap::new(),
-            slot: "white".to_string(),
-        },
-    );
+    add(Profile::new("work"));
 
     // entertainment: media controls
-    let entertainment = ActionStore::new();
-    map.insert(
-        "entertainment".to_string(),
-        Profile {
-            name: "entertainment".to_string(),
-            bindings: entertainment,
-            colors: BTreeMap::from([
-                (1, [200, 0, 0]),   // Play/Pause
-                (2, [0, 200, 0]),   // Next
-                (3, [0, 0, 200]),   // Previous
-                (4, [200, 200, 0]), // Stop
-                (5, [200, 0, 200]), // Mute
-            ]),
-            slot: "white".to_string(),
-        },
-    );
+    add(Profile::with_solids(
+        "entertainment",
+        "white",
+        &[
+            (1, [200, 0, 0]),   // Play/Pause
+            (2, [0, 200, 0]),   // Next
+            (3, [0, 0, 200]),   // Previous
+            (4, [200, 200, 0]), // Stop
+            (5, [200, 0, 200]), // Mute
+        ],
+    ));
 
     map
 }
@@ -315,6 +335,7 @@ impl Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assets::AssetName;
 
     #[test]
     fn the_default_store_has_six_profiles() {
@@ -343,5 +364,149 @@ mod tests {
         let json = serde_json::to_string(&store).expect("serialize");
         let restored: ProfileStore = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored.names(), store.names());
+    }
+
+    #[test]
+    fn the_default_profiles_keep_their_colours_as_appearances() {
+        let store = ProfileStore::new();
+        let stream = store
+            .profiles()
+            .into_iter()
+            .find(|profile| profile.name == "stream")
+            .expect("the stream profile");
+
+        assert_eq!(
+            stream.appearance_for(1),
+            Some(&Appearance::solid([255, 0, 0]))
+        );
+        assert_eq!(stream.key_color(1), Some([255, 0, 0]));
+        assert!(
+            stream.colors.is_empty(),
+            "the legacy map must stay empty: {}",
+            stream.colors.len()
+        );
+    }
+
+    #[test]
+    fn a_profile_written_before_the_appearance_field_still_loads_its_colours() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("profiles").join("deck.json");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create");
+        std::fs::write(
+            &path,
+            r#"{
+                "profiles": {
+                    "stream": {
+                        "name": "stream",
+                        "bindings": { "version": 1, "bindings": [] },
+                        "colors": { "1": [255, 0, 0], "4": [255, 255, 0] },
+                        "slot": "red"
+                    }
+                },
+                "active": "stream"
+            }"#,
+        )
+        .expect("write the legacy file");
+
+        let store = ProfileStore::_load_from(&path).expect("load");
+        let stream = store.active().expect("the active profile");
+
+        assert_eq!(
+            stream.appearance_for(1),
+            Some(&Appearance::solid([255, 0, 0]))
+        );
+        assert_eq!(
+            stream.appearance_for(4),
+            Some(&Appearance::solid([255, 255, 0]))
+        );
+        assert!(
+            stream.colors.is_empty(),
+            "the legacy map is drained on load, not kept alongside"
+        );
+    }
+
+    #[test]
+    fn an_appearance_the_legacy_field_also_mentions_keeps_the_appearance() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("profiles").join("deck.json");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create");
+        std::fs::write(
+            &path,
+            r#"{
+                "profiles": {
+                    "stream": {
+                        "name": "stream",
+                        "bindings": { "version": 1, "bindings": [] },
+                        "appearance": { "1": { "kind": "image", "asset": "live.png" } },
+                        "colors": { "1": [255, 0, 0] },
+                        "slot": "red"
+                    }
+                },
+                "active": "stream"
+            }"#,
+        )
+        .expect("write the mixed file");
+
+        let store = ProfileStore::_load_from(&path).expect("load");
+        let stream = store.active().expect("the active profile");
+
+        assert_eq!(
+            stream
+                .appearance_for(1)
+                .and_then(Appearance::asset)
+                .map(AssetName::as_str),
+            Some("live.png"),
+            "an explicit appearance outranks the legacy colour"
+        );
+        assert_eq!(stream.key_color(1), None);
+    }
+
+    #[test]
+    fn an_image_appearance_survives_a_save_and_a_load() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let name = AssetName::parse("live.png").expect("valid name");
+
+        let mut store = ProfileStore::new();
+        store.activate("stream").expect("activate");
+        store
+            .profiles
+            .get_mut("stream")
+            .expect("the stream profile")
+            .appearance
+            .insert(2, Appearance::image(name.clone()));
+        store.save("deck", dir.path()).expect("save");
+
+        let loaded = ProfileStore::load("deck", dir.path()).expect("load");
+        let stream = loaded.active().expect("the active profile");
+
+        assert_eq!(stream.appearance_for(2), Some(&Appearance::image(name)));
+        assert_eq!(stream.key_color(2), None, "an image is not a colour");
+        assert_eq!(
+            stream.appearance_for(1),
+            Some(&Appearance::solid([255, 0, 0]))
+        );
+    }
+
+    #[test]
+    fn the_active_colours_leave_out_the_keys_that_show_an_image() {
+        let name = AssetName::parse("live.png").expect("valid name");
+
+        let mut store = ProfileStore::new();
+        store.activate("stream").expect("activate");
+        store
+            .profiles
+            .get_mut("stream")
+            .expect("the stream profile")
+            .appearance
+            .insert(3, Appearance::image(name));
+
+        let (_, solids, _) = store.active_profile_colors().expect("the active profile");
+        assert_eq!(solids.get(&1), Some(&[255, 0, 0]));
+        assert_eq!(solids.get(&5), Some(&[255, 0, 255]));
+        assert_eq!(
+            solids.get(&3),
+            None,
+            "a key showing an image must not be paintable as a colour"
+        );
     }
 }
