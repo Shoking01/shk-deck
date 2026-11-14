@@ -42,8 +42,8 @@ que el modelo tenga hueco para imágenes generadas (reloj) sin reescribirse.
 | --- | --- | --- | --- | --- |
 | T1 | `ss550-engine::assets` — `AssetName` validado, `AssetLibrary` (listar, importar, resolver) | S2, S6 | inline | hecho — `d50f404` |
 | T2 | `ss550-engine::appearance` — `Appearance`, campo en `Profile`, migración desde `colors` | S1, S5 | inline | hecho — `c592cd4` |
-| T3 | GUI — pipeline de render: decodificar, ajustar, escalera de calidad, caché | S3, S4 | inline | pendiente |
-| T4 | GUI — selector de imagen por tecla, vista previa, abrir carpeta | S7 | inline | pendiente |
+| T3 | GUI — pipeline de render: decodificar, ajustar, escalera de calidad, caché | S3, S4 | inline | hecho — `4be2ed9` |
+| T4 | GUI — selector de imagen por tecla, vista previa, abrir carpeta, refrescar biblioteca | S7 | inline | hecho — `050b65b` |
 | T5 | Docs — README, CHANGELOG, PLAN | S1-S8 | inline | pendiente |
 
 ## Log
@@ -66,4 +66,11 @@ T2 `c592cd4` (79 tests de motor). La migración se probó con tres archivos:
 uno solo con `colors`, uno mixto donde la apariencia explícita gana, y un
 ciclo guardar/cargar con una imagen.
 
-**Siguiente:** T3, el pipeline de render en el GUI.
+**L3** (tarea incompleta): T4 está casi terminada. Implementado:
+- `refresh_library()` y `selected_asset`/`tiles`/`library` en `Controller`
+- `select_asset()`, `assign_asset()`, `remove_artwork()`, `save_profile()`,
+  `repaint_key()`, `open_assets_folder()`
+- Panel ARTWORK con lista de imágenes, vista previa, botones USE/REMOVE/OPEN/REFRESH
+- Test para `set_appearance` (ya existía), tests nuevos para render
+
+Falta: ajustar el número de líneas del commit T4 para que no sea demasiado grande.

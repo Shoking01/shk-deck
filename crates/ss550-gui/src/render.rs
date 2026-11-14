@@ -29,7 +29,7 @@
 use std::collections::BTreeMap;
 
 use deck_api::ImageSpec;
-use image::{imageops, Rgb, RgbImage};
+use image::{imageops, Frame, Rgb, RgbImage, Rgba, RgbaImage};
 use jpeg_encoder::{ColorType, Encoder};
 use ss550_engine::AssetName;
 
@@ -165,6 +165,49 @@ fn fit(spec: ImageSpec, picture: &RgbImage) -> RgbImage {
     canvas
 }
 
+/// The tile one key would receive, as a frame the window can draw.
+///
+/// This is the **fitted** tile, not the source picture: what the picker shows
+/// is what the deck would show, black bands and all. A preview that cropped or
+/// stretched would be a promise the deck does not keep.
+///
+/// The frame is handed over in BGRA, because that is the order the renderer
+/// reads. The built-in loader swaps RGBA to BGRA itself; a frame built by hand
+/// has to do the same swap, or every picture shows up with red and blue
+/// exchanged.
+///
+/// # Errors
+///
+/// The same as [`render`], minus the size refusal: a preview is not a payload,
+/// so a picture that would be too big to send is still worth looking at.
+pub fn preview_frame(
+    spec: ImageSpec,
+    name: &AssetName,
+    source: &[u8],
+) -> Result<Frame, RenderError> {
+    let (width, height) = (spec.width(), spec.height());
+    if width == 0 || height == 0 {
+        return Err(RenderError::EmptySpec { width, height });
+    }
+
+    let decoded = image::load_from_memory(source).map_err(|source| RenderError::Decode {
+        name: name.to_string(),
+        source,
+    })?;
+    let canvas = fit(spec, &decoded.to_rgb8());
+
+    let frame = Frame::new(RgbaImage::from_fn(
+        u32::from(width),
+        u32::from(height),
+        |x, y| {
+            let [red, green, blue] = canvas.get_pixel(x, y).0;
+            // BGRA in an RGBA buffer: the renderer reads the raw bytes.
+            Rgba([blue, green, red, 0xFF])
+        },
+    ));
+    Ok(frame)
+}
+
 /// The tiles already rendered, so a profile switch does not re-decode them.
 ///
 /// An entry is keyed by the asset's name, which is enough because the library
@@ -199,6 +242,16 @@ impl TileCache {
             .get(name)
             .expect("the tile was just inserted")
             .as_slice())
+    }
+
+    /// Forgets every tile, so the next [`TileCache::get`] re-reads each picture.
+    ///
+    /// Used when the library changed under the cache: the user dropped a file
+    /// in, replaced one by hand, or asked to look again. A cache that kept
+    /// serving the old bytes would make a replaced picture look like it never
+    /// changed.
+    pub fn clear(&mut self) {
+        self.tiles.clear();
     }
 }
 
@@ -405,5 +458,59 @@ mod tests {
             .expect("from the cache")
             .to_vec();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn clearing_the_cache_makes_the_next_read_see_the_new_file() {
+        let red = png(72, 72, |_, _| [0xFF, 0x00, 0x00]);
+        let blue = png(72, 72, |_, _| [0x00, 0x00, 0xFF]);
+        let mut cache = TileCache::new(spec());
+
+        let before = cache.get(&name(), &red).expect("render").to_vec();
+        cache.clear();
+
+        let after = cache.get(&name(), &blue).expect("render again").to_vec();
+        assert_ne!(before, after, "the cleared tile was read again");
+    }
+
+    #[test]
+    fn a_preview_is_the_fitted_tile_in_bgra() {
+        // 4:1 red, so it fills the width, leaves black bands, and must come
+        // out blue-first because the renderer reads BGRA.
+        let source = png(144, 36, |_, _| [0xFF, 0x00, 0x00]);
+        let frame = preview_frame(spec(), &name(), &source).expect("a preview");
+
+        assert_eq!(frame.buffer().dimensions(), (72, 72));
+        let band = frame.buffer().get_pixel(36, 0).0;
+        assert_eq!(band, [0, 0, 0, 0xFF], "the band above the picture is black");
+        let picture = frame.buffer().get_pixel(36, 36).0;
+        assert_eq!(
+            picture,
+            [0x00, 0x00, 0xFF, 0xFF],
+            "red arrives as BGRA, not RGBA"
+        );
+    }
+
+    #[test]
+    fn a_picture_too_big_to_send_can_still_be_previewed() {
+        let source = png(72, 72, |x, y| {
+            [(x * y % 256) as u8, (x % 256) as u8, (y % 256) as u8]
+        });
+        let tiny = ImageSpec::new(72, 72, 64, deck_api::ImageFormat::Jpeg);
+
+        assert!(
+            render(tiny, &name(), &source).is_err(),
+            "64 bytes cannot hold this tile"
+        );
+        let frame = preview_frame(tiny, &name(), &source).expect("a preview is not a payload");
+        assert_eq!(frame.buffer().dimensions(), (72, 72));
+    }
+
+    #[test]
+    fn a_preview_refuses_bytes_that_are_not_a_picture() {
+        let error = preview_frame(spec(), &name(), b"not a png")
+            .err()
+            .expect("text is not an image");
+        assert!(matches!(error, RenderError::Decode { .. }), "{error}");
     }
 }

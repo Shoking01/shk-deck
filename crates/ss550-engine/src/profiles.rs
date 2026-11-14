@@ -222,6 +222,36 @@ impl ProfileStore {
         Some(self.active()?.appearance.clone())
     }
 
+    /// Replaces what the active profile says one key shows, or removes it.
+    ///
+    /// `None` makes the key fall back to the profile's slot colour, which is
+    /// what "no artwork" means. A store with no active profile is an error
+    /// rather than a silent no-op: a caller that just assigned a picture needs
+    /// to know the file it believes it wrote was not written.
+    pub fn set_appearance(
+        &mut self,
+        key: u16,
+        appearance: Option<Appearance>,
+    ) -> Result<(), String> {
+        let name = self
+            .active
+            .clone()
+            .ok_or_else(|| "no active profile".to_string())?;
+        let profile = self
+            .profiles
+            .get_mut(&name)
+            .ok_or_else(|| format!("no such profile: {name}"))?;
+        match appearance {
+            Some(appearance) => {
+                profile.appearance.insert(key, appearance);
+            }
+            None => {
+                profile.appearance.remove(&key);
+            }
+        }
+        Ok(())
+    }
+
     /// Saves this store to disk, keyed by the deck's slug.
     pub fn save(&self, deck_key: &str, config_dir: &Path) -> Result<(), String> {
         let path = config_dir.join("profiles").join(format!("{deck_key}.json"));
@@ -507,6 +537,35 @@ mod tests {
             solids.get(&3),
             None,
             "a key showing an image must not be paintable as a colour"
+        );
+    }
+
+    #[test]
+    fn setting_an_appearance_replaces_what_the_key_shows_and_can_take_it_back() {
+        let name = AssetName::parse("live.png").expect("valid name");
+
+        let mut store = ProfileStore::new();
+        store.activate("stream").expect("activate");
+
+        store
+            .set_appearance(1, Some(Appearance::image(name.clone())))
+            .expect("set the picture");
+        let stream = store.active().expect("the active profile");
+        assert_eq!(stream.appearance_for(1), Some(&Appearance::image(name)));
+        assert_eq!(
+            stream.key_color(1),
+            None,
+            "a picture is not a colour to paint with"
+        );
+
+        store.set_appearance(1, None).expect("remove the picture");
+        assert_eq!(
+            store
+                .active()
+                .expect("the active profile")
+                .appearance_for(1),
+            None,
+            "removing the artwork leaves the key with no appearance of its own"
         );
     }
 }

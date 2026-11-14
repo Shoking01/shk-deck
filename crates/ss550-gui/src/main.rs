@@ -26,6 +26,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use deck_api::{ButtonState, DeckError, KeyId};
@@ -286,6 +287,14 @@ struct Controller {
     profile_store: ss550_engine::ProfileStore,
     /// The pictures a key can show.
     assets: ss550_engine::AssetLibrary,
+    /// The library as the picker lists it, re-read when the user asks.
+    library: Vec<ss550_engine::Asset>,
+    /// The picture the picker has highlighted, if any.
+    selected_asset: Option<ss550_engine::AssetName>,
+    /// The highlighted picture, already fitted and swapped for the renderer.
+    /// Built when the selection changes, never while drawing: decoding a photo
+    /// on every frame would make the window crawl.
+    preview: Option<(ss550_engine::AssetName, Arc<gpui_kit::RenderImage>)>,
     /// Tiles already rendered for this deck's image size, so switching profile
     /// back and forth does not re-decode every picture.
     tiles: Option<render::TileCache>,
@@ -436,11 +445,15 @@ impl Controller {
             blind,
             profile_store: ss550_engine::ProfileStore::new(),
             assets: ss550_engine::AssetLibrary::at_config_dir(&ss550_engine::config_dir()),
+            library: Vec::new(),
+            selected_asset: None,
+            preview: None,
             tiles: None,
         };
 
         // Look for the deck right away: its settle window starts the moment
         // it appears, so every second counts.
+        let _ = controller.refresh_library();
         controller.request_attempt();
         controller
     }
@@ -538,6 +551,10 @@ impl Controller {
             .map(session::DeckSession::image_spec)
             .expect("the session was just stored");
         self.tiles = Some(render::TileCache::new(spec));
+        // A preview built for the previous deck's tile size is wrong for this
+        // one. The picker keeps the files; the picture is rebuilt on the next
+        // selection.
+        self.preview = None;
 
         // Apply the active profile on connect
         if let Some(profile) = self.profile_store.active_profile() {
@@ -1256,6 +1273,231 @@ impl Controller {
         }
     }
 
+    /// Re-reads the picture library, so a file the user just dropped in shows up.
+    ///
+    /// Returns how many pictures the library holds. The caller decides what to
+    /// say about it: this runs at startup, where the connection note matters
+    /// more than the library count, and from a button, where the count is the
+    /// answer the user asked for.
+    fn refresh_library(&mut self) -> Result<usize, String> {
+        let assets = self.assets.list().map_err(|error| error.to_string())?;
+        let count = assets.len();
+        self.library = assets;
+
+        // A file the user replaced by hand has the same name the cache already
+        // holds. Refreshing is the moment they asked to look again, so the
+        // cache starts over.
+        if let Some(tiles) = self.tiles.as_mut() {
+            tiles.clear();
+        }
+
+        // A picture that is no longer there must not stay highlighted.
+        let still_there = self
+            .selected_asset
+            .as_ref()
+            .is_some_and(|name| self.library.iter().any(|asset| &asset.name == name));
+        if !still_there {
+            self.selected_asset = None;
+            self.preview = None;
+        }
+
+        Ok(count)
+    }
+
+    /// Highlights one picture and builds the preview the picker draws.
+    ///
+    /// The preview is built here, once per selection, and not while drawing:
+    /// decoding a photograph on every frame would make the window crawl.
+    fn select_asset(&mut self, name: ss550_engine::AssetName) {
+        self.selected_asset = Some(name.clone());
+
+        let Some(spec) = self.session.as_ref().map(session::DeckSession::image_spec) else {
+            self.preview = None;
+            self.note = "Connect a deck to see a picture at the size it will use.".into();
+            return;
+        };
+
+        let source = match self.assets.read(&name) {
+            Ok(source) => source,
+            Err(error) => {
+                self.preview = None;
+                self.note = format!("Could not read {name}: {error}").into();
+                return;
+            }
+        };
+
+        match render::preview_frame(spec, &name, &source) {
+            Ok(frame) => {
+                self.preview = Some((name.clone(), Arc::new(gpui_kit::RenderImage::new([frame]))));
+                self.note = format!("{name} is ready for a key.").into();
+            }
+            Err(error) => {
+                self.preview = None;
+                self.note = format!("{error}").into();
+            }
+        }
+    }
+
+    /// Makes the selected key show the highlighted picture, and saves it.
+    fn assign_asset(&mut self) {
+        let Some(name) = self.selected_asset.clone() else {
+            self.note = "Pick a picture first.".into();
+            return;
+        };
+
+        let key = u16::from(self.selected_key.get());
+        if let Err(error) = self
+            .profile_store
+            .set_appearance(key, Some(ss550_engine::Appearance::image(name.clone())))
+        {
+            self.note = format!("Key #{key} was not changed: {error}").into();
+            return;
+        }
+
+        self.save_profile();
+        if self.repaint_key(key) {
+            self.note = format!("Key #{key} now shows {name}.").into();
+        }
+    }
+
+    /// Takes the artwork off the selected key, so it shows the profile colour.
+    fn remove_artwork(&mut self) {
+        let key = u16::from(self.selected_key.get());
+        if let Err(error) = self.profile_store.set_appearance(key, None) {
+            self.note = format!("Key #{key} was not changed: {error}").into();
+            return;
+        }
+
+        self.save_profile();
+        if self.repaint_key(key) {
+            self.note = format!("Key #{key} shows the profile colour again.").into();
+        }
+    }
+
+    /// Writes the profile file, so artwork survives a restart.
+    ///
+    /// The file is what makes an assignment real; the deck showing the picture
+    /// until the app closes is not the same thing.
+    fn save_profile(&mut self) {
+        let Some(deck_key) = self
+            .session
+            .as_ref()
+            .map(|session| session.key().to_string())
+        else {
+            self.note = "Connect a deck to save a profile.".into();
+            return;
+        };
+        if let Err(error) = self
+            .profile_store
+            .save(&deck_key, &ss550_engine::config_dir())
+        {
+            self.note = format!("The profile changed but was not saved: {error}").into();
+        }
+    }
+
+    /// Repaints one key from what the profile says it shows now.
+    ///
+    /// Returns `false` when the picture path failed; the note already says why.
+    /// A colour or a removal cannot fail this way, so the caller's own message
+    /// survives.
+    fn repaint_key(&mut self, key: u16) -> bool {
+        let appearance = self
+            .profile_store
+            .active()
+            .and_then(|profile| profile.appearance_for(key))
+            .cloned();
+        let index = usize::from(key.saturating_sub(1));
+
+        let Some(session) = self.session.as_mut() else {
+            return true;
+        };
+
+        let result = match &appearance {
+            Some(ss550_engine::Appearance::Image { asset }) => {
+                let tile = self
+                    .assets
+                    .read(asset)
+                    .map_err(|error| error.to_string())
+                    .and_then(|source| match self.tiles.as_mut() {
+                        Some(cache) => cache
+                            .get(asset, &source)
+                            .map(<[u8]>::to_vec)
+                            .map_err(|error| error.to_string()),
+                        None => Err("the deck has not stated an image size yet".to_string()),
+                    });
+                match tile {
+                    Ok(jpeg) => session
+                        .paint_encoded(index, &jpeg)
+                        .map_err(PaintFailure::Session),
+                    Err(message) => Err(PaintFailure::Picture(message)),
+                }
+            }
+            Some(ss550_engine::Appearance::Solid { rgb }) => {
+                session.paint(index, *rgb).map_err(PaintFailure::Session)
+            }
+            None => session
+                .paint(index, self.paint.rgb())
+                .map_err(PaintFailure::Session),
+        };
+
+        match result {
+            Ok(()) => {
+                let slot = match &appearance {
+                    Some(ss550_engine::Appearance::Image { .. }) => Slot::Image,
+                    Some(ss550_engine::Appearance::Solid { rgb }) => slot_for(*rgb),
+                    None => self.paint.slot(),
+                };
+                if let Some(entry) = self.slots.get_mut(index) {
+                    *entry = slot;
+                }
+                true
+            }
+            Err(PaintFailure::Session(error)) => {
+                self.report(error);
+                false
+            }
+            Err(PaintFailure::Picture(message)) => {
+                self.note = message.into();
+                false
+            }
+        }
+    }
+
+    /// Opens the picture folder in the file manager.
+    ///
+    /// There is no file dialog in this delivery: the user drops files in the
+    /// folder the app owns and presses REFRESH. This button exists so "the
+    /// folder" is a place they can reach without knowing where the app keeps
+    /// its configuration.
+    fn open_assets_folder(&mut self) {
+        if let Err(error) = self.assets.ensure() {
+            self.note = format!("Could not create the picture folder: {error}").into();
+            return;
+        }
+
+        let opener = if cfg!(windows) {
+            "explorer"
+        } else if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        let action = Action::Launch {
+            program: PathBuf::from(opener),
+            args: vec![self.assets.root().display().to_string()],
+        };
+
+        match ss550_engine::run_action(&action) {
+            Ok(()) => {
+                self.note = format!("Opened {}", self.assets.root().display()).into();
+            }
+            Err(error) => {
+                self.note =
+                    format!("Could not open {}: {error}", self.assets.root().display()).into();
+            }
+        }
+    }
+
     /// Records what a frame cost, while that is worth a line.
     ///
     /// The first frames are the startup number; after them only a frame long
@@ -1281,6 +1523,19 @@ fn slot_name(slot: Slot) -> &'static str {
         Slot::Red => "red",
         Slot::Image => "an image",
         Slot::Off => "off",
+    }
+}
+
+/// The tile swatch that best matches a colour a profile asked for.
+///
+/// A tile can draw two colours and "off", so a solid shows as red when it is
+/// red-dominant and white otherwise. The deck itself still receives the exact
+/// colour; this only decides what the window's swatch claims about it.
+fn slot_for(rgb: [u8; 3]) -> Slot {
+    if rgb[0] > rgb[1].max(rgb[2]) {
+        Slot::Red
+    } else {
+        Slot::White
     }
 }
 
@@ -1732,7 +1987,7 @@ impl Render for Controller {
             .flex_col()
             .gap(px(10.))
             .w(px(380.))
-            .child(section_title("STEP 4 · RUN IN THE BACKGROUND", cx))
+            .child(section_title("STEP 5 · RUN IN THE BACKGROUND", cx))
             .child(hint(
                 "The controller lives in the notification area. Close the window \
                  and it keeps the deck awake and still runs your keys. The tray \
@@ -1776,6 +2031,152 @@ impl Render for Controller {
                     cx.notify();
                 })),
         );
+
+        // ── Artwork: the library, a preview, and the selected key ─────
+        //
+        // There is no file dialog: the user drops a picture in the folder the
+        // app owns and presses REFRESH. The preview is the fitted tile, so what
+        // they see here is what the deck would show, black bands included.
+        let artwork_rows: Vec<AnyElement> = self
+            .library
+            .iter()
+            .map(|asset| {
+                let selected = self.selected_asset.as_ref() == Some(&asset.name);
+                let id = SharedString::from(format!("asset-{}", asset.name));
+                let button = if selected {
+                    Button::new(id).primary()
+                } else {
+                    Button::new(id).secondary()
+                };
+                let name = asset.name.clone();
+                button
+                    .label(format!(
+                        "{} · {:.0} KB",
+                        asset.name,
+                        asset.bytes as f64 / 1024.0
+                    ))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.select_asset(name.clone());
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+
+        let preview_block: AnyElement = match &self.preview {
+            Some((name, image)) => div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .w(px(144.))
+                        .h(px(144.))
+                        .rounded(px(8.))
+                        .overflow_hidden()
+                        .bg(color(0x000000))
+                        .child(gpui_kit::img(image.clone()).w(px(144.)).h(px(144.))),
+                )
+                .child(hint(format!("{name} · fitted to the deck's tile"), cx))
+                .into_any_element(),
+            None => hint("Pick a picture to see what the deck will show.", cx).into_any_element(),
+        };
+
+        let use_asset = Button::new("use-asset")
+            .primary()
+            .label(format!("USE ON KEY #{}", self.selected_key.get()))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.assign_asset();
+                cx.notify();
+            }));
+
+        let remove_asset = Button::new("remove-artwork")
+            .secondary()
+            .label("REMOVE ARTWORK")
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.remove_artwork();
+                cx.notify();
+            }));
+
+        let open_folder = Button::new("open-assets")
+            .secondary()
+            .label("OPEN FOLDER")
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.open_assets_folder();
+                cx.notify();
+            }));
+
+        let refresh_assets = Button::new("refresh-assets")
+            .secondary()
+            .label("REFRESH")
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                match this.refresh_library() {
+                    Ok(count) => {
+                        this.note = format!(
+                            "{count} picture{} in the library.",
+                            if count == 1 { "" } else { "s" }
+                        )
+                        .into();
+                    }
+                    Err(error) => {
+                        this.note = format!("Could not read the picture folder: {error}").into();
+                    }
+                }
+                cx.notify();
+            }));
+
+        let artwork_panel = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .w(px(380.))
+            .child(section_title("STEP 4 · SHOW A PICTURE ON A KEY", cx))
+            .child(hint(
+                "Drop an image into the folder, press REFRESH, pick it here, then \
+                 USE ON KEY. The picture is fitted to the deck's tile, never stretched, \
+                 and re-encoded smaller if it would not fit.",
+                cx,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(12.))
+                    .child(preview_block)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .flex_1()
+                            .child(hint(format!("{} PICTURES", self.library.len()), cx))
+                            .child(div().flex().flex_col().gap(px(4.)).children(artwork_rows)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(8.))
+                    .child(use_asset)
+                    .child(remove_asset),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(8.))
+                    .child(open_folder)
+                    .child(refresh_assets),
+            )
+            .child(hint(
+                format!(
+                    "Editing key #{}. The folder is {}.",
+                    self.selected_key.get(),
+                    self.assets.root().display()
+                ),
+                cx,
+            ));
 
         let bindings_panel = div()
             .flex()
@@ -2094,6 +2495,7 @@ impl Render for Controller {
                             .flex_col()
                             .gap(px(16.))
                             .child(bindings_panel)
+                            .child(artwork_panel)
                             .child(background_section),
                     ),
             );
@@ -2163,7 +2565,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::advance_clicks;
+    use super::{advance_clicks, slot_for, Slot};
 
     #[test]
     fn the_version_line_reveals_on_the_fifth_click() {
@@ -2302,5 +2704,17 @@ mod tests {
             }
         }
         numbers
+    }
+
+    #[test]
+    fn slot_for_reddish_goes_red_else_white() {
+        // Red-dominant colour goes to Slot::Red, everything else to Slot::White
+        assert!(matches!(slot_for([255, 0, 0]), Slot::Red));
+        assert!(matches!(slot_for([255, 1, 1]), Slot::Red));
+
+        assert!(matches!(slot_for([0, 255, 0]), Slot::White));
+        assert!(matches!(slot_for([0, 0, 255]), Slot::White));
+        assert!(matches!(slot_for([10, 20, 30]), Slot::White));
+        assert!(matches!(slot_for([128, 128, 128]), Slot::White));
     }
 }
