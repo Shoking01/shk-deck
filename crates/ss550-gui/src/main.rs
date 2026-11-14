@@ -168,6 +168,13 @@ fn ms_text(cost: Duration) -> String {
 /// forever is what makes "plug the deck in while the app is open" work.
 const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
+/// The longest a retry is ever postponed.
+///
+/// The delay doubles on every failed attempt and stops here, so a deck that is
+/// gone for an hour costs one attempt a minute instead of one every two
+/// seconds. It is also the ceiling that keeps the shift from overflowing.
+const MAX_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+
 /// Outcome of one connection attempt, produced by the connector worker.
 enum Attempt {
     /// The deck answered and is ready to be spoken to.
@@ -225,8 +232,6 @@ struct Controller {
     generation: u64,
     /// True while an attempt is in flight.
     pending: bool,
-    /// When the last attempt was requested.
-    last_attempt: Option<Instant>,
     /// Attempts made since the last successful connection.
     attempts: u32,
     /// When the connection and heartbeat work last ran.
@@ -391,7 +396,6 @@ impl Controller {
             results,
             generation: 0,
             pending: false,
-            last_attempt: None,
             attempts: 0,
             last_tick: Instant::now(),
             reconnect_at: Instant::now(),
@@ -444,6 +448,11 @@ impl Controller {
                     self.pending = false;
                     let message = error.to_string();
 
+                    // Every failed attempt backs off, so a deck that stays
+                    // unplugged is polled once a minute, not twice a second.
+                    self.schedule_retry();
+                    let delay = self.retry_delay().as_secs();
+
                     match error {
                         provider::ConnectError::NotFound(_) => {
                             // The deck is simply not there. This is not a
@@ -451,8 +460,7 @@ impl Controller {
                             self.link = Link::Waiting;
                             self.note = format!(
                                 "{message} — the deck is not on the bus. \
-                                 Retrying every {} s (attempt {}).",
-                                RETRY_INTERVAL.as_secs(),
+                                 Retrying in {delay} s (attempt {}).",
                                 self.attempts
                             )
                             .into();
@@ -460,8 +468,7 @@ impl Controller {
                         provider::ConnectError::Other(_) => {
                             self.link = Link::Lost;
                             self.note = format!(
-                                "{message} — retrying every {} s (attempt {}).",
-                                RETRY_INTERVAL.as_secs(),
+                                "{message} — retrying in {delay} s (attempt {}).",
                                 self.attempts
                             )
                             .into();
@@ -488,7 +495,8 @@ impl Controller {
         // Load profiles for this deck
         let deck_key = session.key().to_string();
         let config_dir = ss550_engine::config_dir();
-        let loaded_store = ss550_engine::ProfileStore::load(&deck_key, &config_dir).unwrap_or_else(|_| ss550_engine::ProfileStore::new());
+        let loaded_store = ss550_engine::ProfileStore::load(&deck_key, &config_dir)
+            .unwrap_or_else(|_| ss550_engine::ProfileStore::new());
         self.profile_store = loaded_store;
 
         self.store = store;
@@ -511,14 +519,15 @@ impl Controller {
             let slot = self.paint.slot();
             self.apply_all(slot);
         }
-        
+
         if self.session.is_some() {
             self.note = match note {
                 Some(note) => note.into(),
                 None => format!(
                     "Connected — profile '{}' active.",
                     self.profile_store.active_name().unwrap_or("default")
-                ).into(),
+                )
+                .into(),
             };
         }
     }
@@ -577,18 +586,26 @@ impl Controller {
         }
     }
 
-    /// Asks for a new attempt when the deck is missing and the retry
-    /// interval has elapsed.
-    fn request_attempt_if_due(&mut self) {
-        if self.session.is_some() || self.pending {
-            return;
-        }
-        if let Some(last) = self.last_attempt {
-            if last.elapsed() < RETRY_INTERVAL {
-                return;
-            }
-        }
-        self.request_attempt();
+    /// How long to wait before the next attempt.
+    ///
+    /// The first failure waits [`RETRY_INTERVAL`], and every failure after it
+    /// doubles the wait, up to [`MAX_RETRY_INTERVAL`]. The shift is clamped
+    /// before it is applied so a long absence cannot overflow it.
+    fn retry_delay(&self) -> Duration {
+        let doublings = self.attempts.saturating_sub(1).min(5);
+        RETRY_INTERVAL
+            .saturating_mul(1u32 << doublings)
+            .min(MAX_RETRY_INTERVAL)
+    }
+
+    /// Counts one failure and postpones the next attempt by the backoff.
+    ///
+    /// Every failed attempt goes through here, not only the disconnect the
+    /// window noticed: a deck that stays away must keep backing off, or the
+    /// app spams the USB bus for as long as it is unplugged.
+    fn schedule_retry(&mut self) {
+        self.attempts = self.attempts.saturating_add(1);
+        self.reconnect_at = Instant::now() + self.retry_delay();
     }
 
     /// Queues one connection attempt for the worker.
@@ -609,8 +626,6 @@ impl Controller {
         }
         self.generation = generation;
         self.pending = true;
-        self.last_attempt = Some(Instant::now());
-        self.attempts += 1;
         self.link = Link::Connecting;
     }
 
@@ -636,21 +651,22 @@ impl Controller {
         if let Some(session) = self.session.as_mut() {
             // Get profile data before mutating self.store
             let profile_data = self.profile_store.active_profile();
-            
+
             if let Some(profile) = profile_data {
                 // Apply bindings
                 self.store = profile.bindings.clone();
-                
+
                 // Paint all keys according to profile colors or slot
                 let key_count = session.key_count();
                 let slot = self.paint_from_profile(&profile, key_count);
                 let default_colour = self.paint.rgb();
                 self.apply_all_with_colors(slot, &profile.colors, default_colour, key_count);
-                
+
                 self.note = format!("Switched to profile: {name}").into();
             }
         } else {
-            self.note = format!("Switched to profile: {name} (bindings will apply on connect)").into();
+            self.note =
+                format!("Switched to profile: {name} (bindings will apply on connect)").into();
         }
     }
 
@@ -739,7 +755,13 @@ impl Controller {
     }
 
     /// Paints every key, with optional per-key color overrides.
-    fn apply_all_with_colors(&mut self, slot: Slot, color_overrides: &BTreeMap<u16, [u8; 3]>, default_colour: [u8; 3], key_count: usize) {
+    fn apply_all_with_colors(
+        &mut self,
+        slot: Slot,
+        color_overrides: &BTreeMap<u16, [u8; 3]>,
+        default_colour: [u8; 3],
+        key_count: usize,
+    ) {
         let Some(session) = self.session.as_mut() else {
             self.note = "Not connected. Press RECONNECT first.".into();
             return;
@@ -751,7 +773,7 @@ impl Controller {
                 .get(&(index as u16 + 1))
                 .copied()
                 .unwrap_or(default_colour);
-            
+
             if let Err(error) = session.paint(index, key_color) {
                 failure = Some(error);
                 break;
@@ -900,10 +922,8 @@ impl Controller {
         }
 
         // Try to reconnect if disconnected and backoff allows
-        if self.session.is_none() && !self.pending {
-            if Instant::now() >= self.reconnect_at {
-                self.request_attempt();
-            }
+        if self.session.is_none() && !self.pending && Instant::now() >= self.reconnect_at {
+            self.request_attempt();
         }
 
         self.heartbeat();
@@ -912,20 +932,11 @@ impl Controller {
     /// Handles an unexpected disconnect with exponential backoff.
     fn handle_disconnect(&mut self) {
         self.drop_deck();
-        self.attempts = self.attempts.saturating_add(1);
-
-        // Calculate backoff: 2s, 4s, 8s, 16s..., capped at 60s
-        let base_delay = Duration::from_secs(2);
-        let backoff = if self.attempts <= 10 {
-            base_delay * (1u32 << (self.attempts.saturating_sub(1)))
-        } else {
-            Duration::from_secs(60)
-        };
-        self.reconnect_at = Instant::now() + backoff;
+        self.schedule_retry();
 
         self.note = format!(
             "Connection lost: deck disconnected. Retrying in {}s (attempt {}).",
-            backoff.as_secs(),
+            self.retry_delay().as_secs(),
             self.attempts
         )
         .into();
@@ -1116,7 +1127,9 @@ impl Controller {
                 if let Some(session) = self.session.as_ref() {
                     let deck_key = session.key().to_string();
                     let config_dir = ss550_engine::config_dir();
-                    let _ = self.profile_store.update_bindings(&self.store, &deck_key, &config_dir);
+                    let _ = self
+                        .profile_store
+                        .update_bindings(&self.store, &deck_key, &config_dir);
                 }
                 match self.store.save(&path) {
                     Ok(()) => {
@@ -1420,10 +1433,13 @@ impl Render for Controller {
                 let next_name = {
                     let profiles: Vec<String> = this.profile_store.profile_names();
                     let current = this.profile_store.active_name().map(|s| s.to_string());
-                    let next = profiles.iter().position(|p| Some(p.as_str()) == current.as_deref()).map(|i| (i + 1) % profiles.len());
+                    let next = profiles
+                        .iter()
+                        .position(|p| Some(p.as_str()) == current.as_deref())
+                        .map(|i| (i + 1) % profiles.len());
                     next.and_then(|i| profiles.get(i).cloned())
                 };
-                
+
                 // Now we can mutate since we've extracted all needed info
                 if let Some(name) = next_name {
                     this.switch_profile(&name);
