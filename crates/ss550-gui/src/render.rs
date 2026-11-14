@@ -194,7 +194,9 @@ pub fn preview_frame(
     })?;
     let canvas = fit(spec, &decoded.to_rgb8());
 
-    // Frame::new expects RGBA data. No manual swap needed.
+    // Frame::new expects RGBA data. For display with GPUI, the frame is
+    // automatically converted. No manual BGRA swap needed - the img() function
+    // handles format requirements.
     let frame = Frame::new(RgbaImage::from_fn(
         u32::from(width),
         u32::from(height),

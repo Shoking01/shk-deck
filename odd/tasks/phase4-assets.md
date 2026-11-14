@@ -86,3 +86,9 @@ Commits:
 - `artwork_rows` tiene `max_h(200px)` para evitar overflow cuando hay muchas imágenes
 - `preview_block` usa `overflow_hidden()` para recortar limpiamente la imagen
 - Commit `75ddaec`: layout overflow y orden RGBA corregidos
+
+**L6** (2026-11-14): Segunda ronda de fixes.
+- `preview_frame()`: Frame ahora devuelve RGBA correcto (no BGRA swap)
+- Limité `artwork_rows` a 10 imágenes visibles para prevenir overflow del UI
+- Agregué botón "+ N more..." cuando la biblioteca supera el límite
+- Commit `93ef9f3`: limit visible assets y RGBA order
