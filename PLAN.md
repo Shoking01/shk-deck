@@ -1,7 +1,12 @@
 # PLAN.md — StreamCraft SS550 Native Rust Controller
 
-**Status: 2026-11-11 — v1 works on the real deck and ships as a release build.
+**Status: 2026-11-14 — v1 works on the real deck and ships as a release build.
 This document is what is left to do, not what was once intended.**
+
+Since 2026-11-11 the deck seam, the deck-agnostic window, the measured budgets,
+the six host-side profiles and the hotplug watcher all landed on `main`, so the
+open list is shorter than the phase table below suggests. Read §5 and §6 as the
+current truth; §4 keeps the phase history.
 
 The controller connects to the SS550, keeps it awake, shows its 15 keys, and
 runs one of two actions when a key is pressed. It lives in the notification
@@ -92,8 +97,10 @@ default and registers an installed copy — never a build folder.
 | 1 | Core driver (`ss550-protocol`, `ss550-driver`, `ss550-probe`) | **done**, with the deferred list in §5 |
 | 2 | Application shell (window, tray, background mode, autostart) | **done** |
 | 3 | Action engine (key press → action) | **done for v1** (`Launch`, `OpenUrl`) |
-| 4 | Icon & asset pipeline | **partial** (solid colour in the UI, JPEG accepted by the driver; no editor, no packs) |
-| 5 | Polish & distribution (release build, installer, updater, onboarding) | **partial** (release build installed and registered; no installer, updater or onboarding) |
+| 4 | Icon & asset pipeline | **partial** (solid colour and per-profile colours in the UI, JPEG accepted by the driver; no editor, no packs, no per-profile artwork) |
+| 5 | Polish & distribution (release build, installer, updater, onboarding) | **partial** (release build installed and registered, `update-steamcraft.ps1`/`.bat` rebuild and reinstall; no installer, no self-updater, no onboarding) |
+| 6 | Profiles (M6) | **done** — six named profiles, JSON persistence, applied to the deck on switch |
+| 7 | Hotplug & auto-reconnect (M7) | **done** — 1 s presence poll, exponential backoff 2 s → 60 s, repaint on reconnect |
 
 ### Phase 0 — Research & protocol analysis: done
 
@@ -172,15 +179,15 @@ Honest list. Items marked *out of scope for v1* are decisions, not debts.
   from the `Deck` in front of the window (M4), and bindings are stored per deck
   — but the provider that opens the deck is still the SS550 one, and a real
   second deck is M9.
-- **No profile push**: the host does not manage named sets of key images; the
-  `ICO`/`ULEND` path is static-only and unverified.
-- **No hotplug watcher and no automatic reconnect**: unplugging the deck needs
-  the `RECONNECT` button. The driver exposes `reconnect()`, `initialize()` and
-  `repaint_all()`; the app does not yet chain them on its own.
+- **Profiles carry bindings and colours, not artwork**: six named profiles
+  persist and apply on switch, but a profile has no key images of its own, and
+  the `ICO`/`ULEND` path stays static-only and unverified.
 - **No async transport**: `hidapi` is synchronous.
-- **No Linux packaging**: no udev rules, no `.desktop`, no AppImage/deb.
-- **No release build**: no installer, no updater, no first-run wizard.
-- **Performance budgets are unmeasured** (§7).
+- **No Linux packaging**: no udev rules, no `.desktop`, no AppImage/deb. The
+  rules file is documented in `INSTALL.md`, but nothing ships it.
+- **No installer and no self-updater**: `update-steamcraft.ps1`/`.bat` rebuild
+  and reinstall by hand. There is no first-run wizard and the app never checks
+  for a newer build itself.
 - **Out of scope for v1**: OBS/Twitch plugins, a WASM sandbox, macros, key
   combos, text injection, multi-action sequences, an icon editor.
 
@@ -375,6 +382,12 @@ RAM and CPU. Publish the numbers next to the targets.
 
 **Done when** §7 has a measured column, not a target column.
 
+**Status: done.** §7 carries the measured column, from `ss550-perf` against the
+release build and the wire fake. Two rows miss their target and are reported as
+they are, not rounded away: RAM at idle is 71.8 MiB against a 50 MB budget, and
+CPU at idle averages 1.08 % against 1 %. The 48 h stress run is still unrun and
+needs a dedicated runner.
+
 ### M6 — Profiles
 
 Host-side profile management: named sets of bindings and images, switching
@@ -383,12 +396,30 @@ go out after M1 puts them on the verified list.
 
 **Done when** six named profiles exist and survive a restart.
 
+**Status: done** (2026-11-13, merged as PR #11). Six profiles — `default`,
+`stream`, `meetings`, `gaming`, `work`, `entertainment` — live in a
+`ProfileStore` under `%APPDATA%\ss550`, one file per deck, with a JSON schema
+that survives a restart. The window shows the active profile in the header and
+cycles it on click; switching applies the profile's bindings and per-key colours
+to the deck immediately, or notes that they will apply on connect. Specs and
+evidence in `odd/tasks/profiles-m6.md`.
+
 ### M7 — Hotplug and auto-reconnect
 
 Watch for connect/disconnect, show the state, repaint on reconnect, and back
 off exponentially so a missing deck is never spammed.
 
 **Done when** unplugging and replugging the deck recovers by itself.
+
+**Status: done** (2026-11-13, merged as PR #11; backoff corrected in PR #12).
+`is_deck_present()` is polled every second by the window's maintenance tick, so
+the driver keeps its single-writer rule and the engine stays free of the driver.
+An unexpected disconnect drops the session, repaints on reconnect, and schedules
+the next attempt with a delay that doubles from 2 s to a 60 s ceiling and resets
+on success. Every failed attempt backs off, not only the disconnect the window
+noticed — the first version left `reconnect_at` in the past after the first
+retry and polled the bus on every tick. Specs and evidence in
+`odd/tasks/hotplug-m7.md`.
 
 ### M8 — Linux packaging
 
