@@ -37,6 +37,7 @@
 #![deny(unsafe_code)]
 
 pub mod action;
+pub mod assets;
 pub mod config;
 pub mod error;
 pub mod key;
@@ -45,6 +46,7 @@ pub mod runner;
 pub mod store;
 
 pub use action::{validate_url, Action};
+pub use assets::{Asset, AssetError, AssetLibrary, AssetName, ASSETS_DIR};
 pub use config::{bindings_path, bindings_path_for, config_dir};
 pub use error::ActionError;
 pub use key::KeyNumber;
