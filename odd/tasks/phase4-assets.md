@@ -40,8 +40,8 @@ que el modelo tenga hueco para imágenes generadas (reloj) sin reescribirse.
 
 | ID | Qué | Specs | Ruta | Estado |
 | --- | --- | --- | --- | --- |
-| T1 | `ss550-engine::assets` — `AssetName` validado, `AssetLibrary` (listar, importar, resolver) | S2, S6 | inline | pendiente |
-| T2 | `ss550-engine::appearance` — `Appearance`, campo en `Profile`, migración desde `colors` | S1, S5 | inline | pendiente |
+| T1 | `ss550-engine::assets` — `AssetName` validado, `AssetLibrary` (listar, importar, resolver) | S2, S6 | inline | hecho — `d50f404` |
+| T2 | `ss550-engine::appearance` — `Appearance`, campo en `Profile`, migración desde `colors` | S1, S5 | inline | hecho — `c592cd4` |
 | T3 | GUI — pipeline de render: decodificar, ajustar, escalera de calidad, caché | S3, S4 | inline | pendiente |
 | T4 | GUI — selector de imagen por tecla, vista previa, abrir carpeta | S7 | inline | pendiente |
 | T5 | Docs — README, CHANGELOG, PLAN | S1-S8 | inline | pendiente |
@@ -60,3 +60,10 @@ nueva y no una migración.
 **Decisión:** una sola fuente de verdad por tecla (`appearance`), y `colors`
 queda como campo heredado que solo se lee para migrar. Dos mapas para el mismo
 concepto envejecen mal y el reloj los habría obligado a converger igual.
+
+**L2** (2026-11-14): T1 y T2 entregadas. T1 `d50f404` (69 tests de motor),
+T2 `c592cd4` (79 tests de motor). La migración se probó con tres archivos:
+uno solo con `colors`, uno mixto donde la apariencia explícita gana, y un
+ciclo guardar/cargar con una imagen.
+
+**Siguiente:** T3, el pipeline de render en el GUI.

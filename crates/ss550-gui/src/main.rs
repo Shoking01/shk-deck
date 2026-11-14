@@ -49,6 +49,7 @@ use ss550_tray::{autostart, install, TrayCommand, TrayHost};
 
 mod diagnostics;
 mod provider;
+mod render;
 mod session;
 
 /// Clicks on the version line that open the diagnostic log.
@@ -97,6 +98,8 @@ impl Paint {
 enum Slot {
     White,
     Red,
+    /// A picture from the asset library, rather than a flat colour.
+    Image,
     Off,
 }
 
@@ -110,16 +113,14 @@ impl Paint {
     }
 }
 
-/// The flat colours a profile paints, for the keys that show one.
+/// Why painting one key failed.
 ///
-/// A key whose appearance is an image is absent on purpose: the colour path must
-/// never paint over a picture the profile asked for.
-fn profile_solids(profile: &ss550_engine::Profile) -> BTreeMap<u16, [u8; 3]> {
-    profile
-        .appearance
-        .iter()
-        .filter_map(|(key, appearance)| appearance.rgb().map(|rgb| (*key, rgb)))
-        .collect()
+/// The two halves are reported differently: a session failure may mean the link
+/// died and the deck must be dropped, while a picture that could not be read is
+/// the user's file talking and the link is fine.
+enum PaintFailure {
+    Session(session::SessionError),
+    Picture(String),
 }
 
 /// Which kind of action the bindings panel is editing.
@@ -283,6 +284,11 @@ struct Controller {
     blind: bool,
     /// Profile management for this deck.
     profile_store: ss550_engine::ProfileStore,
+    /// The pictures a key can show.
+    assets: ss550_engine::AssetLibrary,
+    /// Tiles already rendered for this deck's image size, so switching profile
+    /// back and forth does not re-decode every picture.
+    tiles: Option<render::TileCache>,
 }
 
 impl Controller {
@@ -429,6 +435,8 @@ impl Controller {
             frames: 0,
             blind,
             profile_store: ss550_engine::ProfileStore::new(),
+            assets: ss550_engine::AssetLibrary::at_config_dir(&ss550_engine::config_dir()),
+            tiles: None,
         };
 
         // Look for the deck right away: its settle window starts the moment
@@ -521,12 +529,22 @@ impl Controller {
         self.session = Some(session);
         self.link = Link::Connected;
 
+        // The tile cache is per deck: it holds pictures already encoded at this
+        // deck's image size and byte limit, and a different deck would accept
+        // neither.
+        let spec = self
+            .session
+            .as_ref()
+            .map(session::DeckSession::image_spec)
+            .expect("the session was just stored");
+        self.tiles = Some(render::TileCache::new(spec));
+
         // Apply the active profile on connect
         if let Some(profile) = self.profile_store.active_profile() {
             self.store = profile.bindings.clone();
             let slot = self.paint_from_profile(&profile, key_count);
             let default_colour = self.paint.rgb();
-            self.apply_all_with_colors(slot, &profile_solids(&profile), default_colour, key_count);
+            self.apply_all_appearances(slot, &profile.appearance, default_colour, key_count);
         } else {
             let slot = self.paint.slot();
             self.apply_all(slot);
@@ -672,12 +690,7 @@ impl Controller {
                 let key_count = session.key_count();
                 let slot = self.paint_from_profile(&profile, key_count);
                 let default_colour = self.paint.rgb();
-                self.apply_all_with_colors(
-                    slot,
-                    &profile_solids(&profile),
-                    default_colour,
-                    key_count,
-                );
+                self.apply_all_appearances(slot, &profile.appearance, default_colour, key_count);
 
                 self.note = format!("Switched to profile: {name}").into();
             }
@@ -768,14 +781,20 @@ impl Controller {
     fn apply_all(&mut self, slot: Slot) {
         let colour = self.paint.rgb();
         let key_count = self.session.as_ref().map_or(0, |s| s.key_count());
-        self.apply_all_with_colors(slot, &BTreeMap::new(), colour, key_count)
+        self.apply_all_appearances(slot, &BTreeMap::new(), colour, key_count)
     }
 
-    /// Paints every key, with optional per-key color overrides.
-    fn apply_all_with_colors(
+    /// Paints every key, honouring what the profile says each one shows.
+    ///
+    /// A key the profile says nothing about gets `default_colour`. A key with an
+    /// appearance gets exactly that: a flat colour, or a picture read from the
+    /// library, fitted to the deck's image size and encoded within its byte
+    /// limit. The picture path never touches the wire with bytes the deck has
+    /// not already accepted at this size — a refusal here names the file.
+    fn apply_all_appearances(
         &mut self,
         slot: Slot,
-        color_overrides: &BTreeMap<u16, [u8; 3]>,
+        appearances: &BTreeMap<u16, ss550_engine::Appearance>,
         default_colour: [u8; 3],
         key_count: usize,
     ) {
@@ -783,25 +802,59 @@ impl Controller {
             self.note = "Not connected. Press RECONNECT first.".into();
             return;
         };
-        let mut failure = None;
-        for index in 0..key_count {
-            // Use override color if available, otherwise use the default colour
-            let key_color = color_overrides
-                .get(&(index as u16 + 1))
-                .copied()
-                .unwrap_or(default_colour);
 
-            if let Err(error) = session.paint(index, key_color) {
+        let mut failure = None;
+        let mut painted = vec![slot; key_count];
+        for (index, entry) in painted.iter_mut().enumerate() {
+            let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
+            let result = match appearances.get(&key) {
+                Some(ss550_engine::Appearance::Image { asset }) => {
+                    let tile = self
+                        .assets
+                        .read(asset)
+                        .map_err(|error| error.to_string())
+                        .and_then(|source| match self.tiles.as_mut() {
+                            Some(cache) => cache
+                                .get(asset, &source)
+                                .map(<[u8]>::to_vec)
+                                .map_err(|error| error.to_string()),
+                            None => Err("the deck has not stated an image size yet".to_string()),
+                        });
+                    match tile {
+                        Ok(jpeg) => {
+                            *entry = Slot::Image;
+                            session
+                                .paint_encoded(index, &jpeg)
+                                .map_err(PaintFailure::Session)
+                        }
+                        Err(message) => Err(PaintFailure::Picture(message)),
+                    }
+                }
+                Some(ss550_engine::Appearance::Solid { rgb }) => {
+                    session.paint(index, *rgb).map_err(PaintFailure::Session)
+                }
+                None => session
+                    .paint(index, default_colour)
+                    .map_err(PaintFailure::Session),
+            };
+
+            if let Err(error) = result {
                 failure = Some(error);
                 break;
             }
         }
 
         match failure {
-            Some(error) => self.report(error),
+            Some(PaintFailure::Session(error)) => self.report(error),
+            Some(PaintFailure::Picture(message)) => self.note = message.into(),
             None => {
-                self.slots = vec![slot; key_count];
-                self.note = format!("All {key_count} keys painted {}.", slot_name(slot)).into();
+                let shown = painted.iter().filter(|slot| **slot == Slot::Image).count();
+                self.slots = painted;
+                self.note = if shown == 0 {
+                    format!("All {key_count} keys painted {}.", slot_name(slot)).into()
+                } else {
+                    format!("{shown} of {key_count} keys show a picture.").into()
+                };
             }
         }
     }
@@ -1226,6 +1279,7 @@ fn slot_name(slot: Slot) -> &'static str {
     match slot {
         Slot::White => "white",
         Slot::Red => "red",
+        Slot::Image => "an image",
         Slot::Off => "off",
     }
 }
@@ -1282,6 +1336,7 @@ fn key_tile(
     let (fill, ink, name) = match slot {
         Slot::White => (color(0xe4e4e7), color(0x18181b), "WHITE"),
         Slot::Red => (color(0xdc2626), color(0xffffff), "RED"),
+        Slot::Image => (color(0x3f3f46), color(0xfafafa), "IMAGE"),
         Slot::Off => (off_fill, off_ink, "OFF"),
     };
 

@@ -148,6 +148,19 @@ impl DeckSession {
         Ok(())
     }
 
+    /// Paints one key with an image that is already encoded.
+    ///
+    /// The bytes are the renderer's answer, not this session's: turning a
+    /// picture into a payload needs the asset library and a cache, and neither
+    /// belongs to a deck connection. What this method does own is the part that
+    /// must not be duplicated — checking the key exists, and letting the deck's
+    /// own typed refusal through when the payload is bigger than it accepts.
+    pub fn paint_encoded(&mut self, index: usize, jpeg: &[u8]) -> Result<(), SessionError> {
+        let key = self.existing_key(index)?;
+        self.deck.set_key_image(key, jpeg)?;
+        Ok(())
+    }
+
     /// Blanks one key.
     pub fn clear_key(&mut self, index: usize) -> Result<(), SessionError> {
         let key = self.existing_key(index)?;
@@ -396,6 +409,57 @@ mod tests {
         assert_eq!(*key, KeyId::new(0));
         assert!(jpeg.len() <= session.image_spec().max_bytes());
         assert_eq!(jpeg_size(jpeg), (72, 72));
+    }
+
+    #[test]
+    fn an_already_encoded_tile_reaches_the_deck_unchanged() {
+        let (mut session, calls, _) = session();
+        let jpeg = encode_tile(session.image_spec(), [0x00, 0x80, 0xFF]).expect("a tile");
+
+        session.paint_encoded(2, &jpeg).expect("key 2 exists");
+
+        let calls = calls.borrow();
+        assert_eq!(
+            calls.as_slice(),
+            &[Call::Paint(KeyId::new(2), jpeg)],
+            "the renderer's bytes must not be re-encoded on the way out"
+        );
+    }
+
+    #[test]
+    fn an_encoded_tile_for_a_missing_key_never_reaches_the_deck() {
+        let (mut session, calls, _) = session();
+        let jpeg = encode_tile(session.image_spec(), [0xFF, 0xFF, 0xFF]).expect("a tile");
+
+        let error = session.paint_encoded(9, &jpeg).expect_err("no key 9");
+
+        assert_eq!(
+            error.to_string(),
+            "key 9 does not exist on this deck (it has 6 keys)"
+        );
+        assert!(calls.borrow().is_empty(), "nothing must reach the deck");
+    }
+
+    #[test]
+    fn a_payload_over_the_decks_limit_keeps_the_decks_own_refusal() {
+        let (mut session, calls, _) = session();
+        let oversized = vec![0u8; 4_097];
+
+        let error = session
+            .paint_encoded(0, &oversized)
+            .expect_err("the deck accepts 4 KiB");
+
+        assert!(
+            matches!(
+                error,
+                SessionError::Deck(DeckError::ImageTooLarge {
+                    bytes: 4_097,
+                    max_bytes: 4_096
+                })
+            ),
+            "expected the deck's own size refusal, got {error}"
+        );
+        assert_eq!(calls.borrow().len(), 1, "the deck was asked, and refused");
     }
 
     #[test]
