@@ -194,15 +194,15 @@ pub fn preview_frame(
     })?;
     let canvas = fit(spec, &decoded.to_rgb8());
 
-    // Frame::new expects RGBA data. For display with GPUI, the frame is
-    // automatically converted. No manual BGRA swap needed - the img() function
-    // handles format requirements.
+    // Frame::new expects RGBA data. For display with GPUI, the frame must be in
+    // BGRA format (the format the renderer uses). We need to swap R and B channels.
     let frame = Frame::new(RgbaImage::from_fn(
         u32::from(width),
         u32::from(height),
         |x, y| {
             let [r, g, b] = canvas.get_pixel(x, y).0;
-            Rgba([r, g, b, 0xFF])
+            // Swap R and B for BGRA format
+            Rgba([b, g, r, 0xFF])
         },
     ));
     Ok(frame)
@@ -474,20 +474,21 @@ mod tests {
     }
 
     #[test]
-    fn a_preview_is_the_fitted_tile_in_rgba() {
-        // 4:1 red, so it fills the width, leaves black bands, and must come
-        // out RGB-ordered because we're building the preview for RenderImage.
+    fn a_preview_is_the_fitted_tile_in_bgra() {
+        // 4:1 red, so it fills the width, leaves black bands.
+        // Red (0xFF, 0x00, 0x00) RGB becomes (0x00, 0x00, 0xFF) in BGRA.
         let source = png(144, 36, |_, _| [0xFF, 0x00, 0x00]);
         let frame = preview_frame(spec(), &name(), &source).expect("a preview");
 
         assert_eq!(frame.buffer().dimensions(), (72, 72));
         let band = frame.buffer().get_pixel(36, 0).0;
-        assert_eq!(band, [0, 0, 0, 255], "the band above the picture is black");
+        assert_eq!(band, [0, 0, 0, 255], "the band above the picture should be black");
         let picture = frame.buffer().get_pixel(36, 36).0;
+        // After BGRA swap: red (R=0xFF, G=0, B=0) becomes blue (B=0xFF, G=0, R=0)
         assert_eq!(
             picture,
-            [0xFF, 0x00, 0x00, 0xFF],
-            "red should stay red, not swapped to blue"
+            [0, 0, 0xFF, 0xFF],
+            "red should become blue in BGRA format (swapped R and B)"
         );
     }
 

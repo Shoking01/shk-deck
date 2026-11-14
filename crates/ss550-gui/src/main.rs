@@ -2037,12 +2037,9 @@ impl Render for Controller {
         // There is no file dialog: the user drops a picture in the folder the
         // app owns and presses REFRESH. The preview is the fitted tile, so what
         // they see here is what the deck would show, black bands included.
-        let max_visible_assets = 10usize;
-        
         let artwork_rows: Vec<AnyElement> = self
             .library
             .iter()
-            .take(max_visible_assets)
             .map(|asset| {
                 let selected = self.selected_asset.as_ref() == Some(&asset.name);
                 let id = SharedString::from(format!("asset-{}", asset.name));
@@ -2065,26 +2062,6 @@ impl Render for Controller {
                     .into_any_element()
             })
             .collect();
-        
-        let more_button = if self.library.len() > max_visible_assets {
-            let remaining = self.library.len() - max_visible_assets;
-            Some(
-                Button::new("more-assets")
-                    .secondary()
-                    .label(format!("+ {} more...", remaining))
-                    .on_click(cx.listener(|this: &mut Self, _: &ClickEvent, _, cx| {
-                        this.note = format!(
-                            "Total: {} images in library. Scroll or resize window to see more.",
-                            this.library.len()
-                        )
-                        .into();
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            )
-        } else {
-            None
-        };
 
         let preview_block: AnyElement = match &self.preview {
             Some((name, image)) => {
@@ -2178,20 +2155,12 @@ impl Render for Controller {
                             .flex_1()
                             .child(hint(format!("{} PICTURES", self.library.len()), cx))
                             .child(
-                                if let Some(more) = more_button {
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(4.))
-                                        .children(artwork_rows)
-                                        .child(more)
-                                } else {
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(4.))
-                                        .children(artwork_rows)
-                                }.into_any_element(),
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.))
+                                    .max_h(px(200.))  // Limit rows height
+                                    .children(artwork_rows)
                             ),
                     ),
             )
@@ -2536,7 +2505,6 @@ impl Render for Controller {
                             .flex()
                             .flex_col()
                             .gap(px(16.))
-                            .w(px(380.))
                             .child(bindings_panel)
                             .child(artwork_panel)
                             .child(background_section),
