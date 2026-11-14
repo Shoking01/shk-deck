@@ -43,8 +43,8 @@ que el modelo tenga hueco para imágenes generadas (reloj) sin reescribirse.
 | T1 | `ss550-engine::assets` — `AssetName` validado, `AssetLibrary` (listar, importar, resolver) | S2, S6 | inline | hecho — `d50f404` |
 | T2 | `ss550-engine::appearance` — `Appearance`, campo en `Profile`, migración desde `colors` | S1, S5 | inline | hecho — `c592cd4` |
 | T3 | GUI — pipeline de render: decodificar, ajustar, escalera de calidad, caché | S3, S4 | inline | hecho — `4be2ed9` |
-| T4 | GUI — selector de imagen por tecla, vista previa, abrir carpeta, refrescar biblioteca | S7 | inline | hecho — `050b65b` |
-| T5 | Docs — README, CHANGELOG, PLAN | S1-S8 | inline | pendiente |
+| T4 | GUI — selector de imagen por tecla, vista previa, abrir carpeta, refrescar biblioteca | S7 | inline | hecho — `e73bcd7` |
+| T5 | Docs — README, CHANGELOG, PLAN | S1-S8 | inline | hecho — `fb5dd82` |
 
 ## Log
 
@@ -74,3 +74,8 @@ ciclo guardar/cargar con una imagen.
 - Test para `set_appearance` (ya existía), tests nuevos para render
 
 Falta: ajustar el número de líneas del commit T4 para que no sea demasiado grande.
+
+**L4** (2026-11-14): T4 y T5 entregadas. Todos los tests pasan (46 GUI + 80 motor).
+Commits:
+- `e73bcd7` — Picker y `set_appearance()`
+- `fb5dd82` — Docs actualizados (README, CHANGELOG)

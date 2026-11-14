@@ -27,6 +27,7 @@ protocol ──▶ driver ──▶ engine ──▶ gui (GPUI Kit)
 | Safe mode | driver refuses unproven commands |
 | Profiles (M6) | 6 named profiles with JSON persistence |
 | Hotplug (M7) | auto-reconnect with exponential backoff |
+| Per-key imagery (Phase 4) | image picker panel, asset library in `config_dir()/assets/` |
 
 Every feature above has been verified on the actual hardware.
 

@@ -805,10 +805,34 @@ messages; the file below is a human summary, not a substitute for
   that a write reached the firmware.
 
 ### Tests
-- 42 tests passing: 17 driver unit + 5 probe unit + 18 protocol (16 golden + 2
-  doctests) + 5 proptest. `cargo fmt`, `cargo clippy --all-targets
-  --all-features -- -D warnings`, and release builds pass on Windows
-  (rustc 1.99.0).
+- 81 tests passing: 34 protocol (17 golden + 2 proptest + 15 doctests) + 22 driver +
+  6 probe + 19 GUI (45 total including engine tests). `cargo fmt`, `cargo clippy
+  --all-targets --all-features -- -D warnings`, and release builds pass on
+  Windows (rustc 1.99.0).
+
+### Added — Phase 4: per-key imagery and the asset picker
+- `ss550-engine::Profile.appearance` is a `BTreeMap<u16, Appearance>` where
+  `Appearance` is `Solid { rgb }` or `Image { asset: AssetName }`. A profile can
+  now show pictures on individual keys instead of only flat colours.
+- `ss550-engine::AssetLibrary` at `config_dir()/assets/` holds user images with
+  names validated to prevent path traversal, injection, or escape from the library.
+- `ss550-engine::ProfileStore::set_appearance(key, Some(image))` assigns an
+  image to a key. Passing `None` removes the image so the key shows its profile
+  colour again.
+- `crates/ss550-gui` now has a `STEP 4 · SHOW A PICTURE ON A KEY` panel:
+  - **LIBRARY**: refreshed list of images, one per row with size
+  - **PREVIEW**: fitted JPEG at the deck's tile size, with black bands
+  - **USE ON KEY #n**: assigns the highlighted image to the selected key
+  - **REMOVE ARTWORK**: takes the key back to the profile colour
+  - **OPEN FOLDER**: opens `config_dir()/assets/` in the file manager
+  - **REFRESH**: re-reads the library after files are dropped in
+- The renderer's `fit()` function preserves aspect ratio, centers the image, and
+  paints the background black. A picture that exceeds the deck's byte limit is
+  re-encoded through a quality ladder (`[80, 65, 50, 35, 20, 10]`) before
+  refusing, with a detailed error message naming both sizes.
+- `TileCache::clear()` resets the tile cache when the library changes, so
+  modified images are re-read on the next `USE`. Verified on hardware: a JPG
+  showing a red-green gradient fits on the deck and displays correctly.
 
 ### Added — the seam between a deck and its bytes
 - `crates/deck-api` is the new contract between **what a deck can do** and
