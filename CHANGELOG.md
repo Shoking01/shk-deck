@@ -7,6 +7,36 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Added — six host-side profiles and a hotplug watcher
+- `ss550-engine::ProfileStore` keeps named profiles — `default`, `stream`,
+  `meetings`, `gaming`, `work`, `entertainment` — in
+  `config_dir()/profiles/<deck key>.json`, one file per deck. A profile carries
+  its bindings and per-key colours, and the file is written on change and read
+  back on start, so the set survives a restart.
+- The window shows the active profile in the header and cycles it on click.
+  Switching applies the profile's bindings and colours to the deck immediately;
+  with no deck connected it says the bindings will apply on connect instead of
+  pretending they did.
+- The window polls `ss550_driver::is_deck_present()` once a second, so an
+  unplugged deck is noticed without the driver growing a watcher and without
+  the engine depending on the driver. An unexpected disconnect drops the
+  session, clears everything sized by the deck, and schedules a reconnect.
+- The reconnect delay doubles from 2 s to a 60 s ceiling and resets on a
+  successful connect, so a deck that stays away costs one attempt a minute
+  instead of a continuous poll of the USB bus.
+
+### Fixed — the retry backoff stopped after the first attempt
+- The delay was computed once, when the disconnect was noticed. Every later
+  failure left `reconnect_at` in the past, so `maintain()` asked for a new
+  attempt on every tick: the app polled the bus continuously while the deck was
+  unplugged, the 60 s ceiling was unreachable, and the attempt counter grew
+  without bound. `schedule_retry()` now counts one failure and postpones the
+  next attempt on both paths, `retry_delay()` clamps the doubling, and
+  `request_attempt()` only queues an attempt instead of counting one.
+- The GUI workspace is its own cargo root and the earlier `cargo fmt --all`
+  never reached it, so the `fmt` CI job failed on `main`. The file is formatted
+  now, and the dead `request_attempt_if_due()`/`last_attempt` pair is gone.
+
 ### Changed — the window follows whatever deck answers
 - `crates/ss550-gui` no longer asserts which deck it is talking to. The grid
   comes from `Deck::geometry`, each key image is encoded at `Deck::image_spec`'s
