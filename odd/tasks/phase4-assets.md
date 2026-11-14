@@ -79,3 +79,10 @@ Falta: ajustar el número de líneas del commit T4 para que no sea demasiado gra
 Commits:
 - `e73bcd7` — Picker y `set_appearance()`
 - `fb5dd82` — Docs actualizados (README, CHANGELOG)
+
+**L5** (2026-11-14): UI fixes para el picker.
+- `preview_frame()` ahora devuelve Frame con datos RGBA (no BGRA), resolviendo el
+  problema de colores invertidos (rojo/azul intercambiados)
+- `artwork_rows` tiene `max_h(200px)` para evitar overflow cuando hay muchas imágenes
+- `preview_block` usa `overflow_hidden()` para recortar limpiamente la imagen
+- Commit `75ddaec`: layout overflow y orden RGBA corregidos

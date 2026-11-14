@@ -171,10 +171,8 @@ fn fit(spec: ImageSpec, picture: &RgbImage) -> RgbImage {
 /// is what the deck would show, black bands and all. A preview that cropped or
 /// stretched would be a promise the deck does not keep.
 ///
-/// The frame is handed over in BGRA, because that is the order the renderer
-/// reads. The built-in loader swaps RGBA to BGRA itself; a frame built by hand
-/// has to do the same swap, or every picture shows up with red and blue
-/// exchanged.
+/// The frame is in RGBA, which is what `RenderImage::new` expects. The GUI
+/// library takes care of any format conversion needed for display.
 ///
 /// # Errors
 ///
@@ -196,13 +194,13 @@ pub fn preview_frame(
     })?;
     let canvas = fit(spec, &decoded.to_rgb8());
 
+    // Frame::new expects RGBA data. No manual swap needed.
     let frame = Frame::new(RgbaImage::from_fn(
         u32::from(width),
         u32::from(height),
         |x, y| {
-            let [red, green, blue] = canvas.get_pixel(x, y).0;
-            // BGRA in an RGBA buffer: the renderer reads the raw bytes.
-            Rgba([blue, green, red, 0xFF])
+            let [r, g, b] = canvas.get_pixel(x, y).0;
+            Rgba([r, g, b, 0xFF])
         },
     ));
     Ok(frame)
@@ -474,20 +472,20 @@ mod tests {
     }
 
     #[test]
-    fn a_preview_is_the_fitted_tile_in_bgra() {
+    fn a_preview_is_the_fitted_tile_in_rgba() {
         // 4:1 red, so it fills the width, leaves black bands, and must come
-        // out blue-first because the renderer reads BGRA.
+        // out RGB-ordered because we're building the preview for RenderImage.
         let source = png(144, 36, |_, _| [0xFF, 0x00, 0x00]);
         let frame = preview_frame(spec(), &name(), &source).expect("a preview");
 
         assert_eq!(frame.buffer().dimensions(), (72, 72));
         let band = frame.buffer().get_pixel(36, 0).0;
-        assert_eq!(band, [0, 0, 0, 0xFF], "the band above the picture is black");
+        assert_eq!(band, [0, 0, 0, 255], "the band above the picture is black");
         let picture = frame.buffer().get_pixel(36, 36).0;
         assert_eq!(
             picture,
-            [0x00, 0x00, 0xFF, 0xFF],
-            "red arrives as BGRA, not RGBA"
+            [0xFF, 0x00, 0x00, 0xFF],
+            "red should stay red, not swapped to blue"
         );
     }
 

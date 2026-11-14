@@ -2064,21 +2064,25 @@ impl Render for Controller {
             .collect();
 
         let preview_block: AnyElement = match &self.preview {
-            Some((name, image)) => div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .w(px(144.))
-                        .h(px(144.))
-                        .rounded(px(8.))
-                        .overflow_hidden()
-                        .bg(color(0x000000))
-                        .child(gpui_kit::img(image.clone()).w(px(144.)).h(px(144.))),
-                )
-                .child(hint(format!("{name} · fitted to the deck's tile"), cx))
-                .into_any_element(),
+            Some((name, image)) => {
+                // The rendered image inside a container with proper bounds
+                // img() accepts Arc<RenderImage> and draws it directly
+                let container = div()
+                    .w(px(144.))
+                    .h(px(144.))
+                    .rounded(px(8.))
+                    .overflow_hidden()
+                    .bg(color(0x000000))
+                    .child(gpui_kit::img(image.clone()).w(px(144.)).h(px(144.)));
+
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(container)
+                    .child(hint(format!("{name} · fitted to the deck's tile"), cx))
+                    .into_any_element()
+            }
             None => hint("Pick a picture to see what the deck will show.", cx).into_any_element(),
         };
 
@@ -2150,7 +2154,14 @@ impl Render for Controller {
                             .gap(px(6.))
                             .flex_1()
                             .child(hint(format!("{} PICTURES", self.library.len()), cx))
-                            .child(div().flex().flex_col().gap(px(4.)).children(artwork_rows)),
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.))
+                                    .max_h(px(200.))  // Limit rows height
+                                    .children(artwork_rows)
+                            ),
                     ),
             )
             .child(
