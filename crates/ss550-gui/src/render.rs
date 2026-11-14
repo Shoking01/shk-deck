@@ -192,19 +192,21 @@ pub fn preview_frame(
         name: name.to_string(),
         source,
     })?;
-    let canvas = fit(spec, &decoded.to_rgb8());
+    let fitted = fit(spec, &decoded.to_rgb8());
 
     // Frame::new expects RGBA data. For display with GPUI, the frame must be in
-    // BGRA format (the format the renderer uses). We need to swap R and B channels.
-    let frame = Frame::new(RgbaImage::from_fn(
-        u32::from(width),
-        u32::from(height),
-        |x, y| {
-            let [r, g, b] = canvas.get_pixel(x, y).0;
+    // BGRA format (the format the renderer uses). We need to swap R and B channels
+    // to avoid inverted colors (red↔blue) when displayed.
+    let (w, h) = fitted.dimensions();
+    let mut rgba = RgbaImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let pixel = fitted.get_pixel(x, y);
             // Swap R and B for BGRA format
-            Rgba([b, g, r, 0xFF])
-        },
-    ));
+            rgba.put_pixel(x, y, Rgba([pixel[2], pixel[1], pixel[0], 0xFF]));
+        }
+    }
+    let frame = Frame::new(rgba);
     Ok(frame)
 }
 
