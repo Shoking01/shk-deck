@@ -18,6 +18,11 @@ license = "MIT OR Apache-2.0"
 unsafe_code = "allow"
 
 [dependencies]
+# The engine owns the `KeySender` trait and the `KeyCombo` it takes; this crate
+# implements the trait with the platform call. The trait is the seam: the
+# engine decides *when* a combination goes out and never *how*, and the crate
+# that is allowed `unsafe` is the one that knows how.
+ss550-engine = { path = "../ss550-engine" }
 
 [target.'cfg(windows)'.dependencies]
 # The notification-area icon is created by `tray-icon`'s Win32 backend, which
@@ -34,6 +39,8 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
+    # `SendInput`, and the `INPUT` record it takes: the keystroke sender.
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

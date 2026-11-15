@@ -4,10 +4,16 @@
 //! the way, the deck stays awake, and the bound keys keep working while the
 //! window is hidden. This crate provides that behaviour.
 //!
+//! It also owns the platform's keystroke sender, [`SystemKeySender`], which
+//! implements the engine's `KeySender`: the engine decides *when* a combination
+//! goes out, and this crate is the only one allowed to make the call that sends
+//! it.
+//!
 //! It is also the **one** place in the project that is allowed to call
 //! `unsafe` code: it owns the Win32 calls that hide and restore the native
-//! window, and the icon that lives in the notification area. Every other
-//! crate keeps `#![deny(unsafe_code)]`.
+//! window, the icon that lives in the notification area, and the `SendInput`
+//! call that delivers a keystroke. Every other crate keeps
+//! `#![deny(unsafe_code)]`.
 //!
 //! # Example
 //!
@@ -26,16 +32,18 @@
 //! # Ok::<(), ss550_tray::TrayError>(())
 //! ```
 
-// The Win32 calls that hide a window and run the icon's message loop live in
-// this crate, and nowhere else in the project.
+// The Win32 calls that hide a window, run the icon's message loop, and deliver
+// a keystroke live in this crate, and nowhere else in the project.
 #![allow(unsafe_code)]
 
 pub mod autostart;
 pub mod icon;
 pub mod install;
+mod keysend;
 mod tray;
 mod window;
 
+pub use keysend::SystemKeySender;
 pub use tray::{TrayCommand, TrayHost};
 pub use window::{hide_window, show_window, window_is_visible};
 
