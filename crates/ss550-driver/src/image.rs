@@ -6,9 +6,18 @@ use std::io::Cursor;
 /// Maximum JPEG payload size for a single button (9000 bytes per the app docs).
 pub const MAX_JPEG_SIZE: usize = 9_000;
 
-/// Native button resolution.
-pub const WIDTH: u16 = 100;
-pub const HEIGHT: u16 = 100;
+/// The panel's own pixel size, which is what a key image has to cover.
+///
+/// The community reference for this family sizes button images at 100×100 and
+/// sends exactly that. On the deck in front of this project a 100×100 payload
+/// does not reach the panel's top and left edges: a measured 7.5 % of the panel
+/// on each keeps whatever the key showed before, which is invisible on a solid
+/// colour and a visible frame around a picture. The panel measures 108 pixels
+/// across (100 / (1 − 0.075)), and that is what the encoder is asked for, so the
+/// picture fills the key the deck actually has.
+pub const WIDTH: u16 = 108;
+/// See [`WIDTH`].
+pub const HEIGHT: u16 = 108;
 
 /// Rotation options for button images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
