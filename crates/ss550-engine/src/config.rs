@@ -1,7 +1,7 @@
 //! Where the app keeps its files.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The environment variable that overrides the configuration directory.
 ///
@@ -25,6 +25,9 @@ const BINDINGS_FILE: &str = "bindings.json";
 
 /// The folder the per-deck bindings live in.
 const BINDINGS_DIR: &str = "bindings";
+
+/// The folder each deck's profiles live in.
+const PROFILES_DIR: &str = "profiles";
 
 /// The configuration directory for this app.
 pub fn config_dir() -> PathBuf {
@@ -63,6 +66,39 @@ pub fn bindings_path() -> PathBuf {
 pub fn bindings_path_for(deck_key: &str) -> PathBuf {
     config_dir()
         .join(BINDINGS_DIR)
+        .join(format!("{}.json", file_stem(deck_key)))
+}
+
+/// Where one deck's profiles live.
+///
+/// The name is built the same way the bindings file's is, and for a better
+/// reason than tidiness: a deck key contains `:` and `·`, and a `:` in a Windows
+/// path is not a character, it is a separator between a file and an alternate
+/// data stream. Writing `profiles/shape: 15 keys….json` therefore created a file
+/// called `shape` and hid the profiles inside one of its streams, where the next
+/// key change could not find them.
+///
+/// # Example
+///
+/// ```
+/// let first = ss550_engine::config::profiles_path_for("deck one");
+/// let second = ss550_engine::config::profiles_path_for("deck two");
+/// assert_ne!(first, second);
+/// assert_eq!(
+///     first.parent().and_then(|path| path.file_name()),
+///     Some(std::ffi::OsStr::new("profiles"))
+/// );
+/// ```
+pub fn profiles_path_for(deck_key: &str) -> PathBuf {
+    profiles_path_in(&config_dir(), deck_key)
+}
+
+/// [`profiles_path_for`], inside an explicit root.
+///
+/// The store takes the configuration folder as an argument so a test can point
+/// it at a scratch folder; this keeps the file naming in one place anyway.
+pub(crate) fn profiles_path_in(root: &Path, deck_key: &str) -> PathBuf {
+    root.join(PROFILES_DIR)
         .join(format!("{}.json", file_stem(deck_key)))
 }
 

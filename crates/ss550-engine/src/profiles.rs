@@ -254,7 +254,7 @@ impl ProfileStore {
 
     /// Saves this store to disk, keyed by the deck's slug.
     pub fn save(&self, deck_key: &str, config_dir: &Path) -> Result<(), String> {
-        let path = config_dir.join("profiles").join(format!("{deck_key}.json"));
+        let path = crate::config::profiles_path_in(config_dir, deck_key);
         self._save_to(&path)
     }
 
@@ -270,7 +270,7 @@ impl ProfileStore {
 
     /// Loads from disk, keyed by the deck's slug.
     pub fn load(deck_key: &str, config_dir: &Path) -> Result<Self, String> {
-        let path = config_dir.join("profiles").join(format!("{deck_key}.json"));
+        let path = crate::config::profiles_path_in(config_dir, deck_key);
         Self::_load_from(&path)
     }
 

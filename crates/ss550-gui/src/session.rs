@@ -83,8 +83,20 @@ impl DeckSession {
             .filter(|text| !text.is_empty());
 
         let shape = shape_label(geometry, image_spec);
-        let label = identity.clone().unwrap_or_else(|| shape.clone());
-        let key = identity.unwrap_or_else(|| format!("shape: {shape}"));
+        let label = identity.clone().unwrap_or(shape);
+        // The key says where this deck's data lives. It deliberately leaves the
+        // image size out: that is a property of the firmware, it can change
+        // under the app (and did — the panel turned out to be 108 px, not the
+        // 100 the reference library sends), and a key that moves with it
+        // orphans every binding and every picture the user made. The rows and
+        // columns are the deck.
+        let key = identity.unwrap_or_else(|| {
+            format!(
+                "shape: {} keys · {} columns",
+                geometry.key_count(),
+                geometry.columns()
+            )
+        });
 
         Self {
             deck: DeckHandle::new(deck),
@@ -102,7 +114,11 @@ impl DeckSession {
         &self.label
     }
 
-    /// The stable name of this deck's bindings file.
+    /// The stable name of this deck's data: the bindings file and the profiles.
+    ///
+    /// It is the deck's identity when it has one, and its key count and columns
+    /// when it does not. Nothing about the image size: two firmware revisions of
+    /// the same deck are the same deck.
     pub fn key(&self) -> &str {
         &self.key
     }
@@ -577,7 +593,7 @@ mod tests {
         let session = DeckSession::new(Box::new(Anonymous(SixKeyDeck::new())));
 
         assert_eq!(session.label(), "6 keys · 3 columns · 100x100 images");
-        assert_eq!(session.key(), "shape: 6 keys · 3 columns · 100x100 images");
+        assert_eq!(session.key(), "shape: 6 keys · 3 columns");
     }
 
     /// The `(width, height)` a JPEG declares in its frame header.
