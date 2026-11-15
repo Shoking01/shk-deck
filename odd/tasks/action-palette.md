@@ -44,7 +44,7 @@ crates/ss550-tray/Cargo.toml`.
 | ID | Qué | Specs | Ruta | Estado |
 | --- | --- | --- | --- | --- |
 | T1 | Clic en la tecla = seleccionar; colores pasan a la tarjeta de la tecla | S1 | inline | hecho |
-| T2 | `Action::Keys` en `ss550-engine`: modelo, validación, resumen, JSON | S4 | delegado | pendiente |
+| T2 | `Action::Keys` en `ss550-engine`: modelo, validación, resumen, JSON | S4 | delegado | hecho — pendiente de commit |
 | T3 | Envío de pulsaciones (Win32 `SendInput`) en `ss550-tray` | S4, S8 | delegado | pendiente |
 | T4 | Paleta lateral arrastrable + soltar sobre tecla + editor por tecla | S2, S3 | delegado | pendiente |
 | T5 | Icono del ejecutable como imagen de la tecla | S5, S7 | delegado | pendiente |
@@ -67,6 +67,14 @@ crates/ss550-tray/Cargo.toml`.
 toolbar; la tarjeta de la tecla seleccionada es ahora el único sitio donde se
 elige color, y solo cambia esa tecla. El subtítulo de la página dejó de decir
 "click a key to paint it".
+
+**L3** (2026-11-15): T2 entregada. `Action::Keys { keys: KeyCombo }` en el
+motor: `KeyCombo` solo se construye por `parse`/`FromStr`/`Deserialize`, así que
+una combinación inválida no puede existir; el JSON guarda `"ctrl+shift+m"`; el
+runner recibe el emisor por inyección (`KeySender`) y sin emisor devuelve
+`NeedsKeySender` de forma síncrona, nunca un éxito que no ocurrió. 385 pruebas
+del workspace en verde; el GUI queda roto en un único `match` hasta la unidad
+siguiente.
 
 **Nota de diagnóstico (2026-11-15):** el borde de arriba y la izquierda del que
 se venía hablando no era centrado ni codificado: el panel mide 108 px, no los

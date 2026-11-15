@@ -14,7 +14,7 @@ use gpui_kit::{
 use std::sync::Arc;
 
 use super::{
-    activate, body, card, color, micro_label, muted, one_line, Tokens, CARD_PAD, FONT_APP,
+    activate, body, card, color, micro_label, muted, one_line, palette, Tokens, CARD_PAD, FONT_APP,
     FONT_CAPTION, FONT_MICRO, FONT_SUB, FONT_TITLE, RADIUS_MD, RADIUS_SM,
 };
 use crate::{Controller, Paint, Slot};
@@ -120,6 +120,8 @@ pub(crate) fn slot_colours(slot: Slot, tokens: Tokens) -> (Hsla, Hsla) {
 struct Cell {
     /// The key's index in the deck's own order.
     index: usize,
+    /// The binding number this key addresses, when the deck has that key.
+    number: Option<ss550_engine::KeyNumber>,
     /// What the tile draws.
     face: Face,
     /// The fitted picture, when the face is a picture.
@@ -351,6 +353,9 @@ fn grid(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
     // the rows are being built. No picture is decoded here: the cache was
     // filled when the deck, the profile or the library last changed.
     let mut rows: Vec<Vec<Cell>> = Vec::new();
+    // A drop lands on a key, and a key belongs to a deck: with no session there
+    // is nothing to bind, so no tile accepts a palette entry.
+    let accepts = controller.session.is_some();
     let columns = match controller.session.as_ref() {
         Some(session) => {
             let profile = controller.profile_store.active();
@@ -370,6 +375,7 @@ fn grid(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
                     let slot = controller.slots.get(index).copied().unwrap_or(Slot::Off);
                     cells.push(Cell {
                         index,
+                        number,
                         face: resolved_face(appearance, slot, picture.is_some()),
                         picture,
                         pressed: controller.pressed.get(index).copied().unwrap_or(false),
@@ -390,7 +396,7 @@ fn grid(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
         .map(|cells| {
             let tiles: Vec<AnyElement> = cells
                 .into_iter()
-                .map(|cell| tile(cell, size, tokens, cx))
+                .map(|cell| tile(cell, size, accepts, tokens, cx))
                 .collect();
             div()
                 .flex()
@@ -411,8 +417,19 @@ fn grid(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
 }
 
 /// One square key: its number, what it shows, and what pressing it runs.
-fn tile(cell: Cell, size: f32, tokens: Tokens, cx: &mut Context<Controller>) -> AnyElement {
+///
+/// The tile is also the palette's drop target. `can_drop` is what makes the
+/// "no deck" case honest: without a session there is no key to bind, so the
+/// tile neither highlights nor accepts, and the palette says why.
+fn tile(
+    cell: Cell,
+    size: f32,
+    accepts: bool,
+    tokens: Tokens,
+    cx: &mut Context<Controller>,
+) -> AnyElement {
     let index = cell.index;
+    let target = cell.number;
     let binding = cell
         .binding
         .clone()
@@ -529,6 +546,22 @@ fn tile(cell: Cell, size: f32, tokens: Tokens, cx: &mut Context<Controller>) -> 
         }
         cx.notify();
     }))
+    // The palette's half of the drop: `drag_over` is the look while a
+    // compatible drag is over the tile, and it is only applied when `can_drop`
+    // agrees, so a tile that cannot take the entry never pretends it can.
+    .can_drop(move |_, _, _| accepts && target.is_some())
+    .drag_over::<palette::PaletteDrag>(move |style, _, _, _| {
+        style.bg(tokens.accent_tint).border_color(tokens.accent)
+    })
+    .on_drop(
+        cx.listener(move |this, drag: &palette::PaletteDrag, window, cx| {
+            let Some(number) = target else {
+                return;
+            };
+            this.drop_palette_entry(number, drag, window, cx);
+            cx.notify();
+        }),
+    )
     .into_any_element()
 }
 

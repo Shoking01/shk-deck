@@ -127,6 +127,22 @@ enum DraftKind {
     Launch,
     /// Open a URL.
     OpenUrl,
+    /// Send a key combination to the focused window.
+    Keys,
+}
+
+impl DraftKind {
+    /// The word the palette and the status line use for this kind.
+    ///
+    /// One name for one thing: the editor's segments, the palette rows and the
+    /// sentence a drop writes all read from here.
+    fn label(self) -> &'static str {
+        match self {
+            DraftKind::Launch => "run an app",
+            DraftKind::OpenUrl => "open a URL",
+            DraftKind::Keys => "send a keystroke",
+        }
+    }
 }
 
 /// Connection state shown in the header pill.
@@ -278,6 +294,12 @@ struct Controller {
     program_input: Entity<InputState>,
     args_input: Entity<TextareaState>,
     url_input: Entity<InputState>,
+    /// The keystroke the editor is editing, as the user typed it.
+    ///
+    /// It holds text, not a `KeyCombo`: a half-typed combination has to stay in
+    /// the field, and the engine's refusal is what the note shows until it
+    /// parses.
+    keys_input: Entity<InputState>,
     /// The notification-area icon, when the platform has one.
     tray: Option<TrayHost>,
     /// Why the notification-area icon is not there, when it is missing.
@@ -365,6 +387,15 @@ impl Controller {
         });
         let url_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://twitch.tv/dashboard"));
+        // The placeholder is a combination the engine accepts, so the shape of
+        // the vocabulary is visible before the first keystroke.
+        let keys_input = cx.new(|cx| InputState::new(window, cx).placeholder("ctrl+shift+m"));
+
+        // The runner delivers keystrokes through the platform sender. It is
+        // built here, before the runner, because the runner owns the only
+        // handle to it: without one, a `Keys` action is refused rather than
+        // silently accepted.
+        let key_sender: Arc<dyn ss550_engine::KeySender> = Arc::new(ss550_tray::SystemKeySender);
 
         // The tray icon is what keeps the controller alive with no window on
         // screen. Without it the app still runs, but only as a window.
@@ -466,12 +497,13 @@ impl Controller {
             reconnect_at: Instant::now(),
             store,
             store_path,
-            runner: ActionRunner::new(),
+            runner: ActionRunner::with_key_sender(key_sender),
             selected_key: KeyNumber::default(),
             draft: DraftKind::Launch,
             program_input,
             args_input,
             url_input,
+            keys_input,
             tray,
             tray_error,
             native,
@@ -564,7 +596,7 @@ impl Controller {
         let key_count = session.key_count();
 
         let path = ss550_engine::bindings_path_for(session.key());
-        let (store, note) = self.load_store(&path, &session);
+        let (store, mut note) = self.load_store(&path, &session);
 
         // Load profiles for this deck
         let deck_key = session.key().to_string();
@@ -596,6 +628,27 @@ impl Controller {
         // one. The picker keeps the files; the picture is rebuilt on the next
         // selection.
         self.preview = None;
+
+        // The profile is where this deck's bindings live now, and the per-deck
+        // file is where they lived before profiles existed. A profile that has
+        // never been saved carries none, so taking it as the truth would hide
+        // every binding the file still holds — which is exactly what happened
+        // the first time the deck key changed. The file is read once into the
+        // active profile, and written back through the normal save path.
+        if let Some(profile) = self.profile_store.active_profile() {
+            if profile.bindings.is_empty() && !self.store.is_empty() {
+                let bindings = self.store.clone();
+                if let Err(error) = self.profile_store.update_bindings(
+                    &bindings,
+                    &deck_key,
+                    &ss550_engine::config_dir(),
+                ) {
+                    note = Some(format!(
+                        "The bindings were read but not saved into the profile: {error}"
+                    ));
+                }
+            }
+        }
 
         // Apply the active profile on connect
         if let Some(profile) = self.profile_store.active_profile() {
@@ -1282,36 +1335,7 @@ impl Controller {
     /// Points the bindings panel at a key and loads what that key does.
     fn select_key(&mut self, number: KeyNumber, window: &mut Window, cx: &mut Context<Self>) {
         self.selected_key = number;
-
-        match self.store.get(number).cloned() {
-            Some(Action::Launch { program, args }) => {
-                self.draft = DraftKind::Launch;
-                self.program_input.update(cx, |state, cx| {
-                    state.set_value(program.display().to_string(), window, cx);
-                });
-                self.args_input
-                    .update(cx, |state, cx| state.set_value(args.join("\n"), window, cx));
-                self.url_input
-                    .update(cx, |state, cx| state.set_value(String::new(), window, cx));
-            }
-            Some(Action::OpenUrl { url }) => {
-                self.draft = DraftKind::OpenUrl;
-                self.url_input
-                    .update(cx, |state, cx| state.set_value(url, window, cx));
-                self.program_input
-                    .update(cx, |state, cx| state.set_value(String::new(), window, cx));
-                self.args_input
-                    .update(cx, |state, cx| state.set_value(String::new(), window, cx));
-            }
-            None => {
-                self.program_input
-                    .update(cx, |state, cx| state.set_value(String::new(), window, cx));
-                self.args_input
-                    .update(cx, |state, cx| state.set_value(String::new(), window, cx));
-                self.url_input
-                    .update(cx, |state, cx| state.set_value(String::new(), window, cx));
-            }
-        }
+        self.load_draft(number, window, cx);
 
         self.note = match self.store.get(number) {
             Some(action) => format!("Key #{} is bound to {}.", number.get(), action.describe()),
@@ -1321,6 +1345,115 @@ impl Controller {
             ),
         }
         .into();
+    }
+
+    /// Loads one key's binding into the editor fields.
+    ///
+    /// Split from [`Controller::select_key`] so a binding that was just changed
+    /// can refresh the editor without the note being overwritten: the sentence
+    /// that says what was saved is the one worth reading.
+    fn load_draft(&mut self, number: KeyNumber, window: &mut Window, cx: &mut Context<Self>) {
+        let binding = self.store.get(number).cloned();
+
+        // Every field is written on every load, empty included: a field left
+        // holding the previous key's value is how the wrong program gets saved
+        // onto the wrong key.
+        let (program, args, url, keys, kind) = match binding {
+            Some(Action::Launch { program, args }) => (
+                program.display().to_string(),
+                args.join("\n"),
+                String::new(),
+                String::new(),
+                DraftKind::Launch,
+            ),
+            Some(Action::OpenUrl { url }) => (
+                String::new(),
+                String::new(),
+                url,
+                String::new(),
+                DraftKind::OpenUrl,
+            ),
+            Some(Action::Keys { keys }) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                keys.to_string(),
+                DraftKind::Keys,
+            ),
+            None => (
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                self.draft,
+            ),
+        };
+
+        self.draft = kind;
+        self.program_input
+            .update(cx, |state, cx| state.set_value(program, window, cx));
+        self.args_input
+            .update(cx, |state, cx| state.set_value(args, window, cx));
+        self.url_input
+            .update(cx, |state, cx| state.set_value(url, window, cx));
+        self.keys_input
+            .update(cx, |state, cx| state.set_value(keys, window, cx));
+    }
+
+    /// Points the editor at one kind of action and puts the caret in its first
+    /// field.
+    ///
+    /// Nothing is written: this is what a palette template asks for, and the
+    /// key keeps whatever it had until SAVE BINDING is pressed.
+    fn open_editor(&mut self, kind: DraftKind, window: &mut Window, cx: &mut Context<Self>) {
+        self.draft = kind;
+        match kind {
+            DraftKind::Launch => self
+                .program_input
+                .update(cx, |state, cx| state.focus(window, cx)),
+            DraftKind::OpenUrl => self
+                .url_input
+                .update(cx, |state, cx| state.focus(window, cx)),
+            DraftKind::Keys => self
+                .keys_input
+                .update(cx, |state, cx| state.focus(window, cx)),
+        }
+    }
+
+    /// Acts on a palette entry dropped on a key.
+    ///
+    /// A template is an intent: it selects the key, opens the `Actions` page and
+    /// aims the editor at that kind, and the key is not touched until SAVE
+    /// BINDING. An action that is already bound has nothing left to ask for, so
+    /// it goes straight to the save path — the same one the editor uses, file
+    /// and deck included.
+    fn drop_palette_entry(
+        &mut self,
+        number: KeyNumber,
+        drag: &ui::palette::PaletteDrag,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match ui::palette::drop_plan(drag) {
+            ui::palette::DropPlan::OpenEditor(kind) => {
+                self.select_key(number, window, cx);
+                self.open_editor(kind, window, cx);
+                self.show_page(Page::Actions);
+                self.note = format!(
+                    "Key #{} — set it to {} and press SAVE BINDING.",
+                    number.get(),
+                    kind.label()
+                )
+                .into();
+            }
+            ui::palette::DropPlan::Assign(action) => {
+                self.selected_key = number;
+                self.bind_and_repaint(number, action);
+                // The editor follows the key that just changed, so the form and
+                // the tile never disagree about what the key runs.
+                self.load_draft(number, window, cx);
+            }
+        }
     }
 
     /// Binds the selected key to what the panel holds, and saves it.
@@ -1344,45 +1477,77 @@ impl Controller {
             DraftKind::OpenUrl => Action::OpenUrl {
                 url: self.url_input.read(cx).value().trim().to_string(),
             },
+            DraftKind::Keys => {
+                let text = self.keys_input.read(cx).value().trim().to_string();
+                match Action::keys(&text) {
+                    Ok(action) => action,
+                    Err(refusal) => {
+                        // The engine's own sentence, verbatim: it names the part
+                        // that is wrong, and the user is the one who can fix it.
+                        // Nothing is bound, so the key keeps what it had.
+                        self.note = refusal.to_string().into();
+                        return;
+                    }
+                }
+            }
         };
 
+        self.bind_and_repaint(self.selected_key, action);
+    }
+
+    /// Writes one binding and puts the key in step with it.
+    ///
+    /// This is the only path a binding takes: the editor and a drop both end
+    /// here, so a dropped action cannot skip the file or the profile. The order
+    /// matters — a deck that refused the repaint keeps its own sentence, which
+    /// names the picture that would not fit, instead of being overwritten by
+    /// "saved".
+    fn bind_and_repaint(&mut self, number: KeyNumber, action: Action) {
+        match self.save_action(number, action) {
+            Ok(saved) => {
+                if self.repaint_key(u16::from(number.get())) {
+                    self.note = saved.into();
+                }
+            }
+            Err(message) => self.note = message.into(),
+        }
+    }
+
+    /// Stores, profiles and saves one binding, returning the sentence that says
+    /// so — or the one that says why not.
+    fn save_action(&mut self, number: KeyNumber, action: Action) -> Result<String, String> {
         let Some(path) = self.store_path.clone() else {
-            self.note = "No deck is connected, so a binding has no deck to belong to yet.".into();
-            return;
+            return Err(
+                "No deck is connected, so a binding has no deck to belong to yet.".to_string(),
+            );
         };
 
-        match self.store.set(self.selected_key, action) {
+        self.store
+            .set(number, action)
+            .map_err(|error| format!("Key #{} was not bound: {error}", number.get()))?;
+
+        // Save the profile with updated bindings
+        if let Some(session) = self.session.as_ref() {
+            let deck_key = session.key().to_string();
+            let config_dir = ss550_engine::config_dir();
+            let _ = self
+                .profile_store
+                .update_bindings(&self.store, &deck_key, &config_dir);
+        }
+
+        match self.store.save(&path) {
             Ok(()) => {
-                // Save the profile with updated bindings
-                if let Some(session) = self.session.as_ref() {
-                    let deck_key = session.key().to_string();
-                    let config_dir = ss550_engine::config_dir();
-                    let _ = self
-                        .profile_store
-                        .update_bindings(&self.store, &deck_key, &config_dir);
-                }
-                match self.store.save(&path) {
-                    Ok(()) => {
-                        let summary = self
-                            .store
-                            .get(self.selected_key)
-                            .map(Action::summary)
-                            .unwrap_or_default();
-                        self.note =
-                            format!("Key #{} saved — {summary}.", self.selected_key.get()).into();
-                    }
-                    Err(err) => {
-                        self.note = format!(
-                            "Key #{} was bound, but the file was not saved: {err}",
-                            self.selected_key.get()
-                        )
-                        .into();
-                    }
-                }
+                let summary = self
+                    .store
+                    .get(number)
+                    .map(Action::summary)
+                    .unwrap_or_default();
+                Ok(format!("Key #{} saved — {summary}.", number.get()))
             }
-            Err(err) => {
-                self.note = format!("Key #{} was not bound: {err}", self.selected_key.get()).into();
-            }
+            Err(error) => Err(format!(
+                "Key #{} was bound, but the file was not saved: {error}",
+                number.get()
+            )),
         }
     }
 

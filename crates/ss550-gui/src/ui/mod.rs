@@ -16,6 +16,7 @@ use gpui_kit::{
 
 pub(crate) mod deck;
 pub(crate) mod page;
+pub(crate) mod palette;
 pub(crate) mod panels;
 pub(crate) mod shell;
 

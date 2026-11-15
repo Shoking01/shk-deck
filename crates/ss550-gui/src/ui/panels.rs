@@ -26,6 +26,16 @@ use crate::{ms_text, Controller, DraftKind};
 /// The width of the column that holds the big preview on the Artwork page.
 const PREVIEW_W: f32 = 320.;
 
+/// The words a keystroke is written with.
+///
+/// Stated once, under the field, because the engine refuses anything outside it
+/// and a refusal is only useful next to the list of what would have been
+/// accepted. It is the engine's own vocabulary, not a second copy of the rules:
+/// the parser is still the only thing that decides.
+const KEY_VOCABULARY: &str = "Modifiers: ctrl alt shift win · Keys: a–z, 0–9, f1–f24, arrows, \
+                              enter escape tab space backspace delete home end pageup pagedown \
+                              insert";
+
 // ── Actions ─────────────────────────────────────────────────────────────
 
 /// What each key runs when it is pressed on the deck.
@@ -36,7 +46,7 @@ pub(crate) fn actions_page(
 ) -> Div {
     let has_deck = controller.session.is_some();
     let selected = controller.selected_key;
-    let launch_active = controller.draft == DraftKind::Launch;
+    let draft = controller.draft;
 
     let picker = key_picker(controller, tokens, cx);
     let picker_card = card(tokens).w_full().child(
@@ -72,7 +82,7 @@ pub(crate) fn actions_page(
         .child(segment(
             SharedString::from("draft-launch"),
             "LAUNCH APP",
-            launch_active,
+            draft == DraftKind::Launch,
             tokens,
             cx,
             |this, _window, cx| {
@@ -84,12 +94,24 @@ pub(crate) fn actions_page(
         .child(segment(
             SharedString::from("draft-url"),
             "OPEN URL",
-            !launch_active,
+            draft == DraftKind::OpenUrl,
             tokens,
             cx,
             |this, _window, cx| {
                 this.draft = DraftKind::OpenUrl;
                 this.note = "Fill the URL, then press SAVE BINDING.".into();
+                cx.notify();
+            },
+        ))
+        .child(segment(
+            SharedString::from("draft-keys"),
+            "KEYSTROKES",
+            draft == DraftKind::Keys,
+            tokens,
+            cx,
+            |this, _window, cx| {
+                this.draft = DraftKind::Keys;
+                this.note = "Fill the combination, then press SAVE BINDING.".into();
                 cx.notify();
             },
         ));
@@ -116,9 +138,30 @@ pub(crate) fn actions_page(
             .child(Input::new(&controller.url_input)),
     );
 
-    let editor_body = match launch_active {
-        true => launch_fields,
-        false => url_fields,
+    // One field, because a combination is one thing: the modifiers and the key
+    // are parsed together, and splitting them across controls would let the
+    // window hold half a keystroke it cannot send.
+    let key_fields = div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .w_full()
+        .child(
+            Field::new()
+                .label("KEYS · the combination to send, e.g. ctrl+shift+m")
+                .child(Input::new(&controller.keys_input)),
+        )
+        .child(
+            div()
+                .text_size(px(FONT_CAPTION))
+                .text_color(tokens.soft)
+                .child(KEY_VOCABULARY),
+        );
+
+    let editor_body = match draft {
+        DraftKind::Launch => launch_fields,
+        DraftKind::OpenUrl => url_fields,
+        DraftKind::Keys => key_fields,
     };
 
     let save_row = div()

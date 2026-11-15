@@ -15,9 +15,9 @@ use gpui_kit::{
 
 use super::page::Page;
 use super::{
-    activate, body, color, dot, micro_label, muted, one_line, panels, Tokens, APP_BAR_H, FONT_APP,
-    FONT_CAPTION, FONT_MICRO, FONT_SUB, FONT_TITLE, PAGE_PAD, RADIUS_PILL, RADIUS_SM, RAIL_W,
-    STATUS_BAR_H,
+    activate, body, color, dot, micro_label, muted, one_line, palette, panels, Tokens, APP_BAR_H,
+    FONT_APP, FONT_CAPTION, FONT_MICRO, FONT_SUB, FONT_TITLE, PAGE_PAD, RADIUS_PILL, RADIUS_SM,
+    RAIL_W, STATUS_BAR_H,
 };
 use crate::{ms_text, Controller, Link};
 
@@ -253,7 +253,8 @@ fn theme_button(cx: &mut Context<Controller>) -> Button {
         }))
 }
 
-/// The navigation rail: four pages, then what the window is driving.
+/// The navigation rail: four pages, the action palette, then what the window is
+/// driving.
 fn rail(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller>) -> Div {
     let current = controller.page;
     let items: Vec<AnyElement> = Page::ALL
@@ -279,6 +280,10 @@ fn rail(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
         .border_r_1()
         .border_color(tokens.border)
         .children(items)
+        // The palette sits under the pages: the pages are where you go, the
+        // palette is what you drag onto a key from anywhere.
+        .child(div().h(px(1.)).w_full().bg(tokens.border).my(px(8.)))
+        .child(palette::actions_palette(controller, tokens))
         .child(div().flex_1())
         .child(rail_deck_card(controller, tokens, cx))
 }
