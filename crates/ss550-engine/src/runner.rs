@@ -9,6 +9,7 @@ use std::thread::JoinHandle;
 
 use crate::action::{file_label, Action};
 use crate::error::ActionError;
+use crate::keys::KeyCombo;
 
 /// Keeps a console window from flashing when a console program is launched.
 #[cfg(windows)]
@@ -62,6 +63,10 @@ impl CommandSpec {
 ///
 /// Nothing goes through a shell: the program and its arguments stay separate,
 /// so an argument can never turn into a second command.
+///
+/// A key combination has no command: it is sent, not started. Asking for one
+/// here returns [`ActionError::KeysNotAProgram`] rather than a spec that starts
+/// nothing.
 pub fn command_for(action: &Action) -> Result<CommandSpec, ActionError> {
     let action = action.without_wrapping_quotes();
     action.validate()?;
@@ -72,12 +77,19 @@ pub fn command_for(action: &Action) -> Result<CommandSpec, ActionError> {
             Ok(apply_launch_rules(spec))
         }
         Action::OpenUrl { url } => Ok(open_url_spec(url)),
+        Action::Keys { keys } => Err(ActionError::KeysNotAProgram {
+            keys: keys.to_string(),
+        }),
     }
 }
 
 /// Runs an action now, on this thread.
 ///
 /// The program is started and left running; nothing waits for it to finish.
+///
+/// A key combination is not a program: this function only starts processes and
+/// returns [`ActionError::KeysNotAProgram`] for one. Sending it belongs to a
+/// [`KeySender`] installed on an [`ActionRunner`].
 pub fn run_action(action: &Action) -> Result<(), ActionError> {
     launch(action).map(|launched| {
         // The handle is dropped on purpose: the program keeps running, we
@@ -102,8 +114,34 @@ struct Launched {
 /// Starts the program an action asks for.
 fn launch(action: &Action) -> Result<Launched, ActionError> {
     let action = action.without_wrapping_quotes();
+    // A key combination is refused here, before anything is started.
     let spec = command_for(&action)?;
-    let child = spec.spawn().map_err(|source| match &action {
+    let child = spec
+        .spawn()
+        .map_err(|source| start_error(&action, source))?;
+
+    Ok(Launched {
+        label: label_for(&action),
+        child,
+        exit_code_means_something: exit_code_means_something(&spec),
+    })
+}
+
+/// How to name the action in a message.
+fn label_for(action: &Action) -> String {
+    match action {
+        Action::Launch { program, .. } => file_label(program),
+        Action::OpenUrl { url } => url.clone(),
+        // `command_for` refuses a key combination before a program can be
+        // started, so this arm is not reachable; it is here so the match stays
+        // total, and it names the combination rather than inventing a label.
+        Action::Keys { keys } => keys.to_string(),
+    }
+}
+
+/// The error for a program that would not start.
+fn start_error(action: &Action, source: std::io::Error) -> ActionError {
+    match action {
         Action::Launch { program, .. } => ActionError::Launch {
             program: program.display().to_string(),
             source,
@@ -112,18 +150,12 @@ fn launch(action: &Action) -> Result<Launched, ActionError> {
             url: url.clone(),
             source,
         },
-    })?;
-
-    let label = match &action {
-        Action::Launch { program, .. } => file_label(program),
-        Action::OpenUrl { url } => url.clone(),
-    };
-
-    Ok(Launched {
-        label,
-        child,
-        exit_code_means_something: exit_code_means_something(&spec),
-    })
+        // Same reason as `label_for`: there is no program to start, so the
+        // failure is reported as what it is instead of a made-up launch.
+        Action::Keys { keys } => ActionError::KeysNotAProgram {
+            keys: keys.to_string(),
+        },
+    }
 }
 
 /// Whether the exit code of this program can be read as a failure.
@@ -269,10 +301,56 @@ fn open_url_spec(url: &str) -> CommandSpec {
     CommandSpec::new(OsString::from("xdg-open")).with_args([OsString::from(url)])
 }
 
+/// Sends a key combination to whatever window has the focus.
+///
+/// The engine does not type, and it must not: delivering a keystroke is a
+/// platform call (`SendInput` on Windows), the one place where `unsafe` would
+/// be unavoidable, and the crate that owns that exception is `ss550-tray`. The
+/// UI hands its sender to [`ActionRunner::with_key_sender`]; the engine only
+/// decides *when* a combination goes out, never *how*.
+///
+/// ```
+/// use ss550_engine::{KeyCombo, KeySender};
+///
+/// /// A sender that only remembers what it was asked to send.
+/// struct Remember(std::sync::Mutex<Vec<String>>);
+///
+/// impl KeySender for Remember {
+///     fn send(&self, combo: &KeyCombo) -> Result<(), String> {
+///         match self.0.lock() {
+///             Ok(mut sent) => {
+///                 sent.push(combo.to_string());
+///                 Ok(())
+///             }
+///             // A sender that cannot record has not sent anything.
+///             Err(_) => Err("the sender is unavailable".to_string()),
+///         }
+///     }
+/// }
+///
+/// let sender = Remember(std::sync::Mutex::new(Vec::new()));
+/// assert!(sender.send(&KeyCombo::parse("ctrl+m").expect("valid")).is_ok());
+/// ```
+pub trait KeySender: Send + Sync {
+    /// Sends `combo` to the window that has the focus.
+    ///
+    /// The error is the reason, ready to read: the engine wraps it in
+    /// [`ActionError::KeySend`] together with the combination it belongs to. A
+    /// sender that returns `Ok` claims the keystroke was delivered; there is no
+    /// way to say "nothing happened" by succeeding.
+    fn send(&self, combo: &KeyCombo) -> Result<(), String>;
+}
+
 /// Runs actions on a background thread, so the UI never waits for one.
+///
+/// A runner built with [`ActionRunner::new`] starts programs and opens URLs but
+/// cannot type: a key combination submitted to it is refused with
+/// [`ActionError::NeedsKeySender`], never quietly accepted. Install a
+/// [`KeySender`] when the platform one exists.
 pub struct ActionRunner {
-    commands: Sender<Action>,
+    commands: Sender<Job>,
     failures: Arc<Mutex<VecDeque<String>>>,
+    key_sender: Option<Arc<dyn KeySender>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -283,9 +361,9 @@ impl Default for ActionRunner {
 }
 
 impl ActionRunner {
-    /// Starts the background worker.
+    /// Starts the background worker, with no way to send keystrokes.
     pub fn new() -> Self {
-        Self::with_exit_watch(EXIT_WATCH)
+        Self::build(EXIT_WATCH, None)
     }
 
     /// Starts the background worker with a custom window for spotting a
@@ -295,30 +373,64 @@ impl ActionRunner {
     /// A program that is still alive when the window closes is a program that
     /// worked; one that leaves earlier with a failure is reported.
     pub fn with_exit_watch(window: std::time::Duration) -> Self {
+        Self::build(window, None)
+    }
+
+    /// Starts the background worker with the platform sender that delivers key
+    /// combinations.
+    ///
+    /// The sender arrives from the UI, which gets it from the crate that owns
+    /// the platform call. Without one, a combination is refused; with one, it
+    /// is delivered on the worker thread and a failure is reported the same way
+    /// a program that would not start is.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use ss550_engine::{ActionRunner, KeyCombo, KeySender};
+    ///
+    /// struct Silent;
+    ///
+    /// impl KeySender for Silent {
+    ///     fn send(&self, _combo: &KeyCombo) -> Result<(), String> {
+    ///         Ok(())
+    ///     }
+    /// }
+    ///
+    /// let runner = ActionRunner::with_key_sender(Arc::new(Silent));
+    /// assert!(runner.is_alive());
+    /// ```
+    pub fn with_key_sender(sender: Arc<dyn KeySender>) -> Self {
+        Self::build(EXIT_WATCH, Some(sender))
+    }
+
+    /// Starts the worker with the settings every constructor shares.
+    fn build(window: std::time::Duration, key_sender: Option<Arc<dyn KeySender>>) -> Self {
         let (commands, inbox) = mpsc::channel();
         let failures = Arc::new(Mutex::new(VecDeque::new()));
         let sink = Arc::clone(&failures);
+        // The worker needs the sender to deliver with; the runner keeps its own
+        // handle so `submit` can refuse a combination before it is queued.
+        let sender = key_sender.clone();
 
         let worker = std::thread::Builder::new()
             .name("ss550-actions".to_string())
             .spawn(move || {
-                for action in inbox {
-                    match launch(&action) {
-                        Ok(launched) => {
-                            if launched.exit_code_means_something {
-                                watch_exit(
-                                    launched.label,
-                                    launched.child,
-                                    Arc::clone(&sink),
-                                    window,
-                                );
+                for job in inbox {
+                    match job {
+                        Job::Run(action) => match launch(&action) {
+                            Ok(launched) => {
+                                if launched.exit_code_means_something {
+                                    watch_exit(
+                                        launched.label,
+                                        launched.child,
+                                        Arc::clone(&sink),
+                                        window,
+                                    );
+                                }
                             }
-                        }
-                        Err(error) => {
-                            if let Ok(mut queue) = sink.lock() {
-                                queue.push_back(error.to_string());
-                            }
-                        }
+                            Err(error) => report(&sink, error),
+                        },
+                        Job::Keys(combo) => deliver(sender.as_ref(), &combo, &sink),
                     }
                 }
             })
@@ -327,6 +439,7 @@ impl ActionRunner {
         Self {
             commands,
             failures,
+            key_sender,
             worker,
         }
     }
@@ -334,12 +447,52 @@ impl ActionRunner {
     /// Hands an action to the worker.
     ///
     /// The action is checked before it is queued: a broken action is reported
-    /// to the caller instead of failing later, out of sight.
+    /// to the caller instead of failing later, out of sight. A key combination
+    /// needs an installed [`KeySender`]; without one it is refused here, on
+    /// this thread, so "nothing was sent" cannot look like success.
     pub fn submit(&self, action: Action) -> Result<(), ActionError> {
         action.validate()?;
+        let job = match action {
+            Action::Keys { keys } => {
+                self.check_sender(&keys)?;
+                Job::Keys(keys)
+            }
+            action => Job::Run(action),
+        };
         self.commands
-            .send(action)
+            .send(job)
             .map_err(|_| ActionError::RunnerStopped)
+    }
+
+    /// Sends a key combination now, through the installed sender.
+    ///
+    /// The send happens on the worker thread, so a slow platform call never
+    /// stalls the window. This is the entry point for a combination that is not
+    /// bound to a deck key — a test button, a palette action being tried out.
+    ///
+    /// ```
+    /// use ss550_engine::{ActionRunner, KeyCombo};
+    ///
+    /// let runner = ActionRunner::new();
+    /// let combo = KeyCombo::parse("ctrl+shift+m").expect("valid");
+    /// assert!(runner.send_keys(combo).is_err(), "no sender means no send");
+    /// ```
+    pub fn send_keys(&self, combo: KeyCombo) -> Result<(), ActionError> {
+        self.check_sender(&combo)?;
+        self.commands
+            .send(Job::Keys(combo))
+            .map_err(|_| ActionError::RunnerStopped)
+    }
+
+    /// Refuses a combination when there is nothing to deliver it with.
+    fn check_sender(&self, combo: &KeyCombo) -> Result<(), ActionError> {
+        if self.key_sender.is_some() {
+            Ok(())
+        } else {
+            Err(ActionError::NeedsKeySender {
+                keys: combo.to_string(),
+            })
+        }
     }
 
     /// Takes the oldest failure the worker has reported, if any.
@@ -355,6 +508,47 @@ impl ActionRunner {
         self.worker
             .as_ref()
             .is_some_and(|handle| !handle.is_finished())
+    }
+}
+
+/// What the worker thread does next.
+///
+/// The queue keeps the two apart because a keystroke is not an action to run:
+/// it is delivered, and its failure is reported the way a failed start is.
+enum Job {
+    /// Start the program an action names.
+    Run(Action),
+    /// Deliver a key combination.
+    Keys(KeyCombo),
+}
+
+/// Puts a failure where the window will find it.
+fn report(sink: &Arc<Mutex<VecDeque<String>>>, error: ActionError) {
+    if let Ok(mut queue) = sink.lock() {
+        queue.push_back(error.to_string());
+    }
+}
+
+/// Hands a combination to the sender and reports a failure it names.
+fn deliver(
+    sender: Option<&Arc<dyn KeySender>>,
+    combo: &KeyCombo,
+    sink: &Arc<Mutex<VecDeque<String>>>,
+) {
+    let outcome = match sender {
+        Some(sender) => sender.send(combo).map_err(|reason| ActionError::KeySend {
+            keys: combo.to_string(),
+            reason,
+        }),
+        // `submit` and `send_keys` refuse a combination when no sender is
+        // installed, so the queue never holds one. If it ever did, it is
+        // reported: a send that did not happen is never silence.
+        None => Err(ActionError::NeedsKeySender {
+            keys: combo.to_string(),
+        }),
+    };
+    if let Err(error) = outcome {
+        report(sink, error);
     }
 }
 
@@ -667,5 +861,174 @@ mod tests {
         let runner = ActionRunner::new();
         assert!(runner.is_alive());
         assert!(runner.take_failure().is_none());
+    }
+
+    /// A sender that records what it was asked to send, and can be told to fail.
+    struct Recorder {
+        sent: Mutex<Vec<String>>,
+        failure: Option<String>,
+    }
+
+    impl Recorder {
+        fn sending() -> Arc<Self> {
+            Arc::new(Self {
+                sent: Mutex::new(Vec::new()),
+                failure: None,
+            })
+        }
+
+        fn failing(reason: &str) -> Arc<Self> {
+            Arc::new(Self {
+                sent: Mutex::new(Vec::new()),
+                failure: Some(reason.to_string()),
+            })
+        }
+
+        fn sent(&self) -> Vec<String> {
+            self.sent
+                .lock()
+                .map(|sent| sent.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    impl KeySender for Recorder {
+        fn send(&self, combo: &KeyCombo) -> Result<(), String> {
+            if let Some(reason) = &self.failure {
+                return Err(reason.clone());
+            }
+            if let Ok(mut sent) = self.sent.lock() {
+                sent.push(combo.to_string());
+            }
+            Ok(())
+        }
+    }
+
+    fn combo(text: &str) -> KeyCombo {
+        KeyCombo::parse(text).expect("valid combination")
+    }
+
+    /// The whole point of the seam: a runner with nowhere to send must refuse
+    /// a keystroke on the spot, never accept it and report nothing later.
+    #[test]
+    fn a_combination_without_a_sender_is_refused_on_the_spot() {
+        let runner = ActionRunner::new();
+        let error = runner
+            .submit(Action::Keys {
+                keys: combo("ctrl+shift+m"),
+            })
+            .expect_err("a runner with no sender must refuse the action");
+
+        assert!(
+            matches!(error, ActionError::NeedsKeySender { .. }),
+            "{error}"
+        );
+        assert!(
+            runner.take_failure().is_none(),
+            "nothing was queued, so nothing can fail later either"
+        );
+    }
+
+    #[test]
+    fn a_submitted_combination_reaches_the_sender() {
+        let recorder = Recorder::sending();
+        let sender: Arc<dyn KeySender> = recorder.clone();
+        let runner = ActionRunner::with_key_sender(sender);
+
+        runner
+            .submit(Action::Keys {
+                keys: combo("ctrl+shift+m"),
+            })
+            .expect("submitted");
+
+        let delivered = (0..200).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            !recorder.sent().is_empty()
+        });
+        assert!(delivered, "the sender was never asked to send");
+        assert_eq!(recorder.sent(), vec!["Ctrl+Shift+M".to_string()]);
+        assert!(
+            runner.take_failure().is_none(),
+            "a delivered key is not a failure"
+        );
+    }
+
+    #[test]
+    fn send_keys_goes_through_the_same_sender() {
+        let recorder = Recorder::sending();
+        let sender: Arc<dyn KeySender> = recorder.clone();
+        let runner = ActionRunner::with_key_sender(sender);
+
+        runner.send_keys(combo("win+l")).expect("queued");
+
+        let delivered = (0..200).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            !recorder.sent().is_empty()
+        });
+        assert!(delivered, "the sender was never asked to send");
+        assert_eq!(recorder.sent(), vec!["Win+L".to_string()]);
+    }
+
+    #[test]
+    fn send_keys_without_a_sender_is_refused() {
+        let runner = ActionRunner::new();
+        let error = runner.send_keys(combo("alt+tab")).expect_err("no sender");
+
+        assert!(
+            matches!(error, ActionError::NeedsKeySender { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_send_the_platform_refused_is_reported() {
+        let sender: Arc<dyn KeySender> = Recorder::failing("the window is not listening");
+        let runner = ActionRunner::with_key_sender(sender);
+
+        runner
+            .submit(Action::Keys {
+                keys: combo("win+l"),
+            })
+            .expect("queued");
+
+        let failure = (0..200)
+            .find_map(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                runner.take_failure()
+            })
+            .expect("a refused send must be reported");
+
+        assert!(
+            failure.contains("Win+L"),
+            "the failure names the combination: {failure}"
+        );
+        assert!(
+            failure.contains("the window is not listening"),
+            "and the reason it was refused: {failure}"
+        );
+    }
+
+    /// A combination is sent, not started: neither path that starts a process
+    /// may quietly do nothing and return success.
+    #[test]
+    fn a_combination_is_never_started_as_a_program() {
+        let action = Action::Keys {
+            keys: combo("ctrl+c"),
+        };
+
+        assert!(
+            matches!(
+                command_for(&action),
+                Err(ActionError::KeysNotAProgram { .. })
+            ),
+            "a combination has no command"
+        );
+        assert!(
+            matches!(
+                run_action(&action),
+                Err(ActionError::KeysNotAProgram { .. })
+            ),
+            "a combination has no process to start"
+        );
     }
 }

@@ -176,8 +176,7 @@ impl ProfileStore {
         if let Some(name) = active_name {
             if let Some(profile) = self.profiles.get_mut(&name) {
                 profile.bindings = bindings.clone();
-                return self
-                    ._save_to(&config_dir.join("profiles").join(format!("{deck_key}.json")));
+                return self._save_to(&crate::config::profiles_path_in(config_dir, deck_key));
             }
         }
         Ok(())

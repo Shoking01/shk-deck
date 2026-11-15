@@ -173,6 +173,10 @@ mod tests {
         }
     }
 
+    fn keystroke() -> Action {
+        Action::keys("Shift+Ctrl+M").expect("valid combination")
+    }
+
     #[test]
     fn a_new_store_has_no_bindings() {
         let store = ActionStore::new();
@@ -261,6 +265,68 @@ mod tests {
         assert_eq!(restored.get(key(1)), Some(&launch()));
         assert_eq!(restored.get(key(15)), Some(&open_url()));
         assert_eq!(restored.len(), 2);
+    }
+
+    /// The third action kind is additive: a file written before it existed
+    /// holds no `keys` variant and must keep loading as it always did.
+    #[test]
+    fn a_file_with_only_launch_and_open_url_still_loads() {
+        let older = r#"{
+            "version": 1,
+            "bindings": [
+                {
+                    "key": 1,
+                    "action": {
+                        "type": "launch",
+                        "program": "C:\\Windows\\System32\\notepad.exe",
+                        "args": ["--flag"]
+                    }
+                },
+                {
+                    "key": 2,
+                    "action": {
+                        "type": "open_url",
+                        "url": "https://example.com"
+                    }
+                }
+            ]
+        }"#;
+
+        let store = ActionStore::from_json(older).expect("an older file must keep loading");
+        assert_eq!(store.len(), 2);
+        assert_eq!(
+            store.get(key(1)),
+            Some(&Action::Launch {
+                program: PathBuf::from("C:\\Windows\\System32\\notepad.exe"),
+                args: vec!["--flag".to_string()],
+            })
+        );
+        assert_eq!(
+            store.get(key(2)),
+            Some(&Action::OpenUrl {
+                url: "https://example.com".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_keystroke_binding_round_trips_through_the_file() {
+        let mut store = ActionStore::new();
+        let keys = keystroke();
+        store.set(key(5), keys.clone()).expect("valid action");
+
+        let json = store.to_json().expect("serialise");
+        assert!(
+            json.contains("\"type\": \"keys\""),
+            "the kind is written as its own tag: {json}"
+        );
+        assert!(
+            json.contains("\"keys\": \"ctrl+shift+m\""),
+            "and the combination as one canonical string: {json}"
+        );
+
+        let restored = ActionStore::from_json(&json).expect("parse");
+        assert_eq!(restored.get(key(5)), Some(&keys));
     }
 
     #[test]
