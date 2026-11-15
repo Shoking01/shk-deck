@@ -49,12 +49,12 @@ controlador sea siempre la build que el usuario acaba de compilar.
 
 | ID | Qué | Specs | Ruta | Estado |
 | --- | --- | --- | --- | --- |
-| T1 | `ss550-tray::install::refresh_installed` + arranque que sincroniza la copia instalada | S1 | inline | hecho — pendiente de commit |
-| T2 | Scripts de actualización fiables (detectan fallo de build, verifican el hash, relanzan) | S1 | inline | hecho — pendiente de commit |
-| T3 | Carcasa: barra superior, raíl, barra de estado, `Page` | S2, S5 | delegado | pendiente |
-| T4 | Página `Deck` + inspector de tecla seleccionada | S3, S4, S6 | delegado | pendiente |
-| T5 | Páginas `Actions`, `Artwork`, `Settings` | S3, S6 | delegado | pendiente |
-| T6 | Verificación visual con captura de pantalla y corrección | S5, S7 | inline | pendiente |
+| T1 | `ss550-tray::install::refresh_installed` + arranque que sincroniza la copia instalada | S1 | inline | hecho — `29c6bde` |
+| T2 | Scripts de actualización fiables (detectan fallo de build, verifican el hash, relanzan) | S1 | inline | hecho — `29c6bde` |
+| T3 | Carcasa: barra superior, raíl, barra de estado, `Page` | S2, S5 | delegado | hecho — `0efdded` |
+| T4 | Página `Deck` + inspector de tecla seleccionada + teclas con imagen | S3, S4, S6 | delegado | hecho — `0efdded` |
+| T5 | Páginas `Actions`, `Artwork`, `Settings` | S3, S6 | delegado | hecho — `0efdded` |
+| T6 | Verificación visual con captura de pantalla y corrección | S5, S7 | inline | hecho — `0efdded` |
 
 ## Log
 
@@ -76,3 +76,54 @@ aplicación ahora la sincroniza sola en cada arranque (S1).
 por los comentarios nuevos de `render.rs` (nombraban el modelo). Corregidos para
 hablar de "the deck"; el test vuelve a verde con 46 pruebas en el GUI y 17 en
 `ss550-tray`.
+
+**L3** (2026-11-14): carcasa, páginas y verificación con capturas reales.
+- El deck conectado (15 teclas, 5 columnas) permitió juzgar la ventana de verdad:
+  la primera captura mostró pasos numerados, columna izquierda vacía, contenido
+  cortado abajo y un nombre de asset desbordando el panel. La segunda y la
+  tercera corrigieron eso: raíl con cuatro páginas, contenido con scroll, cadenas
+  truncadas dentro de un padre `min_w(0)`, teclas que dibujan su imagen con la
+  vista previa cacheada, inspector con la imagen de la tecla seleccionada.
+- La captura se tomó con `PrintWindow`, no con el escritorio: el escritorio
+  estaba ocupado y una captura de pantalla habría fotografiado otra cosa.
+- Dos defectos que solo se ven en pantalla: las cuerdas de estado salían con
+  mojibake (`â€"` en vez de `—`) porque el literal del fuente se había
+  corrompido en un viaje de ida y vuelta por una página de códigos, y el
+  interruptor de inicio usaba el `primary` del tema (casi blanco en oscuro) en
+  vez del acento. Ambos corregidos.
+- La nota "la copia del inicio de sesión coincide" solo aparece en el proceso que
+  realmente reemplaza la copia; en el siguiente arranque no hay nada que decir.
+  Eso hizo que una captura pareciera un fallo cuando era el comportamiento
+  buscado.
+- Suites: 63 pruebas del GUI, 17 + 1 + 19 del tray, `cargo test --workspace`
+  entero en verde. Commits `82e9f39`, `29c6bde`, `0efdded`.
+
+**L4** (2026-11-15, reporte del usuario): "la imagen sale descuadrada, con un
+borde a la izquierda y arriba, y no está en máxima calidad".
+
+**Diagnóstico, con números.** Escala de grises media de las primeras filas y
+columnas del asset `012-SOFTWARE_brave.jpg` (144×144) antes de tocarlo:
+
+| Borde | Media | Vecinas | Veredicto |
+| --- | --- | --- | --- |
+| fila 0 | 45.9 | 29.7 | línea clara de 1 px horneada en el archivo |
+| columna 0 | 28.6 | 11.6 | ídem |
+| fila 143 | 28.5 | 11.2 | ídem |
+
+No era el pipeline: `fit()` centra y rellena de negro, y el deck no añade marco.
+El archivo traía un marco de 1 px de un recorte anterior. Al escalar de 144 a 100
+esa línea se mezcla con la primera fila de salida y se hace más visible, no menos.
+
+**Calidad.** El límite real era la escalera, que empezaba en 80 por coherencia
+con los colores planos. Un tile de 100×100 a 95 ocupa unos 4 KB de los 9 KB
+permitidos: el deck tenía sitio de sobra y la app no lo usaba. La escalera pasa a
+`[95, 88, 80, 65, 50, 35, 20]`, con un test que compara el tile contra una
+codificación hecha en el peldaño superior.
+
+**Datos corregidos a mano, con copia de seguridad:** el asset se recortó 1 px por
+lado (142×142, JPEG q100; original en `012-SOFTWARE_brave.jpg.bak`). Tras el
+recorte la fila 0 mide 29.7 y la columna 0 mide 11.4: ya son el fondo de la
+imagen, no una línea. Esto es un arreglo de datos, no de código: otro archivo con
+marco volvería a mostrarlo, porque el render lo respeta tal cual.
+
+- Commits: `73a1d70` (calidad) — pendiente de subir, como el resto.

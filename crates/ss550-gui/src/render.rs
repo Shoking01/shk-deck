@@ -35,11 +35,13 @@ use ss550_engine::AssetName;
 
 /// The qualities tried, in order, before a tile is refused.
 ///
-/// The first entry is the quality a flat colour is encoded at, so a picture and
-/// a colour look like they belong on the same deck. The floor is low enough that
-/// a noisy photograph fits in a few kilobytes; below it the artefacts are worse
-/// than the refusal.
-pub const QUALITY_LADDER: [u8; 6] = [80, 65, 50, 35, 20, 10];
+/// The deck's byte limit, not this list, is what decides how good a tile may
+/// look: a 100×100 picture at 95 is usually well inside nine kilobytes, and
+/// spending 80 there throws away detail the deck had room for. The ladder
+/// therefore starts at the top and steps down only when a rung does not fit; the
+/// floor is low enough that a noisy photograph still lands in a few kilobytes,
+/// and below it the artefacts are worse than the refusal.
+pub const QUALITY_LADDER: [u8; 7] = [95, 88, 80, 65, 50, 35, 20];
 
 /// Why a picture could not become a tile.
 #[derive(Debug, thiserror::Error)]
@@ -399,6 +401,32 @@ mod tests {
         let tile = render_with_ladder(tight, &name(), &source, &[90, 10]).expect("the floor fits");
         assert!(tile.len() <= tight.max_bytes());
         assert_eq!(tile.len(), floor.len(), "the floor encoding was used");
+    }
+
+    #[test]
+    fn a_tile_with_room_left_is_left_at_the_top_quality() {
+        // The deck's own size and limit, and a picture that is far from noisy:
+        // the ladder must spend the bytes the deck allows instead of stopping
+        // at a rung that was chosen for flat colours.
+        let spec = ImageSpec::new(100, 100, 9_000, deck_api::ImageFormat::Jpeg);
+        let source = png(100, 100, |x, y| {
+            [(x * 2) as u8, (y * 2) as u8, ((x + y) % 256) as u8]
+        });
+
+        let tile = render(spec, &name(), &source).expect("a tile");
+        let at_top = render_with_ladder(spec, &name(), &source, &[QUALITY_LADDER[0]])
+            .expect("the top rung fits in nine kilobytes");
+
+        assert_eq!(QUALITY_LADDER[0], 95);
+        assert!(
+            tile.len() <= spec.max_bytes(),
+            "the tile still has to fit: {} bytes",
+            tile.len()
+        );
+        assert_eq!(
+            tile, at_top,
+            "a tile that fits at the top quality must not be encoded below it"
+        );
     }
 
     #[test]

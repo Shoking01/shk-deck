@@ -7,6 +7,16 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Fixed — pictures were encoded below the quality the deck allowed
+- The quality ladder started at 80, so every picture was encoded at 80 even
+  when the deck's nine-kilobyte limit had room for more; a 100×100 tile at 95
+  is about four kilobytes, which is why "the image looks soft" was the ladder's
+  choice and not the deck's ceiling. It now starts at 95 and steps down only
+  when a rung does not fit.
+- A tile that fits at the top quality is now compared against an encoding made
+  at the top rung, so a later change that quietly spends quality below the limit
+  fails a test instead of shipping.
+
 ### Fixed — the app started the build from the day the switch was turned on
 - The sign-in entry names `%LOCALAPPDATA%\Programs\ss550\ss550-gui.exe`, and
   that copy was only ever written by turning "START WITH WINDOWS" on. Every
