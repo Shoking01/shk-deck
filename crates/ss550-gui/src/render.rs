@@ -202,10 +202,12 @@ pub fn preview_frame(
         source,
     })?;
 
-    // The same flip the payload gets, so the preview is what the deck shows.
+    // The picture is fitted as it is: this is the preview of what the deck
+    // *shows*, and the deck's own display is mounted the other way up, which is
+    // why the payload is flipped on the way out. Flipping the preview too would
+    // show the tile upside down next to a key that is the right way up.
     let rgb = decoded.to_rgb8();
-    let rotated = imageops::rotate180(&rgb);
-    let fitted = fit(spec, &rotated);
+    let fitted = fit(spec, &rgb);
 
     // The renderer takes its pixels in BGRA, alpha first byte last, the same
     // layout it produces when it decodes a PNG itself. A `Frame` is built from
@@ -540,6 +542,35 @@ mod tests {
             frame.buffer().get_pixel(36, 36).0,
             [0, 0, 0xFF, 0xFF],
             "red reaches the window as the renderer's BGRA red"
+        );
+    }
+
+    #[test]
+    fn a_preview_keeps_the_picture_the_way_the_deck_shows_it() {
+        // A mark in the top-left corner of the source: the payload is flipped on
+        // the way to the deck, which flips it back, so the glass shows the mark
+        // in the top-left. A preview that flipped it too would disagree with the
+        // key in front of the user, which is exactly what a preview is for.
+        let source = png(72, 72, |x, y| {
+            if x < 12 && y < 12 {
+                [0xFF, 0xFF, 0xFF]
+            } else {
+                [0x00, 0x00, 0x00]
+            }
+        });
+        let frame = preview_frame(spec(), &name(), &source).expect("a preview");
+
+        let corner = frame.buffer().get_pixel(2, 2).0;
+        assert_eq!(
+            corner,
+            [0xFF, 0xFF, 0xFF, 0xFF],
+            "the mark stays in the corner the source put it in"
+        );
+        let opposite = frame.buffer().get_pixel(69, 69).0;
+        assert_eq!(
+            opposite,
+            [0, 0, 0, 0xFF],
+            "the rest of the tile is the picture's own dark ground"
         );
     }
 
