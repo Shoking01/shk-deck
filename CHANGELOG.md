@@ -7,6 +7,25 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Added — an action palette, drag and drop, and keystrokes
+- The rail lists what a key can do — `Run app`, `Open URL`, `Keystrokes`, plus
+  one row per action already bound on the deck — and the entries are dragged
+  onto a key. Dropping a template opens its editor and changes nothing until the
+  user saves; dropping an existing action assigns it through the same save path a
+  click uses, so the file and the deck cannot disagree.
+- `Action::Keys` is a third action kind: a modifier-and-key combination such as
+  `Ctrl+Shift+M`. `KeyCombo`'s fields are private and the only ways to build one
+  are the parser and deserialisation, so a combination that exists is a
+  combination that is valid; `ctrl+shift` (no key), `m+n` (two keys) and
+  `ctrl+ctrl+m` are refused with a sentence naming the problem.
+- `ss550-tray` sends the combination with `SendInput`, mapping the engine's
+  modifiers and named keys to virtual-key codes in a pure, tested function. A
+  send that reports fewer events than it was given is an error, so a half-sent
+  shortcut reaches the status line instead of looking successful.
+- Profiles keep their deck's bindings, and the per-deck bindings file is read
+  into the active profile when the profile has none: a profile that had never
+  been saved was hiding every binding the file still held.
+
 ### Fixed — key images never reached the panel's edges
 - A photo of the deck, measured against a solid magenta payload, showed that a
   key's lit area is 108 pixels across, not the 100 the community reference sends.
