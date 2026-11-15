@@ -30,12 +30,12 @@ fn six_keys_in_two_rows_of_three() {
 }
 
 #[test]
-fn seventy_two_pixel_images_with_a_payload_limit() {
+fn one_hundred_pixel_images_with_a_nine_kilobyte_payload_limit() {
     let mut deck = SixKeyDeck::new();
     let spec = as_seam(&mut deck).image_spec();
 
-    assert_eq!(spec.width(), 72);
-    assert_eq!(spec.height(), 72);
+    assert_eq!(spec.width(), 100);
+    assert_eq!(spec.height(), 100);
     assert_eq!(spec.format(), ImageFormat::Jpeg);
     assert!(
         spec.max_bytes() > 0,

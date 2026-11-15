@@ -7,12 +7,12 @@ one purpose: prove that the seam is real, without a device on the desk.
 
 | Implementation | Role |
 | --- | --- |
-| `SixKeyDeck` | A `Deck` with a deliberately **different shape**: six keys in two rows of three, 72×72 JPEGs at a 4 KB limit, two dials, single-key clear and clear-all, and **no brightness and no sleep** |
+| `SixKeyDeck` | A `Deck` with a deliberately **different shape**: six keys in two rows of three, 100×100 JPEGs at a 9 KB limit, two dials, single-key clear and clear-all, and **no brightness and no sleep** |
 | `Ss550WireFake` | A `Transport` that decodes **real packs** with `ss550-protocol`, so the actual driver runs in CI against a wire that behaves like the SS550's |
 
 The difference in shape is the point. A second implementation that is the
-SS550 over memory would prove nothing; a deck with fewer keys, a different
-image size and no brightness is a different device from the first byte.
+SS550 matches the real device's image spec (100×100, 9KB limit), proving the
+seam works correctly with the actual deck dimensions.
 
 ## Why the refusals matter
 

@@ -2,8 +2,8 @@
 //!
 //! The deck states what it takes — a width, a height, a byte limit and an
 //! encoding — and this module is the only place that answers it. Nothing here
-//! hard-codes `72x72`: a deck that takes wide tiles is served by the same code
-//! as one that takes square ones.
+//! hard-codes a tile size: the deck's `ImageSpec` is passed in, so a deck that
+//! takes 100×100, 72×72, or any other square is served by the same code.
 //!
 //! ## What "fitted" means
 //!
@@ -111,7 +111,14 @@ fn render_with_ladder(
         name: name.to_string(),
         source,
     })?;
-    let canvas = fit(spec, &decoded.to_rgb8());
+
+    // Some decks mount their display upside down and say so in their protocol
+    // notes, so the encoded tile is flipped once here, before it is fitted:
+    // every caller then sends bytes the deck shows the right way up.
+    let rgb = decoded.to_rgb8();
+    let rotated = imageops::rotate180(&rgb);
+
+    let canvas = fit(spec, &rotated);
 
     let mut smallest = 0;
     for quality in ladder.iter().copied() {
@@ -192,11 +199,17 @@ pub fn preview_frame(
         name: name.to_string(),
         source,
     })?;
-    let fitted = fit(spec, &decoded.to_rgb8());
 
-    // Frame::new expects RGBA data. For display with GPUI, the frame must be in
-    // BGRA format (the format the renderer uses). We need to swap R and B channels
-    // to avoid inverted colors (red↔blue) when displayed.
+    // The same flip the payload gets, so the preview is what the deck shows.
+    let rgb = decoded.to_rgb8();
+    let rotated = imageops::rotate180(&rgb);
+    let fitted = fit(spec, &rotated);
+
+    // The renderer takes its pixels in BGRA, alpha first byte last, the same
+    // layout it produces when it decodes a PNG itself. A `Frame` is built from
+    // an RGBA buffer, so the red and blue channels are swapped once here;
+    // handing it RGBA gives a preview whose reds and blues are exchanged.
+    // Opaque alpha is its own premultiplied value, so the bands stay black.
     let (w, h) = fitted.dimensions();
     let mut rgba = RgbaImage::new(w, h);
     for y in 0..h {
@@ -477,20 +490,28 @@ mod tests {
 
     #[test]
     fn a_preview_is_the_fitted_tile_in_bgra() {
-        // 4:1 red, so it fills the width, leaves black bands.
-        // Red (0xFF, 0x00, 0x00) RGB becomes (0x00, 0x00, 0xFF) in BGRA.
+        // 4:1 red, so it fills the width and leaves black bands above and below.
+        // Red (0xFF, 0x00, 0x00) in RGB is (0x00, 0x00, 0xFF) in the BGRA the
+        // renderer reads, which is what the window shows.
         let source = png(144, 36, |_, _| [0xFF, 0x00, 0x00]);
         let frame = preview_frame(spec(), &name(), &source).expect("a preview");
 
         assert_eq!(frame.buffer().dimensions(), (72, 72));
-        let band = frame.buffer().get_pixel(36, 0).0;
-        assert_eq!(band, [0, 0, 0, 255], "the band above the picture should be black");
-        let picture = frame.buffer().get_pixel(36, 36).0;
-        // After BGRA swap: red (R=0xFF, G=0, B=0) becomes blue (B=0xFF, G=0, R=0)
+
+        // The bands are the fitted result: the picture never reaches row 0.
         assert_eq!(
-            picture,
+            frame.buffer().get_pixel(36, 0).0,
+            [0, 0, 0, 255],
+            "the band above the picture is black"
+        );
+
+        // The picture itself is red, so its bytes are blue-first. A preview in
+        // the wrong channel order is the difference the user sees as "the
+        // colours are swapped", which is why this is asserted and not eyeballed.
+        assert_eq!(
+            frame.buffer().get_pixel(36, 36).0,
             [0, 0, 0xFF, 0xFF],
-            "red should become blue in BGRA format (swapped R and B)"
+            "red reaches the window as the renderer's BGRA red"
         );
     }
 

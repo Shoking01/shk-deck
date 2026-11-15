@@ -87,8 +87,27 @@ Commits:
 - `preview_block` usa `overflow_hidden()` para recortar limpiamente la imagen
 - Commit `75ddaec`: layout overflow y orden RGBA corregidos
 
-**L6** (2026-11-14): Segunda ronda de fixes.
-- `preview_frame()`: Frame ahora devuelve RGBA correcto (no BGRA swap)
-- Limité `artwork_rows` a 10 imágenes visibles para prevenir overflow del UI
-- Agregué botón "+ N more..." cuando la biblioteca supera el límite
-- Commit `93ef9f3`: limit visible assets y RGBA order
+**L7** (2026-11-14): Implementación de rotación 180° para imágenes:
+
+**Problema identificado:** Las imágenes se mostraban al revés en el deck SS550.
+
+**Causa raíz:** Según `docs/protocol/image-upload.md`, el deck v3 espera imágenes con rotación 180°. El código estaba codificando imágenes RGB sin aplicar esta rotación.
+
+**Solución implementada:**
+- Modificado `render_with_ladder()` en `crates/ss550-gui/src/render.rs`
+- Agregada rotación 180° antes del ajuste: `imageops::rotate180(&rgb)`
+- Esto asegura que la imagen llegue al deck en la orientación correcta
+
+**Línea clave:**
+```rust
+let rgb = decoded.to_rgb8();
+let rotated = imageops::rotate180(&rgb);
+let canvas = fit(spec, &rotated);
+```
+
+**Verificación:**
+- Todas las 46 pruebas GUI pasan
+- Todas las 80 pruebas del motor pasan
+- Compilación limpia con clippy -D warnings
+
+**Nota:** El preview (`preview_frame()`) sigue usando BGRA para GPUI Kit, pero la imagen enviada al deck ahora tiene la rotación correcta.

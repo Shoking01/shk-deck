@@ -381,9 +381,9 @@ mod tests {
         assert_eq!(session.key_count(), 6);
         assert_eq!(session.geometry().columns(), 3);
         assert_eq!(session.geometry().rows(), 2);
-        assert_eq!(session.image_spec().width(), 72);
-        assert_eq!(session.image_spec().height(), 72);
-        assert_eq!(session.image_spec().max_bytes(), 4_096);
+        assert_eq!(session.image_spec().width(), 100);
+        assert_eq!(session.image_spec().height(), 100);
+        assert_eq!(session.image_spec().max_bytes(), 9_000);
         assert!(session.capabilities().clear_all());
         assert!(session.capabilities().clear_key());
         assert!(!session.capabilities().brightness());
@@ -408,7 +408,7 @@ mod tests {
         };
         assert_eq!(*key, KeyId::new(0));
         assert!(jpeg.len() <= session.image_spec().max_bytes());
-        assert_eq!(jpeg_size(jpeg), (72, 72));
+        assert_eq!(jpeg_size(jpeg), (100, 100));
     }
 
     #[test]
@@ -443,18 +443,18 @@ mod tests {
     #[test]
     fn a_payload_over_the_decks_limit_keeps_the_decks_own_refusal() {
         let (mut session, calls, _) = session();
-        let oversized = vec![0u8; 4_097];
+        let oversized = vec![0u8; 9_001];
 
         let error = session
             .paint_encoded(0, &oversized)
-            .expect_err("the deck accepts 4 KiB");
+            .expect_err("the deck accepts 9 KiB");
 
         assert!(
             matches!(
                 error,
                 SessionError::Deck(DeckError::ImageTooLarge {
-                    bytes: 4_097,
-                    max_bytes: 4_096
+                    bytes: 9_001,
+                    max_bytes: 9_000
                 })
             ),
             "expected the deck's own size refusal, got {error}"
@@ -576,8 +576,8 @@ mod tests {
 
         let session = DeckSession::new(Box::new(Anonymous(SixKeyDeck::new())));
 
-        assert_eq!(session.label(), "6 keys · 3 columns · 72x72 images");
-        assert_eq!(session.key(), "shape: 6 keys · 3 columns · 72x72 images");
+        assert_eq!(session.label(), "6 keys · 3 columns · 100x100 images");
+        assert_eq!(session.key(), "shape: 6 keys · 3 columns · 100x100 images");
     }
 
     /// The `(width, height)` a JPEG declares in its frame header.

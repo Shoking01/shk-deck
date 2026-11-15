@@ -9,7 +9,7 @@
 //!   `ss550-protocol` — records the commands it understood, and can be told to
 //!   fail or stall on demand. A deck sits on it that never touches `hidapi`.
 //! - [`SixKeyDeck`] is a [`Deck`](deck_api::Deck). Six keys in two rows of
-//!   three, 72×72 images, two dials, no brightness and no sleep. It touches no
+//!   three, 100×100 images, two dials, no brightness and no sleep. It touches no
 //!   transport at all.
 //!
 //! The pair is independent on purpose: the wire fake proves the bytes can be
