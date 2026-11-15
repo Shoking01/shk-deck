@@ -12,6 +12,11 @@
 //! showing and the action bound to it, so the screen always matches what the
 //! hardware is doing.
 //!
+//! The window is a shell of its own: an app bar, a rail of four pages, a
+//! scrolling content area and a status line, all built in [`ui`]. This file owns
+//! the controller — the connection, the bindings, the action runner — and the
+//! shell draws whatever it says.
+//!
 //! Pressing a key on the deck lights its tile and runs the action bound to it,
 //! on a background thread. Bindings are kept per deck, in the app's own
 //! configuration folder.
@@ -30,28 +35,24 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use deck_api::{ButtonState, DeckError, KeyId};
-use gpui_kit::component::{
-    button::{Button, ButtonCustomVariant, ButtonVariants as _},
-    form::Field,
-    input::{Input, InputState, Textarea, TextareaState},
-    switch::Switch,
-    ActiveTheme as _, Theme, ThemeMode,
-};
+use gpui_kit::component::input::{InputState, TextareaState};
+use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{
-    div, px, rgb, size, AnyElement, AnyWindowHandle, AppContext as _, ClickEvent, Context, Entity,
-    FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, WindowBounds,
-    WindowOptions,
+    px, size, AnyWindowHandle, AppContext as _, Context, Entity, IntoElement, Render, SharedString,
+    Window, WindowBounds, WindowOptions,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use ss550_driver::{is_deck_present, LONG_CONNECT_TIMEOUT};
 use ss550_engine::{Action, ActionRunner, ActionStore, KeyNumber};
 use ss550_tray::{autostart, install, TrayCommand, TrayHost};
 
+use ui::Page;
+
 mod diagnostics;
 mod provider;
 mod render;
 mod session;
+mod ui;
 
 /// Clicks on the version line that open the diagnostic log.
 ///
@@ -70,11 +71,6 @@ fn advance_clicks(clicks: u8) -> (u8, bool) {
     } else {
         (0, true)
     }
-}
-
-/// Hex colour as GPUI `Hsla`.
-fn color(hex: u32) -> Hsla {
-    rgb(hex).into()
 }
 
 /// Colour the user can paint with.
@@ -146,6 +142,21 @@ enum Link {
     Lost,
 }
 
+impl Link {
+    /// What the pill and the status bar print for this state.
+    ///
+    /// The words are the whole state, not a tooltip for the colour: a reader who
+    /// cannot tell amber from red still reads "WAITING FOR DECK".
+    fn label(self) -> &'static str {
+        match self {
+            Link::Connecting => "CONNECTING",
+            Link::Waiting => "WAITING FOR DECK",
+            Link::Connected => "CONNECTED",
+            Link::Lost => "CONNECTION LOST",
+        }
+    }
+}
+
 /// How often the deck is polled for key presses.
 ///
 /// The poll is non-blocking, so this only costs a read that usually returns
@@ -209,7 +220,7 @@ enum Attempt {
 /// re-enumeration to settle, so it must never run on the UI thread.
 ///
 /// The attempt waits [`LONG_CONNECT_TIMEOUT`] on purpose: the deck's boot is
-/// appear → leave → brief appearance → leave → settle, and the settle can be
+/// appear â†’ leave â†’ brief appearance â†’ leave â†’ settle, and the settle can be
 /// ~11 s away. Giving up earlier would mean starting over in a different
 /// phase of the boot, over and over.
 fn connector_worker(commands: Receiver<u64>, results: Sender<Attempt>) {
@@ -231,6 +242,8 @@ struct Controller {
     session: Option<session::DeckSession>,
     link: Link,
     note: SharedString,
+    /// Which page the rail has selected.
+    page: Page,
     paint: Paint,
     /// What each key shows, in the deck's own key order.
     slots: Vec<Slot>,
@@ -277,10 +290,17 @@ struct Controller {
     starts_with_windows: bool,
     /// Why the sign-in entry does not work, when it is there but broken.
     autostart_note: Option<String>,
+    /// What comparing this binary with the copy Windows starts found.
+    sign_in_copy: Option<SignInCopy>,
     /// Clicks on the version line, until they add up to the reveal.
     version_clicks: u8,
     /// Frames the window has built, for the startup and hitch timings.
     frames: u32,
+    /// What the most recent frame cost.
+    ///
+    /// Recorded by the same measurement that writes the diagnostic log, so the
+    /// status bar reports the window's own timing and not a second one.
+    last_frame: Duration,
     /// True when the window was told not to look for a deck at all.
     blind: bool,
     /// Profile management for this deck.
@@ -295,6 +315,14 @@ struct Controller {
     /// Built when the selection changes, never while drawing: decoding a photo
     /// on every frame would make the window crawl.
     preview: Option<(ss550_engine::AssetName, Arc<gpui_kit::RenderImage>)>,
+    /// The pictures the tiles and the gallery show, already fitted to the deck's
+    /// tile size and swapped for the renderer.
+    ///
+    /// Built when the deck, the profile or the library changes — never while
+    /// drawing. A tile that finds its picture here paints it; a tile that does
+    /// not falls back to its flat colour, so a picture deleted from the library
+    /// while a profile still names it cannot blank a key or panic the window.
+    previews: BTreeMap<ss550_engine::AssetName, Arc<gpui_kit::RenderImage>>,
     /// Tiles already rendered for this deck's image size, so switching profile
     /// back and forth does not re-decode every picture.
     tiles: Option<render::TileCache>,
@@ -380,6 +408,15 @@ impl Controller {
             Err(error) => (false, Some(format!("Windows sign-in entry: {error}"))),
         };
 
+        // The sign-in entry names a copy of this program, and that copy is only
+        // written when the switch is turned on. Refreshing it here is what makes
+        // a new build the one Windows opens at the next sign-in.
+        let sign_in_copy = if starts_with_windows {
+            sync_sign_in_copy()
+        } else {
+            None
+        };
+
         // Two timers in one loop: key presses are polled fast, everything else
         // runs at the slower maintenance rate.
         cx.spawn(async move |this, cx| loop {
@@ -415,6 +452,7 @@ impl Controller {
                 None if blind => "Started without looking for a deck.".into(),
                 None => "Looking for the deck…".into(),
             },
+            page: Page::Deck,
             paint: Paint::White,
             slots: Vec::new(),
             pressed: Vec::new(),
@@ -440,14 +478,17 @@ impl Controller {
             window_handle,
             starts_with_windows,
             autostart_note,
+            sign_in_copy,
             version_clicks: 0,
             frames: 0,
+            last_frame: Duration::ZERO,
             blind,
             profile_store: ss550_engine::ProfileStore::new(),
             assets: ss550_engine::AssetLibrary::at_config_dir(&ss550_engine::config_dir()),
             library: Vec::new(),
             selected_asset: None,
             preview: None,
+            previews: BTreeMap::new(),
             tiles: None,
         };
 
@@ -577,6 +618,75 @@ impl Controller {
                 .into(),
             };
         }
+
+        // Last, because it reads the profile and the deck's tile size: the grid
+        // can now paint every picture the profile says a key shows.
+        self.rebuild_previews();
+    }
+
+    /// Fits every picture the active profile shows to the deck's tile, once.
+    ///
+    /// This is the only place the grid's pictures are decoded and encoded: it
+    /// runs on a deck change, a profile switch or a library refresh, and never
+    /// while a frame is being drawn.
+    fn rebuild_previews(&mut self) {
+        self.previews.clear();
+        let names: Vec<ss550_engine::AssetName> = match self.profile_store.active() {
+            Some(profile) => profile
+                .appearance
+                .values()
+                .filter_map(|appearance| appearance.asset().cloned())
+                .collect(),
+            None => Vec::new(),
+        };
+        self.ensure_previews(names);
+
+        // An open gallery lists every picture, not only the ones the profile
+        // names, so its thumbnails come back with the same clear.
+        if self.page == Page::Artwork {
+            self.ensure_library_previews();
+        }
+    }
+
+    /// Builds the fitted preview of every named picture that is not cached yet.
+    ///
+    /// A name with no file behind it — a picture deleted from the folder while a
+    /// profile still references it — is skipped, not reported: the tile falls
+    /// back to its flat colour and the note keeps saying what the user last did.
+    fn ensure_previews<I>(&mut self, names: I)
+    where
+        I: IntoIterator<Item = ss550_engine::AssetName>,
+    {
+        let Some(spec) = self.session.as_ref().map(session::DeckSession::image_spec) else {
+            return;
+        };
+
+        for name in names {
+            if self.previews.contains_key(&name) {
+                continue;
+            }
+            let Ok(source) = self.assets.read(&name) else {
+                continue;
+            };
+            let Ok(frame) = render::preview_frame(spec, &name, &source) else {
+                continue;
+            };
+            self.previews
+                .insert(name, Arc::new(gpui_kit::RenderImage::new([frame])));
+        }
+    }
+
+    /// Fits every picture in the library to the deck's tile.
+    ///
+    /// Called when the gallery opens and when the folder is re-read, so the
+    /// gallery lists thumbnails without decoding anything during a frame.
+    fn ensure_library_previews(&mut self) {
+        let names: Vec<ss550_engine::AssetName> = self
+            .library
+            .iter()
+            .map(|asset| asset.name.clone())
+            .collect();
+        self.ensure_previews(names);
     }
 
     /// Loads the bindings for one deck.
@@ -676,6 +786,32 @@ impl Controller {
         self.link = Link::Connecting;
     }
 
+    /// Moves the window to a page, building what that page needs before its
+    /// first frame.
+    ///
+    /// The gallery needs a thumbnail per picture, and a thumbnail is a decode.
+    /// It happens here — on the click that opens the page — and never inside
+    /// `render`.
+    fn show_page(&mut self, page: Page) {
+        self.page = page;
+        if page == Page::Artwork {
+            self.ensure_library_previews();
+        }
+    }
+
+    /// Drops whatever link there is and asks the worker for a fresh attempt.
+    ///
+    /// The backoff starts over so the click answers immediately, and the note
+    /// says so, because a button that appears to do nothing is worse than no
+    /// button.
+    fn reconnect(&mut self) {
+        self.drop_deck();
+        self.link = Link::Connecting;
+        self.attempts = 0;
+        self.note = "Reconnecting…".into();
+        self.request_attempt();
+    }
+
     /// Drops the deck after its bytes stopped moving.
     ///
     /// Everything sized by the deck goes with it, so nothing in the window can
@@ -715,6 +851,10 @@ impl Controller {
             self.note =
                 format!("Switched to profile: {name} (bindings will apply on connect)").into();
         }
+
+        // Every profile names its own pictures, and the tiles show the active
+        // one. Building them here keeps the decode out of the frame.
+        self.rebuild_previews();
     }
 
     /// Determines the paint slot from a profile (uses per-key color override if available).
@@ -748,7 +888,7 @@ impl Controller {
         self.report(session::SessionError::Deck(error));
     }
 
-    /// Paints one key with the colour picked in step 1.
+    /// Paints one key with the colour picked in the toolbar.
     fn paint_key(&mut self, index: usize) {
         let slot = self.paint.slot();
         let colour = self.paint.rgb();
@@ -1116,6 +1256,9 @@ impl Controller {
             Ok(installed) => {
                 self.starts_with_windows = enabled;
                 self.autostart_note = None;
+                // Turning the switch on installed this very binary, and turning
+                // it off removed the entry, so the comparison note is spent.
+                self.sign_in_copy = None;
                 self.note = match installed {
                     Some(path) => format!(
                         "This controller now starts with Windows from {}.",
@@ -1245,30 +1388,34 @@ impl Controller {
 
     /// Removes the selected key's binding and saves the file.
     fn clear_binding(&mut self) {
+        self.remove_binding(self.selected_key);
+    }
+
+    /// Removes one key's binding and saves the file.
+    ///
+    /// Takes the key as an argument so the bound list can unbind a row without
+    /// moving the selection away from the key the editor is showing.
+    fn remove_binding(&mut self, number: KeyNumber) {
         let Some(path) = self.store_path.clone() else {
             self.note = "No deck is connected, so there is no binding file to clear.".into();
             return;
         };
-        match self.store.remove(self.selected_key) {
+        match self.store.remove(number) {
             Some(_) => match self.store.save(&path) {
                 Ok(()) => {
-                    self.note = format!(
-                        "Key #{} cleared — it does nothing now.",
-                        self.selected_key.get()
-                    )
-                    .into();
+                    self.note =
+                        format!("Key #{} cleared — it does nothing now.", number.get()).into();
                 }
                 Err(err) => {
                     self.note = format!(
                         "Key #{} was cleared, but the file was not saved: {err}",
-                        self.selected_key.get()
+                        number.get()
                     )
                     .into();
                 }
             },
             None => {
-                self.note =
-                    format!("Key #{} had no action to clear.", self.selected_key.get()).into()
+                self.note = format!("Key #{} had no action to clear.", number.get()).into();
             }
         }
     }
@@ -1285,11 +1432,12 @@ impl Controller {
         self.library = assets;
 
         // A file the user replaced by hand has the same name the cache already
-        // holds. Refreshing is the moment they asked to look again, so the
-        // cache starts over.
+        // holds. Refreshing is the moment they asked to look again, so both
+        // caches start over.
         if let Some(tiles) = self.tiles.as_mut() {
             tiles.clear();
         }
+        self.previews.clear();
 
         // A picture that is no longer there must not stay highlighted.
         let still_there = self
@@ -1300,6 +1448,10 @@ impl Controller {
             self.selected_asset = None;
             self.preview = None;
         }
+
+        // The pictures the keys show are rebuilt whether or not the gallery is
+        // open; the gallery's own thumbnails with them, when it is.
+        self.rebuild_previews();
 
         Ok(count)
     }
@@ -1355,6 +1507,9 @@ impl Controller {
         }
 
         self.save_profile();
+        // The key now shows a picture, so the tile needs it fitted before the
+        // next frame rather than during it.
+        self.rebuild_previews();
         if self.repaint_key(key) {
             self.note = format!("Key #{key} now shows {name}.").into();
         }
@@ -1369,6 +1524,7 @@ impl Controller {
         }
 
         self.save_profile();
+        self.rebuild_previews();
         if self.repaint_key(key) {
             self.note = format!("Key #{key} shows the profile colour again.").into();
         }
@@ -1504,6 +1660,7 @@ impl Controller {
     /// enough to be seen as a hitch is recorded. Logging every frame forever
     /// would bury a crash report under a frame dump nobody reads.
     fn log_frame(&mut self, cost: Duration) {
+        self.last_frame = cost;
         self.frames = self.frames.saturating_add(1);
         if self.frames == 1 {
             diagnostics::record(&format!(
@@ -1557,963 +1714,80 @@ fn binding_number(session: &session::DeckSession, index: usize) -> Option<KeyNum
     KeyNumber::new(u8::try_from(key + 1).ok()?).ok()
 }
 
-/// The label above one display row: where it sits, and the keys in it.
-///
-/// The row count comes from the deck, so a deck with two rows and a deck with
-/// five get the right words without the window knowing either number.
-fn row_label(depth: usize, total: usize, keys: &[usize]) -> String {
-    let place = if depth == 0 {
-        "TOP ROW"
-    } else if depth + 1 == total {
-        "BOTTOM ROW"
-    } else {
-        "MIDDLE ROW"
-    };
-    match (keys.first(), keys.last()) {
-        (Some(first), Some(last)) => format!("{place} · keys {} to {}", first + 1, last + 1),
-        _ => place.to_string(),
-    }
-}
-
-/// One clickable key tile: the tile itself is the colour the key shows.
-fn key_tile(
-    idx: usize,
-    slot: Slot,
-    pressed: bool,
-    binding: Option<SharedString>,
-    cx: &mut Context<Controller>,
-) -> impl IntoElement {
-    let off_fill = cx.theme().muted;
-    let off_ink = cx.theme().muted_foreground;
-    let idle_border = cx.theme().muted_foreground.opacity(0.35);
-    let active_border = cx.theme().primary;
-
-    let (fill, ink, name) = match slot {
-        Slot::White => (color(0xe4e4e7), color(0x18181b), "WHITE"),
-        Slot::Red => (color(0xdc2626), color(0xffffff), "RED"),
-        Slot::Image => (color(0x3f3f46), color(0xfafafa), "IMAGE"),
-        Slot::Off => (off_fill, off_ink, "OFF"),
-    };
-
-    let has_binding = binding.is_some();
-    let binding_text = binding.unwrap_or_else(|| "NO ACTION".into());
-    let binding_ink = if has_binding { ink } else { ink.opacity(0.45) };
-
-    div()
-        .id(("deck-key", idx))
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap(px(2.))
-        .w(px(140.))
-        .h(px(84.))
-        .rounded(px(12.))
-        .border_2()
-        .border_color(if pressed { active_border } else { idle_border })
-        .bg(fill)
-        .text_color(ink)
-        .cursor_pointer()
-        .child(
-            div()
-                .text_size(px(20.))
-                .font_weight(FontWeight::BOLD)
-                .child(format!("#{}", idx + 1)),
-        )
-        .child(div().text_size(px(12.)).child(name))
-        .child(
-            div()
-                .text_size(px(11.))
-                .text_color(binding_ink)
-                .child(binding_text),
-        )
-        .child(
-            div()
-                .text_size(px(9.))
-                .font_weight(FontWeight::BOLD)
-                .text_color(if pressed {
-                    active_border
-                } else {
-                    ink.opacity(0.0)
-                })
-                .child("PRESSED"),
-        )
-        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-            this.paint_key(idx);
-            cx.notify();
-        }))
-}
-
-/// One small button of the key picker in the bindings panel.
-fn picker_button(
-    idx: usize,
-    number: KeyNumber,
-    selected: bool,
-    bound: bool,
-    cx: &mut Context<Controller>,
-) -> impl IntoElement {
-    let primary = cx.theme().primary;
-    let foreground = cx.theme().foreground;
-    let muted = cx.theme().muted;
-    let muted_foreground = cx.theme().muted_foreground;
-
-    let (fill, ink, border) = if selected {
-        (primary.opacity(0.18), foreground, primary)
-    } else if bound {
-        (muted, foreground, primary.opacity(0.6))
-    } else {
-        (
-            muted.opacity(0.3),
-            muted_foreground,
-            muted_foreground.opacity(0.25),
-        )
-    };
-
-    div()
-        .id(("picker-key", idx))
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(px(44.))
-        .h(px(30.))
-        .rounded(px(8.))
-        .border_2()
-        .border_color(border)
-        .bg(fill)
-        .text_color(ink)
-        .text_size(px(13.))
-        .font_weight(FontWeight::BOLD)
-        .cursor_pointer()
-        .child(number.get().to_string())
-        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.select_key(number, window, cx);
-            cx.notify();
-        }))
-}
-
-fn section_title(text: &'static str, cx: &mut Context<Controller>) -> impl IntoElement {
-    div()
-        .text_size(px(14.))
-        .font_weight(FontWeight::BOLD)
-        .text_color(cx.theme().foreground)
-        .child(text)
-}
-
-fn hint(text: impl Into<SharedString>, cx: &mut Context<Controller>) -> impl IntoElement {
-    div()
-        .text_size(px(13.))
-        .text_color(cx.theme().muted_foreground)
-        .child(text.into())
-}
-
 impl Render for Controller {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Measured from here to the finished tree: that is what the window
         // spends to put a frame on screen, and what startup is made of.
         let frame_started = Instant::now();
-        let background = cx.theme().background;
-        let foreground = cx.theme().foreground;
-        let muted = cx.theme().muted_foreground;
-        let border = cx.theme().border;
-        let primary = cx.theme().primary;
-
-        let (status_fill, status_ink, status_text) = match self.link {
-            Link::Connected => (color(0x16a34a), color(0xffffff), "CONNECTED"),
-            Link::Connecting => (color(0xf59e0b), color(0x18181b), "CONNECTING"),
-            Link::Waiting => (color(0xf59e0b), color(0x18181b), "WAITING FOR DECK"),
-            Link::Lost => (color(0xdc2626), color(0xffffff), "CONNECTION LOST"),
-        };
-
-        // The header names the deck in front of the window, and nothing else.
-        // Before one answers there is no deck to name, so the window says so
-        // instead of describing a model it may not be talking to.
-        let (deck_title, deck_subtitle) = match self.session.as_ref() {
-            Some(session) => {
-                let geometry = session.geometry();
-                let spec = session.image_spec();
-                let mut subtitle = format!(
-                    "{} keys · {} columns · {}x{} images",
-                    geometry.key_count(),
-                    geometry.columns(),
-                    spec.width(),
-                    spec.height()
-                );
-                let dials = session.capabilities().dial_count();
-                if dials > 0 {
-                    subtitle.push_str(&format!(" · {dials} dials"));
-                }
-                (SharedString::from(session.label().to_string()), subtitle)
-            }
-            None => (
-                SharedString::from("No deck yet"),
-                "Plug a deck in; this window follows whatever answers.".to_string(),
-            ),
-        };
-
-        // Active profile display - shows current profile or "no profile"
-        let profile_text = self.profile_store.active_name().unwrap_or("default");
-        let profile_pill = Button::new("profile-switcher")
-            .secondary()
-            .label(format!("PROFILE: {profile_text}"))
-            .on_click(cx.listener(|this: &mut Controller, _: &ClickEvent, _, cx| {
-                // Cycle to next profile on click - determine next profile first
-                let next_name = {
-                    let profiles: Vec<String> = this.profile_store.profile_names();
-                    let current = this.profile_store.active_name().map(|s| s.to_string());
-                    let next = profiles
-                        .iter()
-                        .position(|p| Some(p.as_str()) == current.as_deref())
-                        .map(|i| (i + 1) % profiles.len());
-                    next.and_then(|i| profiles.get(i).cloned())
-                };
-
-                // Now we can mutate since we've extracted all needed info
-                if let Some(name) = next_name {
-                    this.switch_profile(&name);
-                    cx.notify();
-                }
-            }));
-
-        let is_dark = cx.theme().mode.is_dark();
-        let theme_toggle = Button::new("theme-toggle")
-            .secondary()
-            .label(if is_dark {
-                "THEME: DARK · CLICK FOR LIGHT"
-            } else {
-                "THEME: LIGHT · CLICK FOR DARK"
-            })
-            .on_click(cx.listener(|_, _: &ClickEvent, window, cx| {
-                let next = if cx.theme().mode.is_dark() {
-                    ThemeMode::Light
-                } else {
-                    ThemeMode::Dark
-                };
-                Theme::change(next, Some(window), cx);
-                cx.notify();
-            }));
-
-        let white_selected = self.paint == Paint::White;
-        let red_selected = self.paint == Paint::Red;
-
-        let paint_white = Button::new("paint-white")
-            .custom(
-                ButtonCustomVariant::new(cx)
-                    .color(color(0xe4e4e7))
-                    .foreground(color(0x18181b))
-                    .hover(color(0xd4d4d8))
-                    .active(color(0xc4c4c9)),
-            )
-            .label(if white_selected {
-                "WHITE  ✓ SELECTED"
-            } else {
-                "WHITE"
-            })
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.paint = Paint::White;
-                this.note = "Clicking a key now paints it white.".into();
-                cx.notify();
-            }));
-
-        let paint_red = Button::new("paint-red")
-            .custom(
-                ButtonCustomVariant::new(cx)
-                    .color(color(0xdc2626))
-                    .foreground(color(0xffffff))
-                    .hover(color(0xc31f1f))
-                    .active(color(0xab1a1a)),
-            )
-            .label(if red_selected {
-                "RED  ✓ SELECTED"
-            } else {
-                "RED"
-            })
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.paint = Paint::Red;
-                this.note = "Clicking a key now paints it red.".into();
-                cx.notify();
-            }));
-
-        // What each key does, by tile index, for the labels on the deck. The
-        // range comes from the deck, not from a key count written here.
-        let key_count = self
-            .session
-            .as_ref()
-            .map_or(0, session::DeckSession::key_count);
-        let binding_summaries: Vec<Option<SharedString>> = self
-            .session
-            .as_ref()
-            .map(|session| {
-                (0..key_count)
-                    .map(|index| {
-                        binding_number(session, index)
-                            .and_then(|number| self.store.get(number))
-                            .map(|action| SharedString::from(action.summary()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let mut rows = Vec::new();
-        if let Some(session) = self.session.as_ref() {
-            for (depth, keys) in session.rows().iter().enumerate() {
-                let tiles = keys
-                    .iter()
-                    .map(|&index| {
-                        key_tile(
-                            index,
-                            self.slots.get(index).copied().unwrap_or(Slot::Off),
-                            self.pressed.get(index).copied().unwrap_or(false),
-                            binding_summaries.get(index).cloned().flatten(),
-                            cx,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                rows.push(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.))
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(muted)
-                                .child(row_label(depth, session.rows().len(), keys)),
-                        )
-                        .child(div().flex().flex_row().gap(px(10.)).children(tiles)),
-                );
-            }
-        }
-
-        // ── Bindings panel ────────────────────────────────────────────
-        let mut picker_rows = Vec::new();
-        if let Some(session) = self.session.as_ref() {
-            for keys in session.rows() {
-                let mut buttons = Vec::new();
-                for &index in keys {
-                    let Some(number) = binding_number(session, index) else {
-                        continue;
-                    };
-                    buttons.push(picker_button(
-                        index,
-                        number,
-                        number == self.selected_key,
-                        self.store.get(number).is_some(),
-                        cx,
-                    ));
-                }
-                picker_rows.push(div().flex().flex_row().gap(px(6.)).children(buttons));
-            }
-        }
-
-        let launch_selected = self.draft == DraftKind::Launch;
-        let url_selected = self.draft == DraftKind::OpenUrl;
-        let kind_launch = Button::new("draft-launch")
-            .secondary()
-            .label(if launch_selected {
-                "LAUNCH APP  ✓"
-            } else {
-                "LAUNCH APP"
-            })
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.draft = DraftKind::Launch;
-                this.note = "Fill the program path, then press SAVE BINDING.".into();
-                cx.notify();
-            }));
-
-        let kind_url = Button::new("draft-url")
-            .secondary()
-            .label(if url_selected {
-                "OPEN URL  ✓"
-            } else {
-                "OPEN URL"
-            })
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.draft = DraftKind::OpenUrl;
-                this.note = "Fill the URL, then press SAVE BINDING.".into();
-                cx.notify();
-            }));
-
-        let launch_fields = div()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(
-                Field::new()
-                    .label("PROGRAM · full path to the program to run")
-                    .child(Input::new(&self.program_input)),
-            )
-            .child(
-                Field::new()
-                    .label("ARGUMENTS · one per line, each passed on its own")
-                    .child(Textarea::new(&self.args_input)),
-            );
-
-        let url_fields = div().flex().flex_col().gap(px(8.)).child(
-            Field::new()
-                .label("URL · must start with its scheme, e.g. https://")
-                .child(Input::new(&self.url_input)),
-        );
-
-        let draft_fields = if launch_selected {
-            div().child(launch_fields)
-        } else {
-            div().child(url_fields)
-        };
-
-        let save = Button::new("save-binding")
-            .primary()
-            .label("SAVE BINDING")
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.save_binding(cx);
-                cx.notify();
-            }));
-
-        let clear = Button::new("clear-binding")
-            .danger()
-            .label("CLEAR KEY")
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.clear_binding();
-                cx.notify();
-            }));
-
-        // What the app does when it is not in front of the user.
-        let tray_note = match &self.tray_error {
-            Some(error) => format!("The tray icon is missing: {error}"),
-            None => "The tray icon is in the notification area.".to_string(),
-        };
-        let background_section = div()
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .w(px(380.))
-            .child(section_title("STEP 5 · RUN IN THE BACKGROUND", cx))
-            .child(hint(
-                "The controller lives in the notification area. Close the window \
-                 and it keeps the deck awake and still runs your keys. The tray \
-                 icon brings the window back, and it is the only way to leave.",
-                cx,
-            ))
-            .child(hint(tray_note, cx))
-            .child(
-                Switch::new("start-with-windows")
-                    .checked(self.starts_with_windows)
-                    .label("START WITH WINDOWS")
-                    .on_change({
-                        let controller = cx.entity();
-                        move |checked: &bool, _window, cx| {
-                            controller.update(cx, |this, cx| this.set_autostart(*checked, cx));
-                        }
-                    }),
-            )
-            .child(hint(
-                "Turn this on and Windows starts the controller when you sign in, hidden in \
-                 the tray. It copies the controller to %LOCALAPPDATA%\\Programs\\ss550, writes \
-                 one entry under HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run, for \
-                 this user only, and removes that entry again when you turn this off.",
-                cx,
-            ));
-        let background_section = match &self.autostart_note {
-            Some(note) => background_section.child(hint(note.clone(), cx)),
-            None => background_section,
-        };
-        // The version line is the quiet way into the diagnostic log. It reads
-        // as a stamp, not as a control, so nothing invites a click.
-        let background_section = background_section.child(
-            div()
-                .id("version-line")
-                .cursor_pointer()
-                .text_size(px(12.))
-                .text_color(cx.theme().muted_foreground.opacity(0.55))
-                .child(format!("v{}", env!("CARGO_PKG_VERSION")))
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.reveal_log();
-                    cx.notify();
-                })),
-        );
-
-        // ── Artwork: the library, a preview, and the selected key ─────
-        //
-        // There is no file dialog: the user drops a picture in the folder the
-        // app owns and presses REFRESH. The preview is the fitted tile, so what
-        // they see here is what the deck would show, black bands included.
-        let artwork_rows: Vec<AnyElement> = self
-            .library
-            .iter()
-            .map(|asset| {
-                let selected = self.selected_asset.as_ref() == Some(&asset.name);
-                let id = SharedString::from(format!("asset-{}", asset.name));
-                let button = if selected {
-                    Button::new(id).primary()
-                } else {
-                    Button::new(id).secondary()
-                };
-                let name = asset.name.clone();
-                button
-                    .label(format!(
-                        "{} · {:.0} KB",
-                        asset.name,
-                        asset.bytes as f64 / 1024.0
-                    ))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.select_asset(name.clone());
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            })
-            .collect();
-
-        let preview_block: AnyElement = match &self.preview {
-            Some((name, image)) => {
-                // The rendered image inside a container with proper bounds
-                // img() accepts Arc<RenderImage> and draws it directly
-                let container = div()
-                    .w(px(144.))
-                    .h(px(144.))
-                    .rounded(px(8.))
-                    .overflow_hidden()
-                    .bg(color(0x000000))
-                    .child(gpui_kit::img(image.clone()).w(px(144.)).h(px(144.)));
-
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(container)
-                    .child(hint(format!("{name} · fitted to the deck's tile"), cx))
-                    .into_any_element()
-            }
-            None => hint("Pick a picture to see what the deck will show.", cx).into_any_element(),
-        };
-
-        let use_asset = Button::new("use-asset")
-            .primary()
-            .label(format!("USE ON KEY #{}", self.selected_key.get()))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.assign_asset();
-                cx.notify();
-            }));
-
-        let remove_asset = Button::new("remove-artwork")
-            .secondary()
-            .label("REMOVE ARTWORK")
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.remove_artwork();
-                cx.notify();
-            }));
-
-        let open_folder = Button::new("open-assets")
-            .secondary()
-            .label("OPEN FOLDER")
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.open_assets_folder();
-                cx.notify();
-            }));
-
-        let refresh_assets = Button::new("refresh-assets")
-            .secondary()
-            .label("REFRESH")
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                match this.refresh_library() {
-                    Ok(count) => {
-                        this.note = format!(
-                            "{count} picture{} in the library.",
-                            if count == 1 { "" } else { "s" }
-                        )
-                        .into();
-                    }
-                    Err(error) => {
-                        this.note = format!("Could not read the picture folder: {error}").into();
-                    }
-                }
-                cx.notify();
-            }));
-
-        let artwork_panel = div()
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .w(px(380.))
-            .child(section_title("STEP 4 · SHOW A PICTURE ON A KEY", cx))
-            .child(hint(
-                "Drop an image into the folder, press REFRESH, pick it here, then \
-                 USE ON KEY. The picture is fitted to the deck's tile, never stretched, \
-                 and re-encoded smaller if it would not fit.",
-                cx,
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(12.))
-                    .child(preview_block)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.))
-                            .flex_1()
-                            .child(hint(format!("{} PICTURES", self.library.len()), cx))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(4.))
-                                    .max_h(px(200.))  // Limit rows height
-                                    .children(artwork_rows)
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(8.))
-                    .child(use_asset)
-                    .child(remove_asset),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(8.))
-                    .child(open_folder)
-                    .child(refresh_assets),
-            )
-            .child(hint(
-                format!(
-                    "Editing key #{}. The folder is {}.",
-                    self.selected_key.get(),
-                    self.assets.root().display()
-                ),
-                cx,
-            ));
-
-        let bindings_panel = div()
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .w(px(380.))
-            .child(section_title("STEP 3 · BIND AN ACTION TO A KEY", cx))
-            .child(hint(
-                "Pick a key, choose what it does, fill the fields and press \
-                 SAVE BINDING. CLEAR KEY makes the key do nothing again.",
-                cx,
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(muted)
-                            .child(format!("EDITING KEY #{}", self.selected_key.get())),
-                    )
-                    .children(picker_rows),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(8.))
-                    .child(kind_launch)
-                    .child(kind_url),
-            )
-            .child(draft_fields)
-            .child(div().flex().flex_row().gap(px(8.)).child(save).child(clear))
-            .child(hint(
-                match &self.store_path {
-                    Some(path) => format!("Bindings are saved to {}", path.display()),
-                    None => "Bindings are saved once a deck answers.".to_string(),
-                },
-                cx,
-            ));
-
-        // ── Deck-wide controls, offered only where the deck has them ───
-        //
-        // The window does not decide what a deck can do: the deck's own
-        // capabilities decide which buttons exist. A deck without brightness
-        // never sees a brightness row, so nothing offers a control that could
-        // only be refused.
-        let capabilities = self
-            .session
-            .as_ref()
-            .map_or(deck_api::Capabilities::default(), |session| {
-                session.capabilities()
-            });
-        let paint_all_label = format!("PAINT ALL {key_count} KEYS");
-
-        let mut controls: Vec<AnyElement> = Vec::new();
-        controls.push(
-            Button::new("paint-all")
-                .primary()
-                .label(paint_all_label)
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    let slot = this.paint.slot();
-                    this.apply_all(slot);
-                    cx.notify();
-                }))
-                .into_any_element(),
-        );
-        if capabilities.clear_key() {
-            controls.push(
-                Button::new("clear-selected-key")
-                    .secondary()
-                    .label("CLEAR SELECTED KEY")
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        let index = usize::from(this.selected_key.get().saturating_sub(1));
-                        this.clear_painted_key(index);
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            );
-        }
-        if capabilities.clear_all() {
-            controls.push(
-                Button::new("clear-all")
-                    .danger()
-                    .label("CLEAR ALL (BLANK)")
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.clear_all();
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            );
-        }
-        if capabilities.keep_alive() {
-            controls.push(
-                Button::new("keepalive")
-                    .secondary()
-                    .label("KEEP ALIVE · SEND ONE NOW")
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.heartbeat();
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            );
-        }
-        controls.push(
-            Button::new("reconnect")
-                .secondary()
-                .label("RECONNECT")
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.drop_deck();
-                    this.link = Link::Connecting;
-                    this.attempts = 0;
-                    this.note = "Reconnecting…".into();
-                    this.request_attempt();
-                    cx.notify();
-                }))
-                .into_any_element(),
-        );
-        controls.push(
-            Button::new("hide")
-                .secondary()
-                .label("HIDE · KEEPS RUNNING")
-                .on_click(cx.listener(|this, _: &ClickEvent, _, _| {
-                    this.hide_window();
-                }))
-                .into_any_element(),
-        );
-
-        let mut wide_hint = String::from("PAINT ALL uses the colour from step 1.");
-        if capabilities.clear_key() {
-            wide_hint.push_str(" CLEAR SELECTED KEY blanks the key the bindings panel is editing.");
-        }
-        if capabilities.clear_all() {
-            wide_hint.push_str(" CLEAR ALL blanks every key.");
-        }
-        if capabilities.keep_alive() {
-            wide_hint.push_str(
-                " The app keeps the deck awake by itself and sends a heartbeat on its own; \
-                 KEEP ALIVE just sends one by hand.",
-            );
-        }
-        if !capabilities.brightness() {
-            wide_hint.push_str(" This deck has no brightness control, so none is offered.");
-        }
-        wide_hint.push_str(
-            " RECONNECT looks for the deck again. HIDE takes the window off the screen and out \
-             of the taskbar; the app keeps running in the notification area and still runs your \
-             keys.",
-        );
-
-        let brightness_row: Vec<AnyElement> = if capabilities.brightness() {
-            let mut buttons = Vec::new();
-            for value in [25_u8, 50, 75, 100] {
-                let label = if self.brightness == value {
-                    format!("{value}%  ✓")
-                } else {
-                    format!("{value}%")
-                };
-                buttons.push(
-                    Button::new(SharedString::from(format!("brightness-{value}")))
-                        .secondary()
-                        .label(label)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.set_brightness(value);
-                            cx.notify();
-                        }))
-                        .into_any_element(),
-                );
-            }
-            vec![div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(muted)
-                        .child("BRIGHTNESS"),
-                )
-                .children(buttons)
-                .into_any_element()]
-        } else {
-            Vec::new()
-        };
-
-        // ── Left column: paint controls and the deck ──────────────────
-        let left_column = div()
-            .flex()
-            .flex_col()
-            .gap(px(16.))
-            .w(px(792.))
-            // Step 1: paint colour
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child(section_title("STEP 1 · PICK THE COLOUR", cx))
-                    .child(hint("The highlighted button is the colour used next.", cx))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap(px(12.))
-                            .child(paint_white)
-                            .child(paint_red),
-                    ),
-            )
-            // Step 2: deck
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.))
-                    .child(section_title("STEP 2 · CLICK A KEY TO PAINT IT", cx))
-                    .child(hint(
-                        "Each tile is the real colour of that key on the deck right now, \
-                         and the line under the colour is what pressing it runs. \
-                         A bright border means the key is pressed right now. \
-                         Rows match the device from top to bottom.",
-                        cx,
-                    ))
-                    .children(rows),
-            )
-            .child(div().h(px(1.)).w_full().bg(border))
-            // Deck-wide actions
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(10.))
-                    .children(controls),
-            )
-            .child(hint(wide_hint, cx))
-            .children(brightness_row)
-            // Status line
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(if self.link == Link::Lost {
-                        cx.theme().danger
-                    } else {
-                        primary
-                    })
-                    .child(self.note.clone()),
-            );
-
-        let root = div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(background)
-            .text_color(foreground)
-            .p(px(24.))
-            .gap(px(16.))
-            // ── Header ────────────────────────────────────────────────
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(16.))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .text_size(px(26.))
-                                    .font_weight(FontWeight::BOLD)
-                                    .child(deck_title),
-                            )
-                            .child(hint(deck_subtitle, cx)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(10.))
-                            .child(theme_toggle)
-                            .child(profile_pill)
-                            .child(
-                                div()
-                                    .px(px(14.))
-                                    .py(px(8.))
-                                    .rounded(px(999.))
-                                    .bg(status_fill)
-                                    .text_color(status_ink)
-                                    .text_size(px(14.))
-                                    .font_weight(FontWeight::BOLD)
-                                    .child(status_text),
-                            ),
-                    ),
-            )
-            .child(div().h(px(1.)).w_full().bg(border))
-            // ── Body: deck on the left, bindings on the right ─────────
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(20.))
-                    .child(left_column)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(16.))
-                            .child(bindings_panel)
-                            .child(artwork_panel)
-                            .child(background_section),
-                    ),
-            );
-
+        let root = ui::shell::app_shell(self, cx);
         self.log_frame(frame_started.elapsed());
         root
     }
+}
+
+/// What comparing this build with the installed copy ended up saying.
+///
+/// The line is shown in the settings page either way; `problem` is what decides
+/// whether it reads as a reassuring tick or as something the user has to act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SignInCopy {
+    /// The sentence the settings page shows.
+    text: SharedString,
+    /// True when the sign-in copy is *not* what this build needs it to be.
+    problem: bool,
+}
+
+/// Keeps the copy Windows starts at sign-in in step with the binary in use.
+///
+/// The sign-in entry names a file in a folder of its own, so a newly built
+/// controller runs only when the user starts it by hand: at the next logon,
+/// Windows still opens the copy it installed the day the switch was turned on.
+/// Comparing the two on startup and replacing the older one closes that gap,
+/// which is the difference between "the update worked" and "the app still opens
+/// the old build".
+///
+/// A development build never overwrites the installed copy: it is slower, it
+/// has a console attached, and it disappears on the next `cargo clean`, so
+/// pointing the sign-in entry at it would trade one stale copy for another.
+///
+/// Returns `None` when the two copies already agree and there is nothing worth
+/// saying.
+fn sync_sign_in_copy() -> Option<SignInCopy> {
+    if cfg!(debug_assertions) {
+        return Some(SignInCopy {
+            text: "This is a development build, so the copy Windows starts at sign-in was \
+                   left alone. Build with --release to update it."
+                .into(),
+            problem: false,
+        });
+    }
+    let running = std::env::current_exe().ok()?;
+    let (text, problem) = match install::refresh_installed(&running) {
+        Ok(install::Refresh::RunningInstalled) => return None,
+        Ok(install::Refresh::Updated(installed)) => (
+            format!(
+                "The copy Windows starts at sign-in now matches this build: {}.",
+                installed.display()
+            ),
+            false,
+        ),
+        Ok(install::Refresh::Blocked { installed, reason }) => (
+            format!(
+                "Windows still starts an older copy from {}, because it could not be replaced: \
+                 {reason}. Close that instance, then turn START WITH WINDOWS off and on again.",
+                installed.display()
+            ),
+            true,
+        ),
+        Err(error) => (
+            format!("The sign-in copy could not be checked: {error}"),
+            true,
+        ),
+    };
+    Some(SignInCopy {
+        text: SharedString::from(text),
+        problem,
+    })
 }
 
 /// The native handle of a GPUI window.
@@ -2553,6 +1827,11 @@ fn main() {
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1240.), px(880.)), cx)),
+                // A floor for the shell: the rail, a card of tiles and the
+                // column beside it need this much before anything has to be
+                // cut, and a window that clips its own content is worse than
+                // one that will not be dragged narrower.
+                window_min_size: Some(size(px(ui::WINDOW_MIN_W), px(ui::WINDOW_MIN_H))),
                 ..Default::default()
             };
 
