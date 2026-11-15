@@ -203,22 +203,17 @@ fn key_card(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Contro
         .child(deck_actions(controller, tokens, cx))
 }
 
-/// The row above the grid: what a click paints, and what a click clears.
+/// The row above the grid: the deck-wide controls that act on every key.
+///
+/// There is no colour picker here on purpose. A key is painted from its own
+/// card, on an explicit click on a swatch, because a key is something the user
+/// inspects far more often than repaints.
 fn toolbar(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller>) -> Div {
-    let paint = controller.paint;
     let brightness = controller.brightness;
     let capabilities = controller
         .session
         .as_ref()
         .map(|session| session.capabilities());
-
-    let swatches = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.))
-        .child(swatch(Paint::White, paint == Paint::White, tokens, cx))
-        .child(swatch(Paint::Red, paint == Paint::Red, tokens, cx));
 
     // A deck without a brightness control never sees one: the capability
     // decides, so nothing here can only be refused.
@@ -227,64 +222,26 @@ fn toolbar(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Control
         _ => div(),
     };
 
+    let clear_all = match capabilities {
+        Some(caps) if caps.clear_all() => Button::new("clear-all")
+            .ghost()
+            .label("CLEAR ALL")
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.clear_all();
+                cx.notify();
+            }))
+            .into_any_element(),
+        _ => div().into_any_element(),
+    };
+
     div()
         .flex()
-        .flex_col()
+        .flex_row()
+        .items_center()
+        .justify_between()
         .gap(px(12.))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(px(12.))
-                .child(swatches)
-                .child(brightness_block),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.))
-                .child(
-                    Button::new("paint-all")
-                        .primary()
-                        .label(if paint == Paint::White {
-                            "PAINT ALL WHITE"
-                        } else {
-                            "PAINT ALL RED"
-                        })
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            let slot = this.paint.slot();
-                            this.apply_all(slot);
-                            cx.notify();
-                        })),
-                )
-                .child(match capabilities {
-                    Some(caps) if caps.clear_key() => Button::new("clear-selected-key")
-                        .secondary()
-                        .label("CLEAR SELECTED KEY")
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            let index = usize::from(this.selected_key.get().saturating_sub(1));
-                            this.clear_painted_key(index);
-                            cx.notify();
-                        }))
-                        .into_any_element(),
-                    _ => div().into_any_element(),
-                })
-                .child(match capabilities {
-                    Some(caps) if caps.clear_all() => Button::new("clear-all")
-                        .ghost()
-                        .label("CLEAR ALL")
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.clear_all();
-                            cx.notify();
-                        }))
-                        .into_any_element(),
-                    _ => div().into_any_element(),
-                }),
-        )
+        .child(clear_all)
+        .child(brightness_block)
 }
 
 /// The brightness steps, as chips that mark the one in force.
@@ -330,7 +287,12 @@ fn brightness_row(current: u8, tokens: Tokens, cx: &mut Context<Controller>) -> 
         .children(chips)
 }
 
-/// A colour chip: a swatch of the colour and its name, ringed when active.
+/// A colour chip: a swatch of the colour and its name, ringed when in force.
+///
+/// Clicking one is an explicit instruction — it fills *the selected key*, not
+/// whatever the next click lands on. Nothing in the window paints on a key
+/// click any more: keys carry actions with parameters, and looking at one must
+/// not change it.
 fn swatch(paint: Paint, active: bool, tokens: Tokens, cx: &mut Context<Controller>) -> AnyElement {
     let (fill, ink, label) = match paint {
         Paint::White => (color(0xe4e4e7), color(0x18181b), "WHITE"),
@@ -376,10 +338,8 @@ fn swatch(paint: Paint, active: bool, tokens: Tokens, cx: &mut Context<Controlle
 
     activate(chip, cx, move |this, _window, cx| {
         this.paint = paint;
-        this.note = match paint {
-            Paint::White => "Clicking a key now paints it white.".into(),
-            Paint::Red => "Clicking a key now paints it red.".into(),
-        };
+        let index = usize::from(this.selected_key.get().saturating_sub(1));
+        this.paint_key(index);
         cx.notify();
     })
     .into_any_element()
@@ -559,14 +519,14 @@ fn tile(cell: Cell, size: f32, tokens: Tokens, cx: &mut Context<Controller>) -> 
     }
 
     tile.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-        // Selecting first and painting second leaves the paint result as the
-        // line in the status bar, which is what the click asked for.
+        // A click picks the key and nothing else. Touching a key to look at it
+        // must never repaint it: keys carry actions with parameters, and a
+        // gesture that also paints turns every inspection into a change.
         if let Some(session) = this.session.as_ref() {
             if let Some(number) = crate::binding_number(session, index) {
                 this.select_key(number, window, cx);
             }
         }
-        this.paint_key(index);
         cx.notify();
     }))
     .into_any_element()
@@ -738,30 +698,31 @@ fn inspector_card(
         .child(
             div()
                 .flex()
-                .flex_row()
+                .flex_col()
                 .gap(px(8.))
+                .child(micro_label("COLOUR", tokens))
                 .child(
-                    Button::new("inspector-paint")
-                        .primary()
-                        .label("PAINT THIS KEY")
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            let index = usize::from(this.selected_key.get().saturating_sub(1));
-                            this.paint_key(index);
-                            cx.notify();
-                        })),
-                )
-                .child(match can_clear {
-                    true => Button::new("inspector-clear")
-                        .secondary()
-                        .label("CLEAR")
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            let index = usize::from(this.selected_key.get().saturating_sub(1));
-                            this.clear_painted_key(index);
-                            cx.notify();
-                        }))
-                        .into_any_element(),
-                    false => div().into_any_element(),
-                }),
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(swatch(Paint::White, slot == Slot::White, tokens, cx))
+                        .child(swatch(Paint::Red, slot == Slot::Red, tokens, cx))
+                        .child(match can_clear {
+                            true => Button::new("inspector-clear")
+                                .ghost()
+                                .label("BLANK")
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    let index =
+                                        usize::from(this.selected_key.get().saturating_sub(1));
+                                    this.clear_painted_key(index);
+                                    cx.notify();
+                                }))
+                                .into_any_element(),
+                            false => div().into_any_element(),
+                        }),
+                ),
         )
         .child(
             Button::new("inspector-bind")
