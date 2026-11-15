@@ -7,6 +7,26 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Fixed — the app started the build from the day the switch was turned on
+- The sign-in entry names `%LOCALAPPDATA%\Programs\ss550\ss550-gui.exe`, and
+  that copy was only ever written by turning "START WITH WINDOWS" on. Every
+  build made afterwards stayed in `target\release`, so signing in — or starting
+  the app the way the user normally does — opened a controller from the day the
+  switch was first flipped, missing every fix since.
+- `ss550_tray::install::refresh_installed` compares the running binary with the
+  installed copy on startup and replaces the older one, reporting what it found
+  in the settings page. Lengths are compared before bytes, so an unchanged build
+  costs two metadata calls; a copy Windows already has mapped is reported with
+  its path and the operating system's reason instead of failing silently. A
+  debug build never overwrites the installed copy, because a development binary
+  is slower, keeps a console and disappears on `cargo clean`.
+- `update-steamcraft.ps1` discarded `cargo build`'s output and checked nothing,
+  so a failed build still "succeeded" and copied the previous binary over
+  itself. It now fails on the build's exit code, verifies the SHA-256 of the
+  installed copy against the build, and starts what it installed.
+  `update-steamcraft.bat` is a wrapper around it instead of a second, drifted
+  copy of the same steps.
+
 ### Added — six host-side profiles and a hotplug watcher
 - `ss550-engine::ProfileStore` keeps named profiles — `default`, `stream`,
   `meetings`, `gaming`, `work`, `entertainment` — in

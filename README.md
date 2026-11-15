@@ -22,7 +22,7 @@ protocol ──▶ driver ──▶ engine ──▶ gui (GPUI Kit)
 | Bind to actions | v1 catalogue: **App** and **URL** only |
 | Run actions | `.exe` by path, `.lnk` via explorer, `.bat`/`.cmd` via `cmd /C call`, URLs by scheme |
 | Background mode | tray icon, window hides (deck stays awake) |
-| Start with Windows | opt-in, one `HKCU\...\Run` value, off by default |
+| Start with Windows | opt-in, one `HKCU\...\Run` value, off by default; the installed copy is refreshed on every start |
 | Report dead programs | watched for 6s, shown in status line |
 | Safe mode | driver refuses unproven commands |
 | Profiles (M6) | 6 named profiles with JSON persistence |
