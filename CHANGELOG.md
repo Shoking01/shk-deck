@@ -7,6 +7,32 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Fixed — key images never reached the panel's edges
+- A photo of the deck, measured against a solid magenta payload, showed that a
+  key's lit area is 108 pixels across, not the 100 the community reference sends.
+  A 100×100 payload left an 8-pixel strip at the top and another at the left
+  holding whatever the key showed before: invisible on a solid colour, a frame
+  around every picture, and impossible to fix from the content because nothing
+  in the app was drawing it. The image spec now asks for 108×108.
+- The renderer's preview flipped the picture along with the payload, so it showed
+  what is sent rather than what the glass shows. A right-way-up key sat next to a
+  preview of it upside down; the preview is the glass now.
+
+### Fixed — profiles lived in an NTFS alternate data stream
+- `profiles/<deck key>.json` used the deck key raw, and that key contains a
+  colon. On Windows a colon separates a file from an alternate data stream, so
+  every profile was written inside a hidden stream of a file called `shape`:
+  invisible in Explorer, unreadable by anything but the same key. The name is
+  built like the bindings file's now — slug plus fingerprint — and the deck key
+  no longer carries the image size, so correcting the panel size cannot orphan a
+  deck's bindings and pictures again.
+
+### Changed — a key is inspected, not painted
+- Clicking a key painted it with the last chosen colour. That came from testing
+  and turns every inspection into a change, which cannot survive keys that carry
+  actions with parameters. A click selects now; the colour moved to the selected
+  key's card, where a swatch paints that one key and nothing else.
+
 ### Fixed — pictures were encoded below the quality the deck allowed
 - The quality ladder started at 80, so every picture was encoded at 80 even
   when the deck's nine-kilobyte limit had room for more; a 100×100 tile at 95
