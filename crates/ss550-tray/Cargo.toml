@@ -37,8 +37,12 @@ winreg = "0.56"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    # The program's own icon: `SHGetFileInfoW` needs the shell, and its
+    # `dwfileattributes` argument is a file-system flag type.
+    "Win32_Storage_FileSystem",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
+    "Win32_UI_Shell",
     # `SendInput`, and the `INPUT` record it takes: the keystroke sender.
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",

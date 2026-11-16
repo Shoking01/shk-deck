@@ -9,11 +9,14 @@
 //! goes out, and this crate is the only one allowed to make the call that sends
 //! it.
 //!
+//! It also reads the icon Windows shows for a program — [`appicon`] — because
+//! that is a shell call, and a key that runs a program draws it.
+//!
 //! It is also the **one** place in the project that is allowed to call
 //! `unsafe` code: it owns the Win32 calls that hide and restore the native
-//! window, the icon that lives in the notification area, and the `SendInput`
-//! call that delivers a keystroke. Every other crate keeps
-//! `#![deny(unsafe_code)]`.
+//! window, the icon that lives in the notification area, the `SendInput` call
+//! that delivers a keystroke, and the shell call that reads a program's icon.
+//! Every other crate keeps `#![deny(unsafe_code)]`.
 //!
 //! # Example
 //!
@@ -36,6 +39,7 @@
 // a keystroke live in this crate, and nowhere else in the project.
 #![allow(unsafe_code)]
 
+pub mod appicon;
 pub mod autostart;
 pub mod icon;
 pub mod install;
