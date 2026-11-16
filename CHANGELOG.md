@@ -35,6 +35,19 @@ messages; the file below is a human summary, not a substitute for
   focused, and no longer moves the window to the `Actions` page. The `Actions`
   page keeps the overview — key chips, the same editor, the bound list — because
   both places draw one widget and not two.
+- The custom picture is now a control of the key, not a page. Under the colour
+  row the editor shows the picture the selected key wears — a fitted thumbnail,
+  or a dashed box when it shows none — and `CHOOSE A PICTURE` opens the library
+  in place: one row per file with its thumbnail, its name and its size, the one
+  in use marked. Choosing a row assigns it and repaints the key and the deck
+  through the same path `REMOVE PICTURE` clears; `REFRESH` re-reads the folder
+  and `OPEN FOLDER` opens it. The `Artwork` page is gone with it: the rail lists
+  three pages. Without a deck the list still opens and a click says why it
+  cannot assign instead of doing nothing.
+- The library's thumbnails have a cache of their own, filled when the picture
+  list is opened and when the folder is re-read, and never inside `render`.
+  Putting a picture on a key decodes that picture and nothing else: the whole
+  folder is not re-fitted for one assignment.
 
 ### Fixed — a JSON file saved with a byte-order mark read as corrupt
 - A BOM is legal UTF-8 and the tooling people edit these files with writes one.
