@@ -7,6 +7,17 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Added — blank keys, and a picture from anywhere
+- `BLANK` is a colour a key can take, and the default: a key with nothing bound
+  to it no longer glows white. The six default profiles stop carrying the test
+  colours they shipped with, and a profile with no slot is blank rather than
+  white.
+- The key editor's picture controls open the system's file dialog, filtered to
+  the formats the library accepts, and import what it answers before naming it on
+  the key. The browsable library list is gone with it: on a folder holding six
+  thousand pictures it had to be searched to be useful and decoded to be drawn,
+  while the dialog needs neither.
+
 ### Added — a key shows what it runs, and is edited where it is
 - A key bound to a program draws the application's own icon. A `.lnk` is resolved
   to its target before the shell is asked, because `SHGetFileInfoW` answers about
