@@ -466,7 +466,7 @@ pub(crate) fn artwork_page(
 }
 
 /// A gallery thumbnail: the fitted tile, or a quiet box when it is not ready.
-fn thumbnail(picture: Option<Arc<gpui_kit::RenderImage>>, tokens: Tokens) -> Div {
+pub(crate) fn thumbnail(picture: Option<Arc<gpui_kit::RenderImage>>, tokens: Tokens) -> Div {
     let boxed = div()
         .flex_none()
         .w(px(44.))
@@ -696,7 +696,7 @@ pub(crate) fn settings_page(
 // ── Shared pieces for the three pages ───────────────────────────────────
 
 /// A framed explanation, used wherever a list would be empty.
-fn placeholder(title: &'static str, text: &str, tokens: Tokens) -> Div {
+pub(crate) fn placeholder(title: &'static str, text: &str, tokens: Tokens) -> Div {
     div()
         .flex()
         .flex_col()

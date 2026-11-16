@@ -107,7 +107,18 @@ impl IconCache {
     /// This is the whole of the work: one icon extraction per program path and
     /// one glyph per distinct initial. Called on a rebind, a profile switch, a
     /// library refresh and a deck change — never from a frame.
-    pub(crate) fn prepare(&mut self, spec: Option<ImageSpec>, actions: &[Action]) {
+    ///
+    /// `draft` is the program the editor is about to bind. It is not a binding
+    /// yet, but the key's face is decided by it, so its icon is read here — once,
+    /// on the change that made it the draft — and the editor draws it before
+    /// SAVE BINDING is pressed. It is kept in the cache for the same reason the
+    /// bound ones are: the tile and the deck will want exactly this picture.
+    pub(crate) fn prepare(
+        &mut self,
+        spec: Option<ImageSpec>,
+        actions: &[Action],
+        draft: Option<&Path>,
+    ) {
         if spec != self.spec {
             // Every fitted frame and every encoded payload was built for the
             // old image size, so none of them can be served to this deck.
@@ -127,6 +138,13 @@ impl IconCache {
             let letter = glyph_letter(action);
             if !letters.contains(&letter) {
                 letters.push(letter);
+            }
+        }
+        // An empty field is not a program: asking the shell about "" would cache
+        // a miss that nothing can ever use.
+        if let Some(program) = draft {
+            if !program.as_os_str().is_empty() && !programs.iter().any(|known| known == program) {
+                programs.push(program.to_path_buf());
             }
         }
 
@@ -169,6 +187,19 @@ impl IconCache {
     /// The picture the tile paints for `action`, when it has one.
     pub(crate) fn frame(&self, action: &Action) -> Option<&Arc<RenderImage>> {
         self.art(action).map(|art| &art.frame)
+    }
+
+    /// The picture a program would give a key, whether or not it is bound yet.
+    ///
+    /// The editor asks this for the path in its field, so the user sees the
+    /// icon the key is about to wear before pressing SAVE BINDING. `None` means
+    /// the program has no icon to read, and the editor draws the initial
+    /// instead — the same fallback the tile uses.
+    pub(crate) fn program_frame(&self, program: &Path) -> Option<&Arc<RenderImage>> {
+        self.icons
+            .get(program)
+            .and_then(Option::as_ref)
+            .map(|art| &art.frame)
     }
 
     /// The payload the deck receives for `action`, once it stated a size.
@@ -635,7 +666,7 @@ mod tests {
         let spec = deck_api::ImageSpec::new(72, 72, 4_096, deck_api::ImageFormat::Jpeg);
         let action = launch(r"C:\this\program\was\never\installed.exe");
         let mut cache = super::IconCache::new();
-        cache.prepare(Some(spec), std::slice::from_ref(&action));
+        cache.prepare(Some(spec), std::slice::from_ref(&action), None);
 
         assert_eq!(cache.artwork(Some(&action)), Artwork::Glyph);
         assert!(cache.frame(&action).is_some(), "the initial is a picture");
@@ -651,13 +682,13 @@ mod tests {
         let second = Action::keys("ctrl+m").expect("a valid combination");
         let mut cache = super::IconCache::new();
 
-        cache.prepare(None, std::slice::from_ref(&first));
+        cache.prepare(None, std::slice::from_ref(&first), None);
         assert!(
             cache.frame(&first).is_some(),
             "a bound program has a picture"
         );
 
-        cache.prepare(None, std::slice::from_ref(&second));
+        cache.prepare(None, std::slice::from_ref(&second), None);
         assert!(
             cache.frame(&first).is_none(),
             "the program that was unbound is forgotten"
@@ -671,5 +702,37 @@ mod tests {
         // and the grid asks for its flat colour instead of a picture.
         let cache = super::IconCache::new();
         assert_eq!(cache.artwork(None), Artwork::None);
+    }
+
+    #[test]
+    fn the_editor_has_the_picture_of_its_program_before_it_is_bound() {
+        // Choosing an application fills the editor's field, and the key it is
+        // about to become shows that program's icon. Nothing is bound yet, so
+        // the cache only knows the program because the draft named it.
+        let program = std::env::current_exe().expect("the test binary has a path");
+        let mut cache = super::IconCache::new();
+
+        cache.prepare(None, &[], Some(&program));
+
+        #[cfg(windows)]
+        assert!(
+            cache.program_frame(&program).is_some(),
+            "the draft's icon is read before SAVE BINDING, not after"
+        );
+        #[cfg(not(windows))]
+        assert!(
+            cache.program_frame(&program).is_none(),
+            "there is no shell to ask outside Windows"
+        );
+    }
+
+    #[test]
+    fn an_empty_program_field_is_not_a_program() {
+        // The field is empty until the user types or picks, and asking the shell
+        // about "" would be a call for an answer nothing can use.
+        let mut cache = super::IconCache::new();
+        cache.prepare(None, &[], Some(std::path::Path::new("")));
+
+        assert!(cache.program_frame(std::path::Path::new("")).is_none());
     }
 }

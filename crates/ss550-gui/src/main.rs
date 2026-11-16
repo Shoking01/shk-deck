@@ -35,11 +35,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use deck_api::{ButtonState, DeckError, KeyId};
-use gpui_kit::component::input::{InputState, TextareaState};
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{
     px, size, AnyWindowHandle, AppContext as _, Context, Entity, IntoElement, Render, SharedString,
-    Window, WindowBounds, WindowOptions,
+    Subscription, Window, WindowBounds, WindowOptions,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use ss550_driver::{is_deck_present, LONG_CONNECT_TIMEOUT};
@@ -48,6 +48,7 @@ use ss550_tray::{autostart, install, TrayCommand, TrayHost};
 
 use ui::Page;
 
+mod apps;
 mod diagnostics;
 mod icons;
 mod provider;
@@ -333,6 +334,24 @@ struct Controller {
     program_input: Entity<InputState>,
     args_input: Entity<TextareaState>,
     url_input: Entity<InputState>,
+    /// The applications the `RUN APP` editor offers, and whether it has looked.
+    ///
+    /// Scanned once, on the click that opens the list, and kept: the scan is the
+    /// only slow step and it must never happen in a frame.
+    app_list: apps::Apps,
+    /// The picker's search field. Its own change event redraws the list, so
+    /// typing filters without the editor holding the text.
+    app_query: Entity<InputState>,
+    /// Whether the picker is showing under the `PROGRAM` field.
+    app_picker_open: bool,
+    /// The program in the `PROGRAM` field, when it is a program.
+    ///
+    /// Held apart from the input's text because the icon cache is keyed by path
+    /// and the field holds whatever has been typed. It is what makes the icon of
+    /// a chosen application visible before SAVE BINDING.
+    draft_program: Option<PathBuf>,
+    /// Kept alive so the picker's search field redraws the list while typing.
+    _app_query_changes: Subscription,
     /// The keystroke the editor is editing, as the user typed it.
     ///
     /// It holds text, not a `KeyCombo`: a half-typed combination has to stay in
@@ -436,6 +455,18 @@ impl Controller {
         // The placeholder is a combination the engine accepts, so the shape of
         // the vocabulary is visible before the first keystroke.
         let keys_input = cx.new(|cx| InputState::new(window, cx).placeholder("ctrl+shift+m"));
+        // The picker's filter. Its placeholder is a program name, not a path:
+        // this field searches the list, it does not hold the answer.
+        let app_query = cx.new(|cx| InputState::new(window, cx).placeholder("Search applications"));
+        // Typing in the picker does not touch the controller, so the field's own
+        // change event is what redraws the list around it. Without this the rows
+        // would keep showing whatever the last controller change left behind.
+        let app_query_changes =
+            cx.subscribe(&app_query, |_this, _input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            });
 
         // The runner delivers keystrokes through the platform sender. It is
         // built here, before the runner, because the runner owns the only
@@ -549,6 +580,11 @@ impl Controller {
             program_input,
             args_input,
             url_input,
+            app_list: apps::Apps::Unscanned,
+            app_query,
+            app_picker_open: false,
+            draft_program: None,
+            _app_query_changes: app_query_changes,
             keys_input,
             tray,
             tray_error,
@@ -805,6 +841,9 @@ impl Controller {
     /// rebind, a profile switch, a deck change or a library refresh — and never
     /// while a frame is being drawn. The cache keeps what it built, so a rebind
     /// that touches one key asks Windows about one program.
+    ///
+    /// The program in the editor's field comes with them: it is not a binding
+    /// yet, but the key it is about to become will show exactly this picture.
     fn rebuild_icons(&mut self) {
         let spec = self.session.as_ref().map(session::DeckSession::image_spec);
         let actions: Vec<Action> = self
@@ -813,7 +852,8 @@ impl Controller {
             .iter()
             .map(|binding| binding.action.clone())
             .collect();
-        self.icons.prepare(spec, &actions);
+        self.icons
+            .prepare(spec, &actions, self.draft_program.as_deref());
     }
 
     /// The action bound to a key, if any.
@@ -1494,6 +1534,13 @@ impl Controller {
         };
 
         self.draft = kind;
+        // The key's face is decided by the program in the field, so the icon
+        // cache is told which one it is before the editor draws. A field that is
+        // only text has no picture, and the editor draws the initial instead.
+        self.draft_program = match program.trim().is_empty() {
+            true => None,
+            false => Some(PathBuf::from(program.trim())),
+        };
         self.program_input
             .update(cx, |state, cx| state.set_value(program, window, cx));
         self.args_input
@@ -1502,6 +1549,10 @@ impl Controller {
             .update(cx, |state, cx| state.set_value(url, window, cx));
         self.keys_input
             .update(cx, |state, cx| state.set_value(keys, window, cx));
+
+        // The picture is read here, on the change that made it the draft, and
+        // never while the editor is being drawn.
+        self.rebuild_icons();
     }
 
     /// Points the editor at one kind of action and puts the caret in its first
@@ -1522,6 +1573,83 @@ impl Controller {
                 .keys_input
                 .update(cx, |state, cx| state.focus(window, cx)),
         }
+    }
+
+    /// Shows or hides the list of applications installed on this PC.
+    ///
+    /// Opening it is the click that asks for the scan: walking the Start Menu and
+    /// reading one icon per shortcut is the only slow step in this editor, and it
+    /// happens here or not at all. A second open lists what the first one found.
+    fn toggle_app_picker(&mut self, cx: &mut Context<Self>) {
+        self.app_picker_open = !self.app_picker_open;
+        if self.app_picker_open && !self.app_list.is_scanned() {
+            self.scan_apps(cx);
+        }
+    }
+
+    /// Looks through the Start Menu for the applications a key can run.
+    ///
+    /// The walk and every icon are read on the background executor: hundreds of
+    /// shortcuts, one COM object and one shell icon each, is far too much to do
+    /// on the thread that draws. The answer comes back as state, and the picker
+    /// lists it without touching the disk again.
+    fn scan_apps(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.app_list, apps::Apps::Scanning) {
+            return;
+        }
+        self.app_list = apps::Apps::Scanning;
+        self.note = "Looking through the Start Menu for installed applications…".into();
+
+        cx.spawn(async move |this, cx| {
+            // The whole point of the background executor: this future runs off
+            // the UI thread, and only its result crosses back.
+            let found = cx.background_spawn(async { apps::scan() }).await;
+            let count = found.len();
+            let _ = this.update(cx, |this, cx| {
+                this.app_list = apps::Apps::Ready(found);
+                this.note = match count {
+                    0 => "No application was found in the Start Menu — a path can still be typed."
+                        .into(),
+                    _ => format!(
+                        "{count} application{} found. Pick one, or type a path.",
+                        if count == 1 { "" } else { "s" }
+                    )
+                    .into(),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Puts one application from the list into the `PROGRAM` field.
+    ///
+    /// The *shortcut* goes in the field, not the target: the runner hands a
+    /// `.lnk` to the shell, so the program starts with the working directory and
+    /// arguments the user set up. The icon is read here — once, on the click —
+    /// so the key shows the real picture before SAVE BINDING is pressed.
+    fn choose_app(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(choice) = self.app_list.list().and_then(|list| list.get(index)) else {
+            return;
+        };
+        let name = choice.name.clone();
+        let program = choice.program.clone();
+        let text = program.display().to_string();
+
+        self.program_input
+            .update(cx, |state, cx| state.set_value(text, window, cx));
+        self.draft_program = Some(program);
+        self.rebuild_icons();
+        self.app_picker_open = false;
+        // The next time the list opens it opens whole: the search was for the
+        // application that was just picked.
+        self.app_query
+            .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        self.note = format!(
+            "{name} chosen. Press SAVE BINDING to put it on key #{}.",
+            self.selected_key.get()
+        )
+        .into();
     }
 
     /// Acts on a palette entry dropped on a key.

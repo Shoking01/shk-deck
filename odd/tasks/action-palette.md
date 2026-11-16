@@ -56,8 +56,8 @@ crates/ss550-tray/Cargo.toml`.
 | T4 | Paleta lateral arrastrable + soltar sobre tecla + editor por tecla | S2, S3 | delegado | hecho — `f36ef07` |
 | T5 | Icono del ejecutable como imagen de la tecla | S5, S7 | delegado | hecho |
 | T6 | Artwork dentro del editor de la tecla | S6 | delegado | pendiente — el editor ya vive en la columna del `Deck`; falta mover ahí la imagen personalizada |
-| T7 | Icono del destino de un `.lnk`, sin la flecha de acceso directo | S11 | delegado | pendiente |
-| T8 | Desplegable de aplicaciones instaladas en la acción `Run app` | S10 | delegado | pendiente |
+| T7 | Icono del destino de un `.lnk`, sin la flecha de acceso directo | S11 | delegado | hecho |
+| T8 | Desplegable de aplicaciones instaladas en la acción `Run app` | S10 | delegado | hecho |
 
 ## Log
 
@@ -112,4 +112,26 @@ abre el editor ahí mismo, con el primer campo enfocado — y `Actions` quedó c
 el resumen (chips de teclas, el mismo editor, la lista de lo que está atado),
 porque ahora los dos sitios dibujan un solo widget. Queda para T6 llevar la
 imagen personalizada dentro de ese editor y retirar la página.
+
+**L5** (2026-11-15): T7 y T8 entregadas, y con ellas el fallo que se veía al
+probar el build. `SHGetFileInfoW` responde sobre el archivo que se le da, y un
+`.lnk` es un archivo: pedirle el icono del acceso directo devolvía el del acceso
+directo, con su flecha. Ahora `ss550_tray::shortcut` resuelve el enlace antes de
+preguntar (`IShellLinkW::GetPath`, una cadena acotada a 8 saltos, y sin
+`SHGFI_LINKOVERLAY` en ninguna llamada), y una tecla atada a un acceso directo
+lleva la marca del programa. Un `.lnk` cuyo destino ya no existe sigue
+respondiendo con el icono del propio enlace: nunca cae a la inicial por ser un
+enlace. En el camino apareció un fallo de verdad: equilibrar `CoInitializeEx` con
+`CoUninitialize` mataba el binario de pruebas con una violación de acceso dentro
+de `thumbcache.dll_unloaded`, porque el shell sigue extrayendo iconos en sus
+propios hilos después de volver. El apartamento se entra una vez por hilo y no se
+abandona. `ss550_tray::installed_apps()` recorre los dos menús Inicio (102
+aplicaciones en esta máquina, 185 ms), resuelve cada acceso directo, descarta los
+que apuntan a algo que ya no está, deja un solo registro por destino y ordena por
+nombre sin distinguir mayúsculas. El editor de `RUN APP` gana `CHOOSE AN APP`: un
+botón que abre una lista con buscador, nombre e icono; elegir una rellena
+`PROGRAM` con el `.lnk` (el runner ya lo manda a explorer) y lee su icono ahí
+mismo, así que la tecla enseña la imagen real antes de guardar. El escaneo corre
+en el executor de fondo y se guarda: la única vez que se paga es el clic que abre
+la lista. Escribir la ruta a mano sigue funcionando igual.
 
