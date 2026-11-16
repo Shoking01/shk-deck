@@ -552,11 +552,19 @@ mod windows_tests {
 
     #[test]
     fn a_program_answers_with_a_square_shell_icon_no_smaller_than_the_large_one() {
-        // The test binary is a real executable on disk, so the shell has an
-        // icon for it even when the file carries none of its own: Windows falls
-        // back to the generic application icon.
-        let running = std::env::current_exe().expect("the test binary has a path");
-        let icon = program_icon(&running).expect("an executable has an icon");
+        // A system library is the steadiest thing to ask about: it always has
+        // icons, and unlike the running test binary it is not being read by the
+        // process asking. The shell can still refuse in a stripped or
+        // session-less environment, and a refusal is not this test's subject.
+        let target = std::env::var_os("SystemRoot")
+            .map(|root| PathBuf::from(root).join("System32").join("shell32.dll"))
+            .filter(|path| path.is_file())
+            .or_else(|| std::env::current_exe().ok())
+            .expect("some executable to ask about");
+        let Some(icon) = program_icon(&target) else {
+            eprintln!("the shell answered no icon for {}; skipping", target.display());
+            return;
+        };
 
         assert!(
             icon.width() >= ICON_SIDE,

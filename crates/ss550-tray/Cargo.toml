@@ -50,6 +50,8 @@ windows = { version = "0.62", features = [
     # objects, and `SHGetImageList` answers one of them. The interface itself
     # lives in the controls module, which is where Windows declares it.
     "Win32_UI_Controls",
+    # `GetOpenFileNameW`: the system's own file dialog, with its filter block.
+    "Win32_UI_Controls_Dialogs",
     "Win32_UI_Shell",
     # `SendInput`, and the `INPUT` record it takes: the keystroke sender.
     "Win32_UI_Input_KeyboardAndMouse",

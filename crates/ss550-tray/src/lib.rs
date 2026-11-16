@@ -18,6 +18,10 @@
 //! finding them is the same shell work: hundreds of shortcuts, each one resolved
 //! to the program behind it.
 //!
+//! It also owns the system's own file dialog — [`dialog`] — because a picture for
+//! a key lives wherever the user keeps it, and only the platform can ask them
+//! where that is.
+//!
 //! It is also the **one** place in the project that is allowed to call
 //! `unsafe` code: it owns the Win32 calls that hide and restore the native
 //! window, the icon that lives in the notification area, the `SendInput` call
@@ -49,6 +53,7 @@
 pub mod appicon;
 pub mod apps;
 pub mod autostart;
+pub mod dialog;
 pub mod icon;
 pub mod install;
 mod keysend;
