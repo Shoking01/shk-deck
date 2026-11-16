@@ -44,7 +44,7 @@ desk.
 | Read key presses | both edges, with a host-side debounce policy |
 | Actions | **run an app**, **open a URL**, **send a key combination** |
 | Action palette | drag an entry onto a key; a template opens its editor and writes nothing |
-| Key artwork | the application's own icon, or a picture you pick from anywhere |
+| Key artwork | the application's own icon, the site's favicon, or a picture you pick from anywhere |
 | Per-key colour | white, red or blank; blank is the default |
 | Profiles | six named profiles, per deck, persisted as JSON |
 | Hotplug | auto-reconnect with exponential backoff |
