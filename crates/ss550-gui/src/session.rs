@@ -83,8 +83,20 @@ impl DeckSession {
             .filter(|text| !text.is_empty());
 
         let shape = shape_label(geometry, image_spec);
-        let label = identity.clone().unwrap_or_else(|| shape.clone());
-        let key = identity.unwrap_or_else(|| format!("shape: {shape}"));
+        let label = identity.clone().unwrap_or(shape);
+        // The key says where this deck's data lives. It deliberately leaves the
+        // image size out: that is a property of the firmware, it can change
+        // under the app (and did — the panel turned out to be 108 px, not the
+        // 100 the reference library sends), and a key that moves with it
+        // orphans every binding and every picture the user made. The rows and
+        // columns are the deck.
+        let key = identity.unwrap_or_else(|| {
+            format!(
+                "shape: {} keys · {} columns",
+                geometry.key_count(),
+                geometry.columns()
+            )
+        });
 
         Self {
             deck: DeckHandle::new(deck),
@@ -102,7 +114,11 @@ impl DeckSession {
         &self.label
     }
 
-    /// The stable name of this deck's bindings file.
+    /// The stable name of this deck's data: the bindings file and the profiles.
+    ///
+    /// It is the deck's identity when it has one, and its key count and columns
+    /// when it does not. Nothing about the image size: two firmware revisions of
+    /// the same deck are the same deck.
     pub fn key(&self) -> &str {
         &self.key
     }
@@ -145,6 +161,19 @@ impl DeckSession {
         let key = self.existing_key(index)?;
         let jpeg = encode_tile(self.image_spec, colour)?;
         self.deck.set_key_image(key, &jpeg)?;
+        Ok(())
+    }
+
+    /// Paints one key with an image that is already encoded.
+    ///
+    /// The bytes are the renderer's answer, not this session's: turning a
+    /// picture into a payload needs the asset library and a cache, and neither
+    /// belongs to a deck connection. What this method does own is the part that
+    /// must not be duplicated — checking the key exists, and letting the deck's
+    /// own typed refusal through when the payload is bigger than it accepts.
+    pub fn paint_encoded(&mut self, index: usize, jpeg: &[u8]) -> Result<(), SessionError> {
+        let key = self.existing_key(index)?;
+        self.deck.set_key_image(key, jpeg)?;
         Ok(())
     }
 
@@ -368,9 +397,9 @@ mod tests {
         assert_eq!(session.key_count(), 6);
         assert_eq!(session.geometry().columns(), 3);
         assert_eq!(session.geometry().rows(), 2);
-        assert_eq!(session.image_spec().width(), 72);
-        assert_eq!(session.image_spec().height(), 72);
-        assert_eq!(session.image_spec().max_bytes(), 4_096);
+        assert_eq!(session.image_spec().width(), 100);
+        assert_eq!(session.image_spec().height(), 100);
+        assert_eq!(session.image_spec().max_bytes(), 9_000);
         assert!(session.capabilities().clear_all());
         assert!(session.capabilities().clear_key());
         assert!(!session.capabilities().brightness());
@@ -395,7 +424,58 @@ mod tests {
         };
         assert_eq!(*key, KeyId::new(0));
         assert!(jpeg.len() <= session.image_spec().max_bytes());
-        assert_eq!(jpeg_size(jpeg), (72, 72));
+        assert_eq!(jpeg_size(jpeg), (100, 100));
+    }
+
+    #[test]
+    fn an_already_encoded_tile_reaches_the_deck_unchanged() {
+        let (mut session, calls, _) = session();
+        let jpeg = encode_tile(session.image_spec(), [0x00, 0x80, 0xFF]).expect("a tile");
+
+        session.paint_encoded(2, &jpeg).expect("key 2 exists");
+
+        let calls = calls.borrow();
+        assert_eq!(
+            calls.as_slice(),
+            &[Call::Paint(KeyId::new(2), jpeg)],
+            "the renderer's bytes must not be re-encoded on the way out"
+        );
+    }
+
+    #[test]
+    fn an_encoded_tile_for_a_missing_key_never_reaches_the_deck() {
+        let (mut session, calls, _) = session();
+        let jpeg = encode_tile(session.image_spec(), [0xFF, 0xFF, 0xFF]).expect("a tile");
+
+        let error = session.paint_encoded(9, &jpeg).expect_err("no key 9");
+
+        assert_eq!(
+            error.to_string(),
+            "key 9 does not exist on this deck (it has 6 keys)"
+        );
+        assert!(calls.borrow().is_empty(), "nothing must reach the deck");
+    }
+
+    #[test]
+    fn a_payload_over_the_decks_limit_keeps_the_decks_own_refusal() {
+        let (mut session, calls, _) = session();
+        let oversized = vec![0u8; 9_001];
+
+        let error = session
+            .paint_encoded(0, &oversized)
+            .expect_err("the deck accepts 9 KiB");
+
+        assert!(
+            matches!(
+                error,
+                SessionError::Deck(DeckError::ImageTooLarge {
+                    bytes: 9_001,
+                    max_bytes: 9_000
+                })
+            ),
+            "expected the deck's own size refusal, got {error}"
+        );
+        assert_eq!(calls.borrow().len(), 1, "the deck was asked, and refused");
     }
 
     #[test]
@@ -512,8 +592,8 @@ mod tests {
 
         let session = DeckSession::new(Box::new(Anonymous(SixKeyDeck::new())));
 
-        assert_eq!(session.label(), "6 keys · 3 columns · 72x72 images");
-        assert_eq!(session.key(), "shape: 6 keys · 3 columns · 72x72 images");
+        assert_eq!(session.label(), "6 keys · 3 columns · 100x100 images");
+        assert_eq!(session.key(), "shape: 6 keys · 3 columns");
     }
 
     /// The `(width, height)` a JPEG declares in its frame header.

@@ -82,7 +82,99 @@ pub enum ActionError {
     #[error("the action runner has stopped")]
     RunnerStopped,
 
+    /// The keystroke text is not a combination this app can send.
+    #[error(transparent)]
+    Keys(#[from] KeyComboError),
+
+    /// A key combination needs the platform sender, and none was installed.
+    ///
+    /// The engine cannot type: delivering a keystroke is a platform call, and
+    /// the crate that owns it hands in a [`KeySender`](crate::KeySender). A
+    /// runner without one refuses the action instead of reporting a send that
+    /// never happened.
+    #[error("cannot send {keys}: no key sender is installed")]
+    NeedsKeySender {
+        /// The combination, as a key tile writes it.
+        keys: String,
+    },
+
+    /// A key combination is sent, not started, so it has no program to run.
+    #[error("{keys} is a key combination, not a program: it is sent, not launched")]
+    KeysNotAProgram {
+        /// The combination, as a key tile writes it.
+        keys: String,
+    },
+
+    /// The platform sender could not deliver the combination.
+    #[error("could not send {keys}: {reason}")]
+    KeySend {
+        /// The combination, as a key tile writes it.
+        keys: String,
+        /// What the platform sender reported.
+        reason: String,
+    },
+
     /// A profile operation failed for a named reason.
     #[error("{0}")]
     ProfileError(String),
+}
+
+/// Why a keystroke combination was refused.
+///
+/// Every variant names the part that is wrong, not just that something is:
+/// these messages are shown as they are, and a user who typed the combination
+/// is the one who can fix it.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum KeyComboError {
+    /// The text holds nothing at all.
+    #[error("the key combination is empty")]
+    Empty,
+
+    /// A plus sign with nothing on one side of it.
+    #[error("{combo:?} has an empty step: check the plus signs")]
+    EmptyStep {
+        /// The text as it was typed.
+        combo: String,
+    },
+
+    /// Modifiers and no key to press.
+    #[error("{combo:?} names modifiers but no key: a combination presses one key")]
+    NoKey {
+        /// The text as it was typed.
+        combo: String,
+    },
+
+    /// Two keys in one combination.
+    #[error("{combo:?} names two keys ({first} and {second}): a combination presses one")]
+    TwoKeys {
+        /// The text as it was typed.
+        combo: String,
+        /// The key that was already there.
+        first: String,
+        /// The key that is one too many.
+        second: String,
+    },
+
+    /// The same modifier twice.
+    #[error("{modifier} is listed twice in {combo:?}")]
+    DuplicateModifier {
+        /// The text as it was typed.
+        combo: String,
+        /// The modifier that repeats.
+        modifier: String,
+    },
+
+    /// A part in a modifier's place that is not a modifier.
+    #[error("{name:?} is not a modifier: ctrl, alt, shift and win are")]
+    UnknownModifier {
+        /// The part that was refused.
+        name: String,
+    },
+
+    /// A part in the key's place that this app cannot send.
+    #[error("{name:?} is not a key this app can send")]
+    UnknownKey {
+        /// The part that was refused.
+        name: String,
+    },
 }

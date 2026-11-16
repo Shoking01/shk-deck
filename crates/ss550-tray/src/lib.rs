@@ -4,10 +4,30 @@
 //! the way, the deck stays awake, and the bound keys keep working while the
 //! window is hidden. This crate provides that behaviour.
 //!
+//! It also owns the platform's keystroke sender, [`SystemKeySender`], which
+//! implements the engine's `KeySender`: the engine decides *when* a combination
+//! goes out, and this crate is the only one allowed to make the call that sends
+//! it.
+//!
+//! It also reads the icon Windows shows for a program — [`appicon`] — because
+//! that is a shell call, and a key that runs a program draws it. A shortcut is
+//! resolved to its target first, so the picture is the application's and not the
+//! shortcut's.
+//!
+//! It also lists the applications the Start Menu holds — [`apps`] — because
+//! finding them is the same shell work: hundreds of shortcuts, each one resolved
+//! to the program behind it.
+//!
+//! It also owns the system's own file dialog — [`dialog`] — because a picture for
+//! a key lives wherever the user keeps it, and only the platform can ask them
+//! where that is.
+//!
 //! It is also the **one** place in the project that is allowed to call
 //! `unsafe` code: it owns the Win32 calls that hide and restore the native
-//! window, and the icon that lives in the notification area. Every other
-//! crate keeps `#![deny(unsafe_code)]`.
+//! window, the icon that lives in the notification area, the `SendInput` call
+//! that delivers a keystroke, and the shell calls that read a program's icon and
+//! resolve a shortcut.
+//! Every other crate keeps `#![deny(unsafe_code)]`.
 //!
 //! # Example
 //!
@@ -26,16 +46,25 @@
 //! # Ok::<(), ss550_tray::TrayError>(())
 //! ```
 
-// The Win32 calls that hide a window and run the icon's message loop live in
-// this crate, and nowhere else in the project.
+// The Win32 calls that hide a window, run the icon's message loop, and deliver
+// a keystroke live in this crate, and nowhere else in the project.
 #![allow(unsafe_code)]
 
+pub mod appicon;
+pub mod apps;
 pub mod autostart;
+pub mod dialog;
 pub mod icon;
 pub mod install;
+mod keysend;
+#[cfg(test)]
+mod scratch;
+mod shortcut;
 mod tray;
 mod window;
 
+pub use apps::{installed_apps, InstalledApp};
+pub use keysend::SystemKeySender;
 pub use tray::{TrayCommand, TrayHost};
 pub use window::{hide_window, show_window, window_is_visible};
 

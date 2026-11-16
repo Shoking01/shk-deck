@@ -7,6 +7,10 @@
 //! this deck's shape is [`Deck::geometry`], [`Deck::image_spec`] and
 //! [`Deck::capabilities`], which is the same way the window learns it.
 //!
+//! **Updated to use 100×100 images, 9KB limit** to match the real SS550 deck
+//! (per `docs/protocol/image-upload.md`). The 72×72 / 4KB size is intentionally
+//! different to test the seam's flexibility with different deck sizes.
+//!
 //! It is a test double, not an emulator: there is no transport, no clock and no
 //! device. What it does keep is a record of the last image it was asked to paint
 //! on each key, so a test can tell "the deck accepted it" from "the deck says it
@@ -27,13 +31,16 @@ const KEY_COUNT: u16 = 6;
 const COLUMNS: u16 = 3;
 
 /// The width of one key's image, in pixels.
-const IMAGE_WIDTH: u16 = 72;
+/// Updated from 72 to 100 to match the real SS550 deck.
+const IMAGE_WIDTH: u16 = 100;
 
 /// The height of one key's image, in pixels.
-const IMAGE_HEIGHT: u16 = 72;
+/// Updated from 72 to 100 to match the real SS550 deck.
+const IMAGE_HEIGHT: u16 = 100;
 
 /// The largest image the deck accepts, in bytes.
-const IMAGE_MAX_BYTES: usize = 4_096;
+/// Updated from 4_096 to 9_000 to match the real SS550 deck.
+const IMAGE_MAX_BYTES: usize = 9_000;
 
 /// How many dials the deck has, numbered from zero.
 const DIAL_COUNT: u16 = 2;
@@ -188,7 +195,7 @@ impl Deck for SixKeyDeck {
         Geometry::new(KEY_COUNT, COLUMNS)
     }
 
-    /// 72×72 JPEGs, at most four kilobytes each.
+    /// 100×100 JPEGs, at most 9000 bytes each (matching the real SS550 deck).
     fn image_spec(&self) -> ImageSpec {
         ImageSpec::new(
             IMAGE_WIDTH,

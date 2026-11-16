@@ -119,7 +119,7 @@ impl ActionStore {
         if !path.exists() {
             return Ok(Self::new());
         }
-        let text = fs::read_to_string(path).map_err(|source| ActionError::Read {
+        let text = crate::config::read_json(path).map_err(|source| ActionError::Read {
             path: path.display().to_string(),
             source,
         })?;
@@ -171,6 +171,10 @@ mod tests {
         Action::OpenUrl {
             url: "https://twitch.tv/dashboard".to_string(),
         }
+    }
+
+    fn keystroke() -> Action {
+        Action::keys("Shift+Ctrl+M").expect("valid combination")
     }
 
     #[test]
@@ -263,6 +267,68 @@ mod tests {
         assert_eq!(restored.len(), 2);
     }
 
+    /// The third action kind is additive: a file written before it existed
+    /// holds no `keys` variant and must keep loading as it always did.
+    #[test]
+    fn a_file_with_only_launch_and_open_url_still_loads() {
+        let older = r#"{
+            "version": 1,
+            "bindings": [
+                {
+                    "key": 1,
+                    "action": {
+                        "type": "launch",
+                        "program": "C:\\Windows\\System32\\notepad.exe",
+                        "args": ["--flag"]
+                    }
+                },
+                {
+                    "key": 2,
+                    "action": {
+                        "type": "open_url",
+                        "url": "https://example.com"
+                    }
+                }
+            ]
+        }"#;
+
+        let store = ActionStore::from_json(older).expect("an older file must keep loading");
+        assert_eq!(store.len(), 2);
+        assert_eq!(
+            store.get(key(1)),
+            Some(&Action::Launch {
+                program: PathBuf::from("C:\\Windows\\System32\\notepad.exe"),
+                args: vec!["--flag".to_string()],
+            })
+        );
+        assert_eq!(
+            store.get(key(2)),
+            Some(&Action::OpenUrl {
+                url: "https://example.com".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_keystroke_binding_round_trips_through_the_file() {
+        let mut store = ActionStore::new();
+        let keys = keystroke();
+        store.set(key(5), keys.clone()).expect("valid action");
+
+        let json = store.to_json().expect("serialise");
+        assert!(
+            json.contains("\"type\": \"keys\""),
+            "the kind is written as its own tag: {json}"
+        );
+        assert!(
+            json.contains("\"keys\": \"ctrl+shift+m\""),
+            "and the combination as one canonical string: {json}"
+        );
+
+        let restored = ActionStore::from_json(&json).expect("parse");
+        assert_eq!(restored.get(key(5)), Some(&keys));
+    }
+
     #[test]
     fn the_json_holds_the_version_and_the_keys() {
         let mut store = ActionStore::new();
@@ -279,6 +345,25 @@ mod tests {
         let path = dir.path().join("bindings.json");
         let store = ActionStore::load(&path).expect("a missing file is not an error");
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn a_file_with_a_byte_order_mark_still_loads() {
+        // Every editor that offers "UTF-8" in older Windows tooling writes a BOM,
+        // and serde_json refuses one at byte zero. Treating that as corruption
+        // would report the user's bindings as lost over an invisible character.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("bindings.json");
+        std::fs::write(
+            &path,
+            "\u{feff}{\"version\":1,\"bindings\":[{\"key\":4,\"action\":{\"type\":\"open_url\",\"url\":\"https://example.com\"}}]}",
+        )
+        .expect("the file can be written");
+
+        let store = ActionStore::load(&path).expect("a BOM is not a syntax error");
+
+        assert_eq!(store.len(), 1);
+        assert!(store.get(key(4)).is_some());
     }
 
     #[test]

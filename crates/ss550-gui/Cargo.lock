@@ -6451,6 +6451,7 @@ dependencies = [
  "deck-api",
  "deck-simulator",
  "gpui-kit",
+ "image",
  "jpeg-encoder",
  "raw-window-handle",
  "ss550-driver",
@@ -6470,6 +6471,7 @@ dependencies = [
 name = "ss550-tray"
 version = "0.1.0"
 dependencies = [
+ "ss550-engine",
  "tray-icon",
  "windows 0.62.2",
  "winreg",

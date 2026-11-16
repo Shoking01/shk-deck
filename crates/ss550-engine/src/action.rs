@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::ActionError;
+use crate::keys::KeyCombo;
+use crate::{ActionError, KeyComboError};
 
 /// What a key does when it is pressed.
 ///
-/// The catalogue is deliberately small — a program to run, or a URL to open —
-/// because every extra kind is a promise to keep.
+/// The catalogue is deliberately small — a program to run, a URL to open, or a
+/// keystroke to send — because every extra kind is a promise to keep.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
@@ -29,9 +30,46 @@ pub enum Action {
         /// The URL, scheme included.
         url: String,
     },
+    /// Sends a key combination to the window that has the focus.
+    ///
+    /// The combination is stored and written as its canonical spelling,
+    /// `ctrl+shift+m`, so the JSON stays one string that reads the way it was
+    /// meant; a [`KeyCombo`] cannot hold a combination that does not exist, so
+    /// an action of this kind is always valid to build.
+    ///
+    /// ```
+    /// use ss550_engine::Action;
+    ///
+    /// let action = Action::keys("Ctrl+Shift+M").expect("valid combination");
+    /// assert_eq!(action.summary(), "Ctrl+Shift+M");
+    ///
+    /// let json = serde_json::to_string(&action).expect("serialise");
+    /// assert_eq!(json, r#"{"type":"keys","keys":"ctrl+shift+m"}"#);
+    /// ```
+    Keys {
+        /// The combination to send.
+        keys: KeyCombo,
+    },
 }
 
 impl Action {
+    /// Binds a key combination, checking it as it is built.
+    ///
+    /// This is the constructor the editor calls: a combination that does not
+    /// exist never becomes an action, so there is no later moment where a
+    /// broken keystroke can reach the deck.
+    ///
+    /// ```
+    /// use ss550_engine::Action;
+    /// use ss550_engine::KeyComboError;
+    ///
+    /// assert!(Action::keys("ctrl+shift+m").is_ok());
+    /// assert!(matches!(Action::keys("ctrl+shift"), Err(KeyComboError::NoKey { .. })));
+    /// ```
+    pub fn keys(text: &str) -> Result<Self, KeyComboError> {
+        KeyCombo::parse(text).map(|keys| Action::Keys { keys })
+    }
+
     /// Checks that this action can run.
     ///
     /// ```
@@ -39,6 +77,11 @@ impl Action {
     ///
     /// let action = Action::OpenUrl { url: "https://example.com".to_string() };
     /// assert!(action.validate().is_ok());
+    ///
+    /// // A key combination cannot be built broken: the parser is the check,
+    /// // and what it lets through is valid.
+    /// let keys = Action::keys("ctrl+shift+m").expect("valid combination");
+    /// assert!(keys.validate().is_ok());
     /// ```
     pub fn validate(&self) -> Result<(), ActionError> {
         match self {
@@ -50,6 +93,9 @@ impl Action {
                 }
             }
             Action::OpenUrl { url } => validate_url(url),
+            // A `KeyCombo` is proof that the combination parses, and its fields
+            // are private, so there is nothing left to check here.
+            Action::Keys { .. } => Ok(()),
         }
     }
 
@@ -96,10 +142,19 @@ impl Action {
             Action::OpenUrl { url } => Action::OpenUrl {
                 url: strip_wrapping_quotes(url).to_string(),
             },
+            // A combination has no quotes to strip. The signature promises a
+            // new action, so the combination is copied whole; a `Cow<Action>`
+            // would save that copy and force every caller to deal with a type
+            // it does not need.
+            Action::Keys { keys } => Action::Keys { keys: keys.clone() },
         }
     }
 
     /// A one-line label for the key tiles: what the key does, briefly.
+    ///
+    /// A combination shows itself, because that is the whole of what it does:
+    /// the tile reads `Ctrl+Shift+M`, and [`MAX_SUMMARY_CHARS`] is the bound the
+    /// vocabulary can produce, so a tile never has to cut one in half.
     ///
     /// ```
     /// use ss550_engine::Action;
@@ -112,11 +167,17 @@ impl Action {
     ///     args: Vec::new(),
     /// };
     /// assert_eq!(action.summary(), "LAUNCH obs64.exe");
+    ///
+    /// let action = Action::keys("ctrl+shift+m").expect("valid combination");
+    /// assert_eq!(action.summary(), "Ctrl+Shift+M");
     /// ```
+    ///
+    /// [`MAX_SUMMARY_CHARS`]: crate::keys::MAX_SUMMARY_CHARS
     pub fn summary(&self) -> String {
         match self {
             Action::Launch { program, .. } => format!("LAUNCH {}", file_label(program)),
             Action::OpenUrl { url } => format!("OPEN {}", host_of(url)),
+            Action::Keys { keys } => keys.to_string(),
         }
     }
 
@@ -131,6 +192,7 @@ impl Action {
                 }
             }
             Action::OpenUrl { url } => format!("Open {url}"),
+            Action::Keys { keys } => format!("Send {keys}"),
         }
     }
 }
@@ -356,6 +418,100 @@ mod tests {
             url: "https://twitch.tv/dashboard".to_string(),
         };
         assert_eq!(url.summary(), "OPEN twitch.tv");
+
+        let keys = Action::keys("ctrl+shift+m").expect("valid combination");
+        assert_eq!(keys.summary(), "Ctrl+Shift+M");
+    }
+
+    #[test]
+    fn no_combination_summary_is_longer_than_a_tile_can_hold() {
+        // The worst case the vocabulary allows: every modifier and the longest
+        // key name. The bound is what keeps a tile from cutting a combination
+        // in half, so it has to hold for everything the parser accepts.
+        let longest = Action::keys("ctrl+alt+shift+win+backspace").expect("valid combination");
+        assert_eq!(longest.summary(), "Ctrl+Alt+Shift+Win+Backspace");
+        assert_eq!(
+            longest.summary().chars().count(),
+            crate::keys::MAX_SUMMARY_CHARS
+        );
+
+        for text in [
+            "m",
+            "ctrl+f24",
+            "win+pagedown",
+            "ctrl+shift+escape",
+            "ctrl+`",
+            "alt+insert",
+        ] {
+            let action = Action::keys(text).expect("valid combination");
+            assert!(
+                action.summary().chars().count() <= crate::keys::MAX_SUMMARY_CHARS,
+                "{text:?} must fit on a tile: {}",
+                action.summary()
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_combination_describes_itself_for_the_status_line() {
+        let keys = Action::keys("ctrl+shift+m").expect("valid combination");
+        assert_eq!(keys.describe(), "Send Ctrl+Shift+M");
+
+        // The same voice as the other two: a verb and what it acts on.
+        assert!(Action::keys("f5")
+            .expect("valid combination")
+            .describe()
+            .starts_with("Send "));
+    }
+
+    #[test]
+    fn a_key_combination_round_trips_through_json() {
+        let action = Action::keys("Shift+Ctrl+M").expect("valid combination");
+        let json = serde_json::to_string(&action).expect("serialise");
+        assert_eq!(json, r#"{"type":"keys","keys":"ctrl+shift+m"}"#);
+
+        let restored: Action = serde_json::from_str(&json).expect("parse");
+        assert_eq!(restored, action);
+    }
+
+    #[test]
+    fn a_hand_written_combination_loads_in_any_spelling() {
+        let file = r#"{"type":"keys","keys":"CTRL + Shift + m"}"#;
+        let action: Action = serde_json::from_str(file).expect("parse");
+        assert_eq!(action, Action::keys("ctrl+shift+m").expect("valid"));
+
+        // And what was written back is the canonical spelling.
+        let json = serde_json::to_string(&action).expect("serialise");
+        assert_eq!(json, r#"{"type":"keys","keys":"ctrl+shift+m"}"#);
+    }
+
+    #[test]
+    fn a_combination_that_does_not_exist_never_loads_as_an_action() {
+        let file = r#"{"type":"keys","keys":"ctrl+shift"}"#;
+        let error = serde_json::from_str::<Action>(file).expect_err("two modifiers are not a key");
+        assert!(
+            error.to_string().contains("no key"),
+            "the parser's reason must reach the reader: {error}"
+        );
+    }
+
+    #[test]
+    fn a_built_key_action_is_always_valid() {
+        // `KeyCombo` is the proof: validation cannot fail for this kind.
+        for text in [
+            "m",
+            "ctrl+shift+m",
+            "win+f24",
+            "ctrl+alt+shift+win+pagedown",
+        ] {
+            assert!(
+                Action::keys(text)
+                    .expect("valid combination")
+                    .validate()
+                    .is_ok(),
+                "for {text}"
+            );
+        }
     }
 
     #[test]

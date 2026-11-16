@@ -7,6 +7,140 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Added — blank keys, and a picture from anywhere
+- `BLANK` is a colour a key can take, and the default: a key with nothing bound
+  to it no longer glows white. The six default profiles stop carrying the test
+  colours they shipped with, and a profile with no slot is blank rather than
+  white.
+- The key editor's picture controls open the system's file dialog, filtered to
+  the formats the library accepts, and import what it answers before naming it on
+  the key. The browsable library list is gone with it: on a folder holding six
+  thousand pictures it had to be searched to be useful and decoded to be drawn,
+  while the dialog needs neither.
+
+### Added — a key shows what it runs, and is edited where it is
+- A key bound to a program draws the application's own icon. A `.lnk` is resolved
+  to its target before the shell is asked, because `SHGetFileInfoW` answers about
+  the file it is handed and a shortcut's own icon carries Windows' arrow overlay.
+  The icon comes from the shell's jumbo image list (256×256 on this machine) and
+  is scaled **down** into the tile with a smoothing filter, so it stays sharp at
+  the deck's resolution instead of being blown up from 32 pixels. The same pixels
+  are encoded for the deck: window and key cannot disagree.
+- A program with no readable icon, a URL and a keystroke fall back to the
+  initial of what they run, drawn on the accent colour, so a key that runs
+  something is never a blank tile. The initial is a five-by-seven bitmap drawn at
+  the deck's own image size, which means the deck receives a real picture and not
+  a colour the window decorated on its own.
+- One icon extraction per program path, done when the action, the profile or the
+  deck changes and never inside `render`. A rebind forgets the icon of the
+  program that is gone and reads the one that replaced it; the colour row is
+  still the explicit override, so a key the user painted keeps that colour.
+- `Run app` offers the applications installed on the PC — the Start Menu of this
+  user and of all users, links resolved and deduplicated — in a searchable list
+  with icons. Choosing one fills the path; typing one by hand still works. The
+  scan runs once, on the click that opens the list (102 applications in 185 ms on
+  this machine), and never during a frame.
+- The editor for a key now lives on the `Deck` page, in the column beside the
+  grid: the three kinds, their fields, SAVE BINDING, CLEAR KEY and the colour
+  row. A palette template dropped on a key opens it in place, first field
+  focused, and no longer moves the window to the `Actions` page. The `Actions`
+  page keeps the overview — key chips, the same editor, the bound list — because
+  both places draw one widget and not two.
+- The custom picture is now a control of the key, not a page. Under the colour
+  row the editor shows the picture the selected key wears — a fitted thumbnail,
+  or a dashed box when it shows none — and `CHOOSE A PICTURE` opens the library
+  in place: one row per file with its thumbnail, its name and its size, the one
+  in use marked. Choosing a row assigns it and repaints the key and the deck
+  through the same path `REMOVE PICTURE` clears; `REFRESH` re-reads the folder
+  and `OPEN FOLDER` opens it. The `Artwork` page is gone with it: the rail lists
+  three pages. Without a deck the list still opens and a click says why it
+  cannot assign instead of doing nothing.
+- The library's thumbnails have a cache of their own, filled when the picture
+  list is opened and when the folder is re-read, and never inside `render`.
+  Putting a picture on a key decodes that picture and nothing else: the whole
+  folder is not re-fitted for one assignment.
+
+### Fixed — a JSON file saved with a byte-order mark read as corrupt
+- A BOM is legal UTF-8 and the tooling people edit these files with writes one.
+  `serde_json` refuses it at byte zero, so a hand-edited bindings or profile file
+  reported "not valid JSON" and the user's data looked lost over an invisible
+  character. Reading drops it once.
+
+### Added — an action palette, drag and drop, and keystrokes
+- The rail lists what a key can do — `Run app`, `Open URL`, `Keystrokes`, plus
+  one row per action already bound on the deck — and the entries are dragged
+  onto a key. Dropping a template opens its editor and changes nothing until the
+  user saves; dropping an existing action assigns it through the same save path a
+  click uses, so the file and the deck cannot disagree.
+- `Action::Keys` is a third action kind: a modifier-and-key combination such as
+  `Ctrl+Shift+M`. `KeyCombo`'s fields are private and the only ways to build one
+  are the parser and deserialisation, so a combination that exists is a
+  combination that is valid; `ctrl+shift` (no key), `m+n` (two keys) and
+  `ctrl+ctrl+m` are refused with a sentence naming the problem.
+- `ss550-tray` sends the combination with `SendInput`, mapping the engine's
+  modifiers and named keys to virtual-key codes in a pure, tested function. A
+  send that reports fewer events than it was given is an error, so a half-sent
+  shortcut reaches the status line instead of looking successful.
+- Profiles keep their deck's bindings, and the per-deck bindings file is read
+  into the active profile when the profile has none: a profile that had never
+  been saved was hiding every binding the file still held.
+
+### Fixed — key images never reached the panel's edges
+- A photo of the deck, measured against a solid magenta payload, showed that a
+  key's lit area is 108 pixels across, not the 100 the community reference sends.
+  A 100×100 payload left an 8-pixel strip at the top and another at the left
+  holding whatever the key showed before: invisible on a solid colour, a frame
+  around every picture, and impossible to fix from the content because nothing
+  in the app was drawing it. The image spec now asks for 108×108.
+- The renderer's preview flipped the picture along with the payload, so it showed
+  what is sent rather than what the glass shows. A right-way-up key sat next to a
+  preview of it upside down; the preview is the glass now.
+
+### Fixed — profiles lived in an NTFS alternate data stream
+- `profiles/<deck key>.json` used the deck key raw, and that key contains a
+  colon. On Windows a colon separates a file from an alternate data stream, so
+  every profile was written inside a hidden stream of a file called `shape`:
+  invisible in Explorer, unreadable by anything but the same key. The name is
+  built like the bindings file's now — slug plus fingerprint — and the deck key
+  no longer carries the image size, so correcting the panel size cannot orphan a
+  deck's bindings and pictures again.
+
+### Changed — a key is inspected, not painted
+- Clicking a key painted it with the last chosen colour. That came from testing
+  and turns every inspection into a change, which cannot survive keys that carry
+  actions with parameters. A click selects now; the colour moved to the selected
+  key's card, where a swatch paints that one key and nothing else.
+
+### Fixed — pictures were encoded below the quality the deck allowed
+- The quality ladder started at 80, so every picture was encoded at 80 even
+  when the deck's nine-kilobyte limit had room for more; a 100×100 tile at 95
+  is about four kilobytes, which is why "the image looks soft" was the ladder's
+  choice and not the deck's ceiling. It now starts at 95 and steps down only
+  when a rung does not fit.
+- A tile that fits at the top quality is now compared against an encoding made
+  at the top rung, so a later change that quietly spends quality below the limit
+  fails a test instead of shipping.
+
+### Fixed — the app started the build from the day the switch was turned on
+- The sign-in entry names `%LOCALAPPDATA%\Programs\ss550\ss550-gui.exe`, and
+  that copy was only ever written by turning "START WITH WINDOWS" on. Every
+  build made afterwards stayed in `target\release`, so signing in — or starting
+  the app the way the user normally does — opened a controller from the day the
+  switch was first flipped, missing every fix since.
+- `ss550_tray::install::refresh_installed` compares the running binary with the
+  installed copy on startup and replaces the older one, reporting what it found
+  in the settings page. Lengths are compared before bytes, so an unchanged build
+  costs two metadata calls; a copy Windows already has mapped is reported with
+  its path and the operating system's reason instead of failing silently. A
+  debug build never overwrites the installed copy, because a development binary
+  is slower, keeps a console and disappears on `cargo clean`.
+- `update-steamcraft.ps1` discarded `cargo build`'s output and checked nothing,
+  so a failed build still "succeeded" and copied the previous binary over
+  itself. It now fails on the build's exit code, verifies the SHA-256 of the
+  installed copy against the build, and starts what it installed.
+  `update-steamcraft.bat` is a wrapper around it instead of a second, drifted
+  copy of the same steps.
+
 ### Added — six host-side profiles and a hotplug watcher
 - `ss550-engine::ProfileStore` keeps named profiles — `default`, `stream`,
   `meetings`, `gaming`, `work`, `entertainment` — in
@@ -805,10 +939,34 @@ messages; the file below is a human summary, not a substitute for
   that a write reached the firmware.
 
 ### Tests
-- 42 tests passing: 17 driver unit + 5 probe unit + 18 protocol (16 golden + 2
-  doctests) + 5 proptest. `cargo fmt`, `cargo clippy --all-targets
-  --all-features -- -D warnings`, and release builds pass on Windows
-  (rustc 1.99.0).
+- 81 tests passing: 34 protocol (17 golden + 2 proptest + 15 doctests) + 22 driver +
+  6 probe + 19 GUI (45 total including engine tests). `cargo fmt`, `cargo clippy
+  --all-targets --all-features -- -D warnings`, and release builds pass on
+  Windows (rustc 1.99.0).
+
+### Added — Phase 4: per-key imagery and the asset picker
+- `ss550-engine::Profile.appearance` is a `BTreeMap<u16, Appearance>` where
+  `Appearance` is `Solid { rgb }` or `Image { asset: AssetName }`. A profile can
+  now show pictures on individual keys instead of only flat colours.
+- `ss550-engine::AssetLibrary` at `config_dir()/assets/` holds user images with
+  names validated to prevent path traversal, injection, or escape from the library.
+- `ss550-engine::ProfileStore::set_appearance(key, Some(image))` assigns an
+  image to a key. Passing `None` removes the image so the key shows its profile
+  colour again.
+- `crates/ss550-gui` now has a `STEP 4 · SHOW A PICTURE ON A KEY` panel:
+  - **LIBRARY**: refreshed list of images, one per row with size
+  - **PREVIEW**: fitted JPEG at the deck's tile size, with black bands
+  - **USE ON KEY #n**: assigns the highlighted image to the selected key
+  - **REMOVE ARTWORK**: takes the key back to the profile colour
+  - **OPEN FOLDER**: opens `config_dir()/assets/` in the file manager
+  - **REFRESH**: re-reads the library after files are dropped in
+- The renderer's `fit()` function preserves aspect ratio, centers the image, and
+  paints the background black. A picture that exceeds the deck's byte limit is
+  re-encoded through a quality ladder (`[80, 65, 50, 35, 20, 10]`) before
+  refusing, with a detailed error message naming both sizes.
+- `TileCache::clear()` resets the tile cache when the library changes, so
+  modified images are re-read on the next `USE`. Verified on hardware: a JPG
+  showing a red-green gradient fits on the deck and displays correctly.
 
 ### Added — the seam between a deck and its bytes
 - `crates/deck-api` is the new contract between **what a deck can do** and

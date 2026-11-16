@@ -17,9 +17,15 @@ cd C:\path\to\streamcraft-rs
 ```
 
 The script will:
-1. Build the release version
-2. Copy it to `%LOCALAPPDATA%\Programs\ss550\`
+1. Build the release version and stop any running instance
+2. Copy it to `%LOCALAPPDATA%\Programs\ss550\` and verify the copy matches the build
 3. (Optional) Create a startup shortcut with `-CreateShortcut`
+4. Start the copy it just installed
+
+The app keeps that copy current on its own: every time a newer build is started,
+it replaces the copy Windows starts at sign-in, and says so in Settings. In-app
+"START WITH WINDOWS" and a manual install both point at the same file, so there
+is only ever one installed controller.
 
 ### Option 2: Manual installation
 
@@ -31,24 +37,25 @@ copy crates\ss550-gui\target\release\ss550-gui.exe "%LOCALAPPDATA%\Programs\ss55
 
 ### Starting with Windows (optional)
 
-To auto-start the controller on login:
-
-1. Open Run dialog (Win+R)
-2. Type `shell:startup` and press Enter
-3. Right-click → New → Shortcut
-4. Target: `%LOCALAPPDATA%\Programs\ss550\ss550-gui.exe --hidden`
-5. Name: "streamcraft-rs Controller"
+Turn on **START WITH WINDOWS** in the app's Settings page: it copies the
+controller into `%LOCALAPPDATA%\Programs\ss550`, writes one
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value for this user, and
+removes it again when you turn the switch off. A shortcut in `shell:startup`
+pointing at `...\ss550-gui.exe --hidden` works too, but the switch is the
+supported path and is the one that keeps the copy up to date.
 
 The `--hidden` flag starts the app without showing the window; the tray icon remains accessible.
 
 ## Updating
 
-Always use the update script or copy the newly built binary. Old versions will be overwritten automatically. The script kills any running instances before updating to avoid duplicate processes.
+Run the update script. It builds, stops the running instance, replaces the
+installed copy, verifies the SHA-256 and starts the new build.
 
-**Important:** If you experience issues after an update, try:
-1. Fully close any running instances (`taskkill /F /IM ss550-gui.exe`)
-2. Run the update script again
-3. Restart your computer if needed
+**If the app still opens an older build**, the usual cause is a second instance
+of the old copy still running: Windows keeps a running executable mapped, so the
+file cannot be replaced while it runs. Close it
+(`taskkill /F /IM ss550-gui.exe`) and run the script again. The app reports this
+case in Settings instead of silently keeping the old copy.
 
 ## Running Without Installation
 

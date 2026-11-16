@@ -18,6 +18,11 @@ license = "MIT OR Apache-2.0"
 unsafe_code = "allow"
 
 [dependencies]
+# The engine owns the `KeySender` trait and the `KeyCombo` it takes; this crate
+# implements the trait with the platform call. The trait is the seam: the
+# engine decides *when* a combination goes out and never *how*, and the crate
+# that is allowed `unsafe` is the one that knows how.
+ss550-engine = { path = "../ss550-engine" }
 
 [target.'cfg(windows)'.dependencies]
 # The notification-area icon is created by `tray-icon`'s Win32 backend, which
@@ -32,8 +37,24 @@ winreg = "0.56"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    # The program's own icon: `SHGetFileInfoW` needs the shell, and its
+    # `dwfileattributes` argument is a file-system flag type.
+    "Win32_Storage_FileSystem",
+    # Resolving a shortcut to its target: `IShellLinkW` is loaded from the
+    # `.lnk` through `IPersistFile`, which is a COM call, and `GetPath` fills a
+    # `WIN32_FIND_DATAW` from the file-system module above.
+    "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
+    # `IImageList`: the shell's jumbo and extra-large image lists are COM
+    # objects, and `SHGetImageList` answers one of them. The interface itself
+    # lives in the controls module, which is where Windows declares it.
+    "Win32_UI_Controls",
+    # `GetOpenFileNameW`: the system's own file dialog, with its filter block.
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_Shell",
+    # `SendInput`, and the `INPUT` record it takes: the keystroke sender.
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
