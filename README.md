@@ -2,98 +2,129 @@
 
 [![CI](https://github.com/Shoking01/shk-deck/actions/workflows/ci.yml/badge.svg)](https://github.com/Shoking01/shk-deck/actions/workflows/ci.yml)
 
-A native Rust controller for the Redragon StreamCraft SS550 (15 LCD keys, `VID 0x0200 / PID 0x0300`). This project provides a lightweight alternative to the vendor's Stream Station software, with no Electron, WebView2, WebSocket plugins, or vendor services. Communication with the device happens directly via HID.
+A native Rust controller for HID stream decks, with no Electron, no WebView, no
+WebSocket plugins and no vendor services: the host talks to the device over HID
+directly.
 
-## Architecture
+The **Redragon StreamCraft SS550** (15 LCD keys) is the first deck it drives, and
+the one every protocol document in `docs/protocol/` was measured on. It is not
+the only one it is built for: the window, the profiles, the actions, the tray and
+the installer all talk to the `Deck` seam in `crates/deck-api`, so a second deck
+is a new driver plus a conformance run, not a second application.
+
+## The deck seam
 
 ```
-protocol ──▶ driver ──▶ engine ──▶ gui (GPUI Kit)
-                         │           │
-                         └───────────┴──▶ tray (Win32)
+deck-api ◀── ss550-protocol ── ss550-driver        (one deck: bytes and semantics)
+    ▲
+    ├── deck-conformance                            (what every deck must pass)
+    ├── deck-simulator                              (a deck with no hardware)
+    └── ss550-engine ──▶ ss550-gui ──▶ ss550-tray   (deck-agnostic application)
 ```
+
+A deck answers four questions — its geometry, the image it accepts, what it can
+do, and what it is called — and then behaves: paint a key, clear, brightness,
+sleep, dials, events, reconnect. Nothing above the seam names a model, a key
+count or an image size; the window reads the grid, the tile size and the offered
+controls from whatever deck answered. Two guards keep it that way: the seam never
+names a device, and the window's sources may not contain a deck's name.
+
+Adding a deck means implementing `Deck` (and `Transport` for its bytes) and
+passing `deck-conformance`, which pairs every case with a flaw it must catch.
+`deck-simulator` shows the shape of a deck that is nothing like the one on the
+desk.
 
 ## What Works Today
 
 | Area | Status |
 | --- | --- |
-| Connect/wake/paint/clear | done, including boot re-enumeration and 68.7s idle reset |
-| Keep awake | 500ms heartbeat (`keepalive`), throttled to 2s |
-| Read key presses | both edges reported, host-side debounce policy |
-| Bind to actions | v1 catalogue: **App** and **URL** only |
-| Run actions | `.exe` by path, `.lnk` via explorer, `.bat`/`.cmd` via `cmd /C call`, URLs by scheme |
-| Background mode | tray icon, window hides (deck stays awake) |
-| Start with Windows | opt-in, one `HKCU\...\Run` value, off by default; the installed copy is refreshed on every start |
-| Report dead programs | watched for 6s, shown in status line |
-| Safe mode | driver refuses unproven commands |
-| Profiles (M6) | 6 named profiles with JSON persistence |
-| Hotplug (M7) | auto-reconnect with exponential backoff |
-| Per-key imagery (Phase 4) | image picker panel, asset library in `config_dir()/assets/` |
+| Deck-agnostic window | grid, tile size, controls and texts come from the deck |
+| Connect/wake/paint/clear | including boot re-enumeration and the idle reset |
+| Keep awake | throttled heartbeat, never inside an upload |
+| Read key presses | both edges, with a host-side debounce policy |
+| Actions | **run an app**, **open a URL**, **send a key combination** |
+| Action palette | drag an entry onto a key; a template opens its editor and writes nothing |
+| Key artwork | the application's own icon, or a picture you pick from anywhere |
+| Per-key colour | white, red or blank; blank is the default |
+| Profiles | six named profiles, per deck, persisted as JSON |
+| Hotplug | auto-reconnect with exponential backoff |
+| Background mode | tray icon; the window hides and the deck stays awake |
+| Start with Windows | opt-in, one `HKCU\...\Run` value; the installed copy is refreshed on every start |
+| Safe mode | the driver refuses commands that were never proven on hardware |
+| Failure reporting | a bound program that dies is watched and named in the status line |
 
-Every feature above has been verified on the actual hardware.
+Every deck-specific behaviour above was verified on the actual SS550.
 
-## What's Left to Do
+## What's Left
 
-Listed in [`CHANGELOG.md`](#known-limitations):
-- Plugin sandbox
-- Async transport
-- Linux udev rules
+- A second physical deck behind the seam (the simulator proves the shape, not
+  the hardware).
+- Plugin sandbox (WASM).
+- Async transport.
+- Linux udev rules and macOS packaging.
 
 ## Build & Test
 
 Requires **Rust 1.87+** and, for the GUI, a GPU-capable Windows machine.
 
 ```bash
-# Workspace (protocol/driver/engine/probe)
+# Workspace: seam, protocol, driver, engine, simulator, conformance
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 
-# GUI window (pulls the GPUI tree, several minutes first time)
-cargo test --workspace --manifest-path crates/ss550-gui/Cargo.toml
+# GUI window (pulls the GPUI tree, several minutes the first time)
+cargo test --manifest-path crates/ss550-gui/Cargo.toml
 cargo clippy --manifest-path crates/ss550-gui/Cargo.toml --all-targets -- -D warnings
 
-# Tray (Win32 + tray-icon)
+# Tray and Win32 surface
 cargo test --manifest-path crates/ss550-tray/Cargo.toml
 cargo clippy --manifest-path crates/ss550-tray/Cargo.toml --all-targets -- -D warnings
 ```
 
-Three separate workspaces by design: driver/protocol stays fast, never pulls 800 packages of GPUI or Win32.
+Three workspaces by design: the seam, the protocol and the driver stay fast and
+never pull the GPUI or Win32 trees.
 
 ## Development
 
 ```bash
-# Run GUI window (development)
+# Window
 cargo run --manifest-path crates/ss550-gui/Cargo.toml
 
-# Run GUI in tray-only mode (hidden)
+# Window, straight to the tray
 cargo run --manifest-path crates/ss550-gui/Cargo.toml -- --hidden
+
+# Nothing plugged in: the window still runs, and says so
+set DECK_CONTROLLER_NO_DECK=1
 ```
 
 ## Installation
 
-See [`INSTALL.md`](INSTALL.md) for detailed installation instructions and update procedures.
+See [`INSTALL.md`](INSTALL.md) for installation and the update procedure.
 
 ## Project Structure
 
 | Path | Purpose |
 | --- | --- |
-| `crates/ss550-protocol` | Pure HID codec (no I/O, no USB, no time). Golden vectors + proptest |
-| `crates/deck-api` | The deck seam: `Deck` (semantics) over `Transport` (bytes) |
-| `crates/deck-conformance` | Conformance suite (11 tests every deck must pass) |
-| `crates/deck-simulator` | 6-key deck and wire fake for CI |
-| `crates/ss550-driver` | Synchronous hidapi transport, reconnect, heartbeat |
-| `crates/ss550-engine` | Actions, persistence, URL/path validation |
-| `crates/ss550-gui` | Window (GPUI Kit). Independent workspace |
-| `crates/ss550-tray` | Tray icon, Win32 hide/restore. Only crate allowed unsafe Win32 |
-| `crates/ss550-probe` | Reverse-engineering tools |
-| `docs/` | Protocol docs, troubleshooting, milestones |
-| `odd/tasks/` | Feature specs, tasks, implementation evidence |
+| `crates/deck-api` | The seam: `Deck` (semantics) over `Transport` (bytes) |
+| `crates/deck-conformance` | What every deck must pass, with a flaw per case |
+| `crates/deck-simulator` | A six-key deck and a wire fake, for CI and for the seam |
+| `crates/ss550-protocol` | Pure HID codec (no I/O, no USB, no time), golden vectors, proptest |
+| `crates/ss550-driver` | The first deck: hidapi transport, reconnect, heartbeat |
+| `crates/ss550-engine` | Actions, keystrokes, assets, profiles, persistence |
+| `crates/ss550-gui` | The window (GPUI Kit). Independent workspace |
+| `crates/ss550-tray` | Tray icon, Win32 window and shell calls. The only crate allowed `unsafe` |
+| `crates/ss550-probe` | Reverse-engineering tools for a new deck |
+| `docs/` | Protocol documents, troubleshooting, milestones |
+| `odd/tasks/` | Feature specs, tasks and implementation evidence |
 
 ## Contributing
 
 1. Check existing work in `odd/tasks/`
-2. Read the spec and implementation notes
-3. Follow the conventional commit format
-4. Ensure `cargo fmt --check` and `cargo clippy -- -D warnings` pass
+2. Read the spec and its evidence
+3. Conventional commits, no attribution trailers
+4. `cargo fmt --check` and `cargo clippy -- -D warnings` must pass in every root
+5. A new deck: implement the seam, pass the conformance suite, and add nothing
+   device-specific above it
 
 ## License
 
