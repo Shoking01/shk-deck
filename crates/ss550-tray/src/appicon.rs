@@ -22,11 +22,23 @@
 //!
 //! ## Size
 //!
-//! The icon is **32×32**. That is what `SHGFI_LARGEICON` means, and it is the
-//! picture Explorer draws in a file list. The deck's tile is larger, so the
-//! renderer scales the picture up; the alternative — `SHGetImageList` with
-//! `SHIL_EXTRALARGE` — is a COM image list and a shell-malloc'd pointer for
-//! sixteen more pixels a side.
+//! The picture is asked for at the **largest size the shell has**, because the
+//! deck's tile is 108 pixels across and a 32-pixel icon blown up to it is a
+//! pixelated version of itself. Three sources are tried in order, and the first
+//! that answers with real pixels wins:
+//!
+//! 1. the shell's jumbo image list — `SHGetFileInfoW(..., SHGFI_SYSICONINDEX)`
+//!    for the file's index, then `SHGetImageList(SHIL_JUMBO)` and
+//!    `IImageList::GetIcon`, which is **256×256**;
+//! 2. `SHIL_EXTRALARGE`, the same call against the 48×48 list;
+//! 3. `SHGFI_ICON | SHGFI_LARGEICON`, the 32×32 icon Explorer draws in a file
+//!    list.
+//!
+//! A list with no entry for the file answers an error rather than a handle, and
+//! an icon with no pixels is not an answer either: both fall through to the next
+//! source instead of stopping the search. Scaling the picture to the tile is the
+//! renderer's job — it shrinks a large icon and only ever enlarges a small one
+//! at whole pixels.
 //!
 //! ## What comes back
 //!
@@ -44,8 +56,9 @@
 //! use std::path::Path;
 //!
 //! if let Some(icon) = ss550_tray::appicon::program_icon(Path::new(r"C:\Windows\notepad.exe")) {
-//!     assert_eq!(icon.width(), 32);
-//!     assert_eq!(icon.rgba().len(), 32 * 32 * 4);
+//!     // The biggest picture the shell has, never smaller than its large icon.
+//!     assert!(icon.width() >= ss550_tray::appicon::ICON_SIDE);
+//!     assert_eq!(icon.rgba().len(), (icon.width() * icon.height() * 4) as usize);
 //! }
 //! ```
 
@@ -53,11 +66,18 @@ use std::path::Path;
 
 use crate::shortcut;
 
-/// The side of the icon this crate asks Windows for, in pixels.
+/// The side of the shell's large icon, in pixels.
 ///
-/// `SHGFI_LARGEICON` is the shell's 32×32 icon. Stated here so the tests and the
-/// window can both say what they expect instead of repeating the number.
+/// `SHGFI_LARGEICON` is the 32×32 picture Explorer draws in a file list. It is
+/// the **last** source this module tries, and the floor of what a caller can
+/// expect: an icon is never smaller than this, and often larger.
 pub const ICON_SIDE: u32 = 32;
+
+/// The side of the shell's jumbo image list, in pixels.
+///
+/// `SHIL_JUMBO` is the largest picture Windows keeps for a file, and therefore
+/// the ceiling of what [`program_icon`] can answer with.
+pub const ICON_SIDE_JUMBO: u32 = 256;
 
 /// An icon as straight RGBA, row-major, top row first.
 ///
@@ -115,6 +135,10 @@ impl IconPixels {
 /// overlay and all. A path that does not exist and an icon with no pixels answer
 /// `None`; a shortcut whose target is gone answers with the icon the shell has
 /// for the link, which is something, rather than nothing.
+///
+/// The picture is the largest the shell has — the jumbo image list first, the
+/// extra-large list second, the 32×32 large icon last — so a caller that draws
+/// it on a large tile shrinks it instead of magnifying a thumbnail.
 pub fn program_icon(path: &Path) -> Option<IconPixels> {
     // The one step that has to happen before the shell is asked: which file the
     // picture is about.
@@ -194,13 +218,26 @@ mod platform {
         BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, RGBQUAD,
     };
     use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
-    use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+    use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
+    use windows::Win32::UI::Shell::{
+        SHGetFileInfoW, SHGetImageList, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
+        SHGFI_SYSICONINDEX, SHIL_EXTRALARGE, SHIL_JUMBO,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
 
     use super::{has_alpha, mask_alpha, rgba_from_bgra, IconPixels};
 
-    /// Asks the shell for the icon of `path` and reads it out.
+    /// Asks the shell for the largest icon of `path` and reads it out.
+    ///
+    /// The sources are tried largest first and the first one that answers with
+    /// pixels ends the search: the jumbo image list, the extra-large list, and
+    /// then the 32×32 large icon.
     pub(super) fn program_icon(path: &Path) -> Option<IconPixels> {
+        // The image lists are COM objects, and the shell answers nothing until
+        // this thread has an apartment. Entered once and never torn down: see
+        // `crate::shortcut` for the crash a balanced `CoUninitialize` caused.
+        crate::shortcut::enter_apartment()?;
+
         let wide: Vec<u16> = path
             .as_os_str()
             .encode_wide()
@@ -209,13 +246,83 @@ mod platform {
 
         let mut info = SHFILEINFOW::default();
         // SAFETY: `wide` is a live, nul-terminated UTF-16 string, `info` is a
+        // writable record of the size passed with it, and the flags ask only
+        // for the file's index in the system image lists. A failed call answers
+        // zero and leaves `info` untouched, which is why the index is only used
+        // behind the check below.
+        //
+        // `SHGFI_LINKOVERLAY` is never among the flags: it is what draws the
+        // shortcut arrow, and the caller resolved the link precisely so that
+        // arrow would not be in the picture. `SHGFI_ICON` is not asked for here
+        // either — it would hand over a second icon to destroy, and the picture
+        // this call is about is the index.
+        let indexed = unsafe {
+            SHGetFileInfoW(
+                PCWSTR(wide.as_ptr()),
+                FILE_FLAGS_AND_ATTRIBUTES::default(),
+                Some(&mut info),
+                size_of::<SHFILEINFOW>() as u32,
+                SHGFI_SYSICONINDEX | SHGFI_LARGEICON,
+            )
+        };
+        // The return value is the shell's own *large* image list. It is shared
+        // and system-wide: it is never destroyed here, and only the index the
+        // call wrote into `info` is read from it. The index space is the same
+        // for every shell image list, which is what lets the jumbo list be asked
+        // about the file at all.
+        if indexed != 0 {
+            for list in [SHIL_JUMBO, SHIL_EXTRALARGE] {
+                if let Some(pixels) = from_image_list(info.iIcon, list) {
+                    return Some(pixels);
+                }
+            }
+        }
+
+        // Nothing bigger: the 32×32 icon, which is what this module answered
+        // with before the image lists were asked.
+        large_icon(&wide)
+    }
+
+    /// One icon out of one of the shell's shared image lists.
+    ///
+    /// `None` when the list has no entry at `index` — the jumbo list only holds
+    /// files that ship a 256-pixel icon — or when the entry has no pixels in it.
+    fn from_image_list(index: i32, list: u32) -> Option<IconPixels> {
+        let which = i32::try_from(list).ok()?;
+        // SAFETY: `which` is one of the `SHIL_*` constants, and the interface
+        // is released by its own `Drop` before this returns. The list itself is
+        // the shell's and stays alive: dropping the interface does not free it.
+        let images: IImageList = unsafe { SHGetImageList(which) }.ok()?;
+
+        // SAFETY: the index was written by `SHGetFileInfoW` for this file, and
+        // a list with no entry at that index answers an error instead of a
+        // handle. `GetIcon` hands over an icon the caller must destroy.
+        // `ILD_TRANSPARENT` asks for the image's mask to become the icon's, so a
+        // 32-bit image keeps the alpha it was drawn with.
+        let icon = unsafe { images.GetIcon(index, ILD_TRANSPARENT.0) }.ok()?;
+        if icon.is_invalid() {
+            return None;
+        }
+
+        let pixels = read(icon);
+        // SAFETY: the handle came from `GetIcon` above, has not been destroyed,
+        // and is not used again.
+        let _ = unsafe { DestroyIcon(icon) };
+        // A blank entry is not an answer: the next list, or the 32×32 path, may
+        // have a picture with pixels in it.
+        pixels.filter(|icon| !icon.is_blank())
+    }
+
+    /// The 32×32 icon `SHGFI_ICON | SHGFI_LARGEICON` hands back.
+    fn large_icon(wide: &[u16]) -> Option<IconPixels> {
+        let mut info = SHFILEINFOW::default();
+        // SAFETY: `wide` is a live, nul-terminated UTF-16 string, `info` is a
         // writable record of the size passed with it, and the flags ask for an
         // icon the caller owns. A failed call answers zero and leaves `info`
         // untouched, which is why the handle is checked before it is used.
         //
-        // `SHGFI_LINKOVERLAY` is never among the flags: it is what draws the
-        // shortcut arrow, and the caller resolved the link precisely so that
-        // arrow would not be in the picture.
+        // `SHGFI_LINKOVERLAY` is never among the flags, for the reason stated
+        // above.
         let found = unsafe {
             SHGetFileInfoW(
                 PCWSTR(wide.as_ptr()),
@@ -237,7 +344,7 @@ mod platform {
         // SAFETY: the handle came from the call above, has not been destroyed,
         // and is not used again.
         let _ = unsafe { DestroyIcon(icon) };
-        pixels
+        pixels.filter(|icon| !icon.is_blank())
     }
 
     /// The pixels of one icon handle.
@@ -437,28 +544,93 @@ mod tests {
 
 #[cfg(all(test, windows))]
 mod windows_tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    use super::{program_icon, ICON_SIDE};
+    use super::{program_icon, ICON_SIDE, ICON_SIDE_JUMBO};
     use crate::scratch::ScratchDir;
     use crate::shortcut::fixture::write_shortcut;
 
     #[test]
-    fn a_program_answers_with_the_shell_icon_at_its_documented_size() {
+    fn a_program_answers_with_a_square_shell_icon_no_smaller_than_the_large_one() {
         // The test binary is a real executable on disk, so the shell has an
         // icon for it even when the file carries none of its own: Windows falls
         // back to the generic application icon.
         let running = std::env::current_exe().expect("the test binary has a path");
         let icon = program_icon(&running).expect("an executable has an icon");
 
-        assert_eq!(icon.width(), ICON_SIDE);
-        assert_eq!(icon.height(), ICON_SIDE);
+        assert!(
+            icon.width() >= ICON_SIDE,
+            "the large icon is the floor, and this answered {} px",
+            icon.width()
+        );
+        assert!(
+            icon.width() <= ICON_SIDE_JUMBO,
+            "nothing the shell keeps is larger than the jumbo list: {} px",
+            icon.width()
+        );
+        assert_eq!(icon.width(), icon.height(), "a shell icon is square");
         assert_eq!(
             icon.rgba().len(),
-            (ICON_SIDE * ICON_SIDE * 4) as usize,
+            (icon.width() * icon.height() * 4) as usize,
             "four bytes per pixel, and no stride padding left in"
         );
         assert!(!icon.is_blank(), "an icon with no pixels is not an icon");
+    }
+
+    #[test]
+    fn a_program_with_a_jumbo_icon_answers_larger_than_the_large_icon_or_skips_when_the_shell_has_none(
+    ) {
+        // The jumbo image list only holds files that ship a 256-pixel icon, and
+        // which files those are is the shell's business rather than this test's.
+        // Windows' own icon library is the surest candidate; Explorer, the shell
+        // library and Notepad come next.
+        //
+        // A machine whose shell keeps no jumbo picture for any of them — a
+        // stripped image list, a session with no desktop — has nothing to assert
+        // here, and the test says so and leaves. The 32-pixel path is still
+        // covered by the test above.
+        let system = std::env::var_os("SystemRoot")
+            .map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+        let candidates = [
+            system.join("System32").join("imageres.dll"),
+            system.join("System32").join("shell32.dll"),
+            system.join("explorer.exe"),
+            system.join("System32").join("notepad.exe"),
+        ];
+
+        let mut widest = 0;
+        for path in candidates.iter().filter(|path| path.exists()) {
+            let Some(icon) = program_icon(path) else {
+                continue;
+            };
+            assert_eq!(icon.width(), icon.height(), "a shell icon is square");
+            assert!(
+                icon.width() >= ICON_SIDE,
+                "{} px for {path:?}",
+                icon.width()
+            );
+            assert!(
+                icon.width() <= ICON_SIDE_JUMBO,
+                "{} px for {path:?} is larger than the jumbo list",
+                icon.width()
+            );
+            widest = widest.max(icon.width());
+            if widest > ICON_SIDE {
+                break;
+            }
+        }
+
+        if widest <= ICON_SIDE {
+            eprintln!(
+                "the shell answered no icon wider than {ICON_SIDE} px for any candidate; \
+                 nothing to assert on this machine"
+            );
+            return;
+        }
+        assert!(
+            widest > ICON_SIDE,
+            "a jumbo icon is the reason a 108-pixel tile is not a blow-up: {widest} px"
+        );
     }
 
     #[test]

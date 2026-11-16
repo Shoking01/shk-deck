@@ -19,7 +19,14 @@ use std::sync::Arc;
 use gpui_kit::RenderImage;
 use image::RgbaImage;
 
+use crate::icons;
 use crate::render;
+
+/// The side a picker row's icon is shrunk to, in pixels.
+///
+/// The row draws it at 44 pixels; a couple of spare pixels keep the picture from
+/// being resampled by the GPU on a display that scales it up a little.
+const ROW_ICON_SIDE: u32 = 48;
 
 /// One application the picker can put in `PROGRAM`.
 pub(crate) struct AppChoice {
@@ -109,9 +116,15 @@ fn icon_for(program: &Path) -> Option<Arc<RenderImage>> {
         return None;
     }
     let icon = RgbaImage::from_raw(pixels.width(), pixels.height(), pixels.rgba().to_vec())?;
-    // At the size it was extracted: a list row is a thumbnail, and the deck's
-    // tile size has nothing to say about it.
-    Some(Arc::new(RenderImage::new([render::frame_from_rgba(&icon)])))
+    // A list row is 44 pixels across, and the shell answers with the jumbo
+    // 256-pixel icon: holding one of those per application would cost a quarter
+    // of a megabyte each for a thumbnail, on a list of hundreds. It is shrunk
+    // once, here, on the scan's background thread — the row draws the small one
+    // and never resamples anything.
+    let thumbnail = icons::shrink_icon(&icon, ROW_ICON_SIDE);
+    Some(Arc::new(RenderImage::new([render::frame_from_rgba(
+        &thumbnail,
+    )])))
 }
 
 #[cfg(test)]

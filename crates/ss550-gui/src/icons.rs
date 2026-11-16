@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use deck_api::ImageSpec;
 use gpui_kit::RenderImage;
-use image::{Rgba, RgbaImage};
+use image::{imageops, Rgba, RgbaImage};
 use ss550_engine::Action;
 
 use crate::render;
@@ -300,10 +300,12 @@ fn build_icon(spec: Option<ImageSpec>, program: &Path) -> Option<Art> {
         return None;
     }
     let icon = RgbaImage::from_raw(pixels.width(), pixels.height(), pixels.rgba().to_vec())?;
-    // An icon is 32 pixels square and a tile is 108: letting the fit resample it
-    // is what turns a crisp app icon into a smear. It is composed once at whole
-    // pixels instead — the largest integer scale that leaves a margin — and the
-    // fit then has nothing left to scale.
+    // The shell answers with the largest icon it has — up to 256 pixels — and a
+    // tile is 108: letting the fit resample a 256-pixel icon would be a second
+    // resample of a picture that has already been through one. It is composed
+    // once, at the tile's own size, so the fit has nothing left to scale: shrunk
+    // with a real filter when the icon is larger, grown at whole pixels when it
+    // is smaller.
     let side = spec.map_or(icon.width().max(icon.height()), |spec| {
         u32::from(spec.width().max(spec.height())).max(1)
     });
@@ -314,12 +316,27 @@ fn build_icon(spec: Option<ImageSpec>, program: &Path) -> Option<Art> {
     Some(art(spec, &picture, &name))
 }
 
-/// Centres `icon` on a square of `side` pixels, scaled by whole pixels only.
+/// The share of the tile the icon covers; the rest is the margin.
+const ICON_BUDGET: f32 = 0.72;
+
+/// Centres `icon` on a square of `side` pixels, at the largest size that fits
+/// the margin budget.
 ///
-/// Nearest-neighbour on purpose: a 32-pixel icon drawn at 2× is the icon the
-/// user recognises, while a smoothed 3.4× is a blurred version of it. The margin
-/// keeps the icon off the tile's edge, the way a key in a finished controller
-/// looks.
+/// Which rule applies is decided by the source's size, and the two are not
+/// interchangeable:
+///
+/// * **Larger than the budget — shrink it.** A 256-pixel jumbo icon on a
+///   108-pixel tile is resampled once, here, with a real filter. This is the
+///   case the picture exists for: a downscale is where a smooth filter turns a
+///   stepped edge into a drawn one, and it costs one pass over 78×78 pixels on
+///   the thread that built the icon, never on a frame.
+/// * **Smaller than the budget — grow it at whole pixels.** A 32-pixel icon on a
+///   108-pixel tile is the icon the user recognises; a smoothed 2.4× of it is a
+///   blurred guess at it. Nearest-neighbour at 2× keeps the shape exact, and the
+///   deck's own JPEG never has to hide a resample.
+///
+/// The margin keeps the icon off the tile's edge, the way a key in a finished
+/// controller looks.
 fn compose_icon(icon: &RgbaImage, side: u32) -> RgbaImage {
     let side = side.max(1);
     let mut canvas = RgbaImage::from_pixel(side, side, Rgba([0, 0, 0, 0xff]));
@@ -328,10 +345,23 @@ fn compose_icon(icon: &RgbaImage, side: u32) -> RgbaImage {
         return canvas;
     }
 
-    // 72 % of the tile is the icon, the rest is margin; the scale is the largest
-    // whole number that still fits inside that budget.
-    let budget = (side as f32 * 0.72).round().max(1.0) as u32;
-    let scale = (budget / width.max(height)).max(1);
+    // 72 % of the tile is the icon, the rest is margin.
+    let budget = (side as f32 * ICON_BUDGET).round().max(1.0) as u32;
+    let longest = width.max(height);
+
+    if longest > budget {
+        // More pixels than the tile can use: one resample, down.
+        let shrunk = shrink_icon(icon, budget);
+        let (drawn_width, drawn_height) = shrunk.dimensions();
+        let left = (side - drawn_width) / 2;
+        let top = (side - drawn_height) / 2;
+        imageops::overlay(&mut canvas, &shrunk, i64::from(left), i64::from(top));
+        return canvas;
+    }
+
+    // Fewer pixels than the tile can use: the largest whole scale that still
+    // fits inside the budget, so a source pixel stays a square block.
+    let scale = (budget / longest).max(1);
     let drawn_width = (width * scale).min(side);
     let drawn_height = (height * scale).min(side);
     let left = (side - drawn_width) / 2;
@@ -349,6 +379,60 @@ fn compose_icon(icon: &RgbaImage, side: u32) -> RgbaImage {
         }
     }
     canvas
+}
+
+/// `icon` resampled down so its longest side fits inside `longest`, on black.
+///
+/// The one icon downscale in this crate: the deck's tile and the picker's row
+/// both shrink a jumbo icon with it, so they cannot disagree about what a
+/// shrunken icon looks like.
+///
+/// The icon is flattened onto black **before** the filter runs, because
+/// [`imageops::resize`] weights colour and alpha independently: an edge pixel
+/// that is half transparent would contribute half its colour and then be
+/// darkened a second time when the deck flattens it. Black is where the picture
+/// is going anyway, so the multiply happens once, at the size with the most
+/// information.
+pub(crate) fn shrink_icon(icon: &RgbaImage, longest: u32) -> RgbaImage {
+    let (width, height) = icon.dimensions();
+    let longest = longest.max(1);
+    if width == 0 || height == 0 {
+        return RgbaImage::new(1, 1);
+    }
+
+    // Down only. An icon that already fits is flattened and kept: enlarging it
+    // here would be a smooth upscale, which is the blur this whole path exists
+    // to avoid. A caller that wants a bigger picture composes it itself.
+    if width.max(height) <= longest {
+        return opaque(&render::on_black(icon));
+    }
+
+    let scale = f64::from(longest) / f64::from(width.max(height));
+    let drawn_width = (f64::from(width) * scale)
+        .round()
+        .clamp(1.0, f64::from(longest)) as u32;
+    let drawn_height = (f64::from(height) * scale)
+        .round()
+        .clamp(1.0, f64::from(longest)) as u32;
+
+    let flat = render::on_black(icon);
+    let scaled = imageops::resize(
+        &flat,
+        drawn_width,
+        drawn_height,
+        imageops::FilterType::Lanczos3,
+    );
+    opaque(&scaled)
+}
+
+/// An opaque RGBA copy of a picture that has already been flattened onto black.
+fn opaque(picture: &image::RgbImage) -> RgbaImage {
+    let mut out = RgbaImage::new(picture.width(), picture.height());
+    for (x, y, pixel) in picture.enumerate_pixels() {
+        // Already on black, so the alpha is the canvas's: opaque.
+        out.put_pixel(x, y, Rgba([pixel[0], pixel[1], pixel[2], 0xff]));
+    }
+    out
 }
 
 /// The initial of what a key runs, drawn on the accent colour.
@@ -624,9 +708,10 @@ mod tests {
     }
 
     #[test]
-    fn an_icon_is_drawn_at_whole_pixels_with_a_margin() {
-        // A 2x2 icon on a 10-pixel tile: 72 % of ten is seven, so the largest
-        // whole scale is three, the icon covers 6x6 and sits two pixels in.
+    fn an_icon_that_must_grow_is_drawn_at_whole_pixels_with_a_margin() {
+        // The upscale case, and the only one where whole pixels apply: a 2x2
+        // icon on a 10-pixel tile. 72 % of ten is seven, so the largest whole
+        // scale is three, the icon covers 6x6 and sits two pixels in.
         let mut icon = image::RgbaImage::new(2, 2);
         for (x, y, pixel) in icon.enumerate_pixels_mut() {
             *pixel = image::Rgba([(x as u8 + 1) * 10, (y as u8 + 1) * 10, 0, 0xff]);
@@ -655,6 +740,93 @@ mod tests {
             canvas.get_pixel(8, 8).0,
             [0, 0, 0, 0xff],
             "and the far margin"
+        );
+    }
+
+    #[test]
+    fn a_32_pixel_icon_on_a_108_pixel_tile_grows_by_two_and_stays_sharp() {
+        // The case the whole-pixel rule exists for: a small icon, a big tile.
+        // 72 % of 108 is 78, two whole pixels is 64, and three would be 96 and
+        // overrun the budget — so the icon covers 64 pixels and sits 22 in.
+        let side = 108;
+        let mut icon = image::RgbaImage::new(32, 32);
+        for (x, y, pixel) in icon.enumerate_pixels_mut() {
+            *pixel = image::Rgba([x as u8 * 8, y as u8 * 8, 0, 0xff]);
+        }
+
+        let canvas = compose_icon(&icon, side);
+
+        assert_eq!(canvas.dimensions(), (side, side));
+        let margin = 22;
+        // Every source pixel is a solid 2x2 block at exactly its own value: no
+        // blending, which a smooth upscale could not manage.
+        for (x, y, source) in icon.enumerate_pixels() {
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let drawn = canvas.get_pixel(margin + x * 2 + dx, margin + y * 2 + dy).0;
+                    assert_eq!(drawn, source.0, "at source ({x},{y}) + ({dx},{dy})");
+                }
+            }
+        }
+        // Nothing was drawn into the margin.
+        assert_eq!(canvas.get_pixel(margin - 1, margin).0, [0, 0, 0, 0xff]);
+        assert_eq!(canvas.get_pixel(margin + 64, margin).0, [0, 0, 0, 0xff]);
+    }
+
+    #[test]
+    fn a_jumbo_icon_is_scaled_down_into_the_tiles_budget_and_not_blown_up() {
+        // 256 pixels on a 108-pixel tile: 72 % of 108 is 78, so the icon covers
+        // 78x78 and sits fifteen pixels in. This is what the jumbo image list is
+        // for — the picture is shrunk, never magnified.
+        let side = 108;
+        let source = 256;
+        let mut icon = image::RgbaImage::new(source, source);
+        for (x, y, pixel) in icon.enumerate_pixels_mut() {
+            // A diagonal edge: white above the line, black below it.
+            let lit = x + y < source;
+            let value = if lit { 0xff } else { 0x00 };
+            *pixel = image::Rgba([value, value, value, 0xff]);
+        }
+
+        let canvas = compose_icon(&icon, side);
+        assert_eq!(canvas.dimensions(), (side, side));
+
+        // The icon area is the budget, centred, and the margin is untouched.
+        let budget = 78;
+        let margin = (side - budget) / 2;
+        let mut left = side;
+        let mut top = side;
+        let mut right = 0;
+        let mut bottom = 0;
+        for (x, y, pixel) in canvas.enumerate_pixels() {
+            if pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0 {
+                continue;
+            }
+            left = left.min(x);
+            top = top.min(y);
+            right = right.max(x);
+            bottom = bottom.max(y);
+        }
+        assert_eq!(
+            (left, top, right, bottom),
+            (margin, margin, margin + budget - 1, margin + budget - 1),
+            "the icon covers exactly the 72 % budget, centred"
+        );
+
+        // And it is not a block copy. A nearest-neighbour resample samples one
+        // source pixel at a time, so a black-and-white source can only ever
+        // produce black and white. A real filter averages across the diagonal
+        // and leaves intermediate values along it: this one leaves a blended
+        // pixel in every row the diagonal crosses — 78 of them here, one per
+        // pixel of the icon area's side — and a nearest-neighbour resample
+        // leaves none.
+        let blended = canvas
+            .pixels()
+            .filter(|pixel| pixel[0] > 8 && pixel[0] < 247)
+            .count();
+        assert!(
+            blended >= (budget / 2) as usize,
+            "a diagonal edge must come out blended, not stepped: {blended} intermediate pixels"
         );
     }
 

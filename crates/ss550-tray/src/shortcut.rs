@@ -65,6 +65,17 @@ pub(crate) fn icon_source(path: &Path) -> PathBuf {
     icon_source_with(path, resolve)
 }
 
+/// COM, entered on this thread the first time anything here needs it.
+///
+/// The icon reader calls this before it asks for one of the shell's image
+/// lists, which are COM objects. Entered once per thread and never torn down:
+/// the module documentation has the crash a balanced `CoUninitialize` caused.
+/// `None` means this thread has no COM and the shell cannot be asked.
+#[cfg(windows)]
+pub(crate) fn enter_apartment() -> Option<()> {
+    platform::enter()
+}
+
 /// [`icon_source`] with the resolution handed in, so the walk is testable.
 ///
 /// The only thing this does that needs the machine is `Path::exists`: a target

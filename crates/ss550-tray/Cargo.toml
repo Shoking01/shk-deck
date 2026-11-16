@@ -46,6 +46,10 @@ windows = { version = "0.62", features = [
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
+    # `IImageList`: the shell's jumbo and extra-large image lists are COM
+    # objects, and `SHGetImageList` answers one of them. The interface itself
+    # lives in the controls module, which is where Windows declares it.
+    "Win32_UI_Controls",
     "Win32_UI_Shell",
     # `SendInput`, and the `INPUT` record it takes: the keystroke sender.
     "Win32_UI_Input_KeyboardAndMouse",
