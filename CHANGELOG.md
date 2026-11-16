@@ -26,6 +26,10 @@ messages; the file below is a human summary, not a substitute for
   is scaled **down** into the tile with a smoothing filter, so it stays sharp at
   the deck's resolution instead of being blown up from 32 pixels. The same pixels
   are encoded for the deck: window and key cannot disagree.
+- A key bound to a URL draws the site's own icon, fetched once over WinINet with
+  its own timeouts and a byte cap, decoded from ICO or PNG, and cached on disk per
+  host so a start with no network still shows it. The icon is derived from the
+  action, not written into the profile: change the URL and the icon follows.
 - A program with no readable icon, a URL and a keystroke fall back to the
   initial of what they run, drawn on the accent colour, so a key that runs
   something is never a blank tile. The initial is a five-by-seven bitmap drawn at
