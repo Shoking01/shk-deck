@@ -253,7 +253,7 @@ fn theme_button(cx: &mut Context<Controller>) -> Button {
         }))
 }
 
-/// The navigation rail: four pages, the action palette, then what the window is
+/// The navigation rail: three pages, the action palette, then what the window is
 /// driving.
 fn rail(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller>) -> Div {
     let current = controller.page;
@@ -325,8 +325,6 @@ fn nav_item(page: Page, active: bool, tokens: Tokens, cx: &mut Context<Controlle
     };
 
     activate(row, cx, move |this, _window, cx| {
-        // The gallery needs its thumbnails before its first frame, and a
-        // thumbnail is a decode: it happens on this click, not during render.
         this.show_page(page);
         cx.notify();
     })
@@ -476,7 +474,6 @@ fn page_body(
     match page {
         Page::Deck => super::deck::deck_page(controller, tokens, cx).into_any_element(),
         Page::Actions => panels::actions_page(controller, tokens, cx).into_any_element(),
-        Page::Artwork => panels::artwork_page(controller, tokens, cx).into_any_element(),
         Page::Settings => panels::settings_page(controller, tokens, cx).into_any_element(),
     }
 }

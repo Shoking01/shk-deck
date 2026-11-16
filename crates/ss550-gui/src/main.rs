@@ -12,7 +12,7 @@
 //! showing and the action bound to it, so the screen always matches what the
 //! hardware is doing.
 //!
-//! The window is a shell of its own: an app bar, a rail of four pages, a
+//! The window is a shell of its own: an app bar, a rail of three pages, a
 //! scrolling content area and a status line, all built in [`ui`]. This file owns
 //! the controller — the connection, the bindings, the action runner — and the
 //! shell draws whatever it says.
@@ -28,7 +28,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![deny(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::Arc;
@@ -61,6 +61,14 @@ mod ui;
 /// The trigger is hidden on purpose: this is a support tool, not a feature, and
 /// a button for it would invite clicks that answer nothing.
 const VERSION_CLICKS_TO_REVEAL: u8 = 5;
+
+/// Why a picture cannot be put on a key with no deck in front of the window.
+///
+/// A picture is fitted to the deck's tile and saved into that deck's profile, so
+/// without one there is nothing to fit it to. Stated once: the note the click
+/// writes and the caption under the picture controls are the same sentence.
+const NO_DECK_PICTURE: &str =
+    "Connect a deck to put a picture on a key: the tile size comes from it.";
 
 /// Counts one click on the version line and says whether the reveal is due.
 ///
@@ -387,22 +395,27 @@ struct Controller {
     profile_store: ss550_engine::ProfileStore,
     /// The pictures a key can show.
     assets: ss550_engine::AssetLibrary,
-    /// The library as the picker lists it, re-read when the user asks.
+    /// The library as the picture list shows it, re-read when the user asks.
     library: Vec<ss550_engine::Asset>,
-    /// The picture the picker has highlighted, if any.
-    selected_asset: Option<ss550_engine::AssetName>,
-    /// The highlighted picture, already fitted and swapped for the renderer.
-    /// Built when the selection changes, never while drawing: decoding a photo
-    /// on every frame would make the window crawl.
-    preview: Option<(ss550_engine::AssetName, Arc<gpui_kit::RenderImage>)>,
-    /// The pictures the tiles and the gallery show, already fitted to the deck's
-    /// tile size and swapped for the renderer.
+    /// Whether the list of pictures is open under the key editor.
     ///
-    /// Built when the deck, the profile or the library changes — never while
-    /// drawing. A tile that finds its picture here paints it; a tile that does
-    /// not falls back to its flat colour, so a picture deleted from the library
-    /// while a profile still names it cannot blank a key or panic the window.
+    /// It is the key's own control, not a page: the list opens in place, and an
+    /// open list is what asks for the library's thumbnails.
+    picture_list_open: bool,
+    /// The pictures the keys show, already fitted to the deck's tile size and
+    /// swapped for the renderer.
+    ///
+    /// Built when the deck or the profile changes — never while drawing. A tile
+    /// that finds its picture here paints it; a tile that does not falls back to
+    /// its flat colour, so a picture deleted from the library while a profile
+    /// still names it cannot blank a key or panic the window.
     previews: BTreeMap<ss550_engine::AssetName, Arc<gpui_kit::RenderImage>>,
+    /// The whole library, fitted to the deck's tile, for the picture list.
+    ///
+    /// Its own cache on purpose: it is filled when the list opens and when the
+    /// folder is re-read, so putting one picture on one key does not re-decode
+    /// every other picture in the folder.
+    library_previews: BTreeMap<ss550_engine::AssetName, Arc<gpui_kit::RenderImage>>,
     /// The icon of every program the deck can run, and the initial of every
     /// action that has no icon.
     ///
@@ -600,9 +613,9 @@ impl Controller {
             profile_store: ss550_engine::ProfileStore::new(),
             assets: ss550_engine::AssetLibrary::at_config_dir(&ss550_engine::config_dir()),
             library: Vec::new(),
-            selected_asset: None,
-            preview: None,
+            picture_list_open: false,
             previews: BTreeMap::new(),
+            library_previews: BTreeMap::new(),
             icons: icons::IconCache::new(),
             tiles: None,
         };
@@ -707,10 +720,9 @@ impl Controller {
             .map(session::DeckSession::image_spec)
             .expect("the session was just stored");
         self.tiles = Some(render::TileCache::new(spec));
-        // A preview built for the previous deck's tile size is wrong for this
-        // one. The picker keeps the files; the picture is rebuilt on the next
-        // selection.
-        self.preview = None;
+        // A thumbnail fitted for the previous deck's tile is the wrong size for
+        // this one: the library's own cache starts over with the deck.
+        self.library_previews.clear();
 
         // The profile is where this deck's bindings live now, and the per-deck
         // file is where they lived before profiles existed. A profile that has
@@ -769,29 +781,49 @@ impl Controller {
     /// Fits every picture the active profile shows to the deck's tile, once.
     ///
     /// This is the only place the grid's pictures are decoded and encoded: it
-    /// runs on a deck change, a profile switch or a library refresh, and never
-    /// while a frame is being drawn.
+    /// runs on a deck change, a profile switch, an assignment or a library
+    /// refresh, and never while a frame is being drawn.
     fn rebuild_previews(&mut self) {
         // The icons are part of the same promise — a tile that draws a program
         // draws the picture the deck received — so they are rebuilt with them.
         self.rebuild_icons();
 
-        self.previews.clear();
-        let names: Vec<ss550_engine::AssetName> = match self.profile_store.active() {
+        // Only the pictures the active profile names are kept: one that is no
+        // longer on any key is dropped, and one that still is is never decoded a
+        // second time. An assignment therefore decodes the picture it added and
+        // nothing else.
+        let names: BTreeSet<ss550_engine::AssetName> = match self.profile_store.active() {
             Some(profile) => profile
                 .appearance
                 .values()
                 .filter_map(|appearance| appearance.asset().cloned())
                 .collect(),
-            None => Vec::new(),
+            None => BTreeSet::new(),
         };
+        self.previews.retain(|name, _| names.contains(name));
         self.ensure_previews(names);
 
-        // An open gallery lists every picture, not only the ones the profile
-        // names, so its thumbnails come back with the same clear.
-        if self.page == Page::Artwork {
+        // An open picture list lists every picture, not only the ones the
+        // profile names. Its own cache is not cleared here: it survives an
+        // assignment, so putting one picture on one key decodes that picture and
+        // nothing else.
+        if self.picture_list_open {
             self.ensure_library_previews();
         }
+    }
+
+    /// Fits one picture to the deck's tile, ready for the renderer.
+    ///
+    /// `None` when there is no deck to state the tile size, the file cannot be
+    /// read, or the bytes are not a picture this build decodes.
+    fn fit_preview(&self, name: &ss550_engine::AssetName) -> Option<Arc<gpui_kit::RenderImage>> {
+        let spec = self
+            .session
+            .as_ref()
+            .map(session::DeckSession::image_spec)?;
+        let source = self.assets.read(name).ok()?;
+        let frame = render::preview_frame(spec, name, &source).ok()?;
+        Some(Arc::new(gpui_kit::RenderImage::new([frame])))
     }
 
     /// Builds the fitted preview of every named picture that is not cached yet.
@@ -803,36 +835,39 @@ impl Controller {
     where
         I: IntoIterator<Item = ss550_engine::AssetName>,
     {
-        let Some(spec) = self.session.as_ref().map(session::DeckSession::image_spec) else {
-            return;
-        };
-
         for name in names {
             if self.previews.contains_key(&name) {
                 continue;
             }
-            let Ok(source) = self.assets.read(&name) else {
-                continue;
-            };
-            let Ok(frame) = render::preview_frame(spec, &name, &source) else {
-                continue;
-            };
-            self.previews
-                .insert(name, Arc::new(gpui_kit::RenderImage::new([frame])));
+            if let Some(image) = self.fit_preview(&name) {
+                self.previews.insert(name, image);
+            }
         }
     }
 
     /// Fits every picture in the library to the deck's tile.
     ///
-    /// Called when the gallery opens and when the folder is re-read, so the
-    /// gallery lists thumbnails without decoding anything during a frame.
+    /// Called when the picture list opens and when the folder is re-read, so the
+    /// list draws thumbnails without decoding anything during a frame. A picture
+    /// the profile already shows is shared rather than decoded twice.
     fn ensure_library_previews(&mut self) {
         let names: Vec<ss550_engine::AssetName> = self
             .library
             .iter()
             .map(|asset| asset.name.clone())
             .collect();
-        self.ensure_previews(names);
+        for name in names {
+            if self.library_previews.contains_key(&name) {
+                continue;
+            }
+            let image = match self.previews.get(&name) {
+                Some(image) => Some(image.clone()),
+                None => self.fit_preview(&name),
+            };
+            if let Some(image) = image {
+                self.library_previews.insert(name, image);
+            }
+        }
     }
 
     /// Reads the picture of every program the deck can run.
@@ -962,17 +997,13 @@ impl Controller {
         self.link = Link::Connecting;
     }
 
-    /// Moves the window to a page, building what that page needs before its
-    /// first frame.
+    /// Moves the window to a page.
     ///
-    /// The gallery needs a thumbnail per picture, and a thumbnail is a decode.
-    /// It happens here — on the click that opens the page — and never inside
-    /// `render`.
+    /// No page needs anything built before its first frame: the only thing that
+    /// ever did was the picture gallery, and that is now a list inside the key
+    /// editor, opened by its own button.
     fn show_page(&mut self, page: Page) {
         self.page = page;
-        if page == Page::Artwork {
-            self.ensure_library_previews();
-        }
     }
 
     /// Drops whatever link there is and asks the worker for a fresh attempt.
@@ -1836,70 +1867,63 @@ impl Controller {
         self.library = assets;
 
         // A file the user replaced by hand has the same name the cache already
-        // holds. Refreshing is the moment they asked to look again, so both
-        // caches start over.
+        // holds. Refreshing is the moment they asked to look again, so every
+        // cache starts over.
         if let Some(tiles) = self.tiles.as_mut() {
             tiles.clear();
         }
         self.previews.clear();
+        self.library_previews.clear();
 
-        // A picture that is no longer there must not stay highlighted.
-        let still_there = self
-            .selected_asset
-            .as_ref()
-            .is_some_and(|name| self.library.iter().any(|asset| &asset.name == name));
-        if !still_there {
-            self.selected_asset = None;
-            self.preview = None;
-        }
-
-        // The pictures the keys show are rebuilt whether or not the gallery is
-        // open; the gallery's own thumbnails with them, when it is.
+        // The pictures the keys show are rebuilt whether or not the list is
+        // open; the library's own thumbnails with them, when it is.
         self.rebuild_previews();
 
         Ok(count)
     }
 
-    /// Highlights one picture and builds the preview the picker draws.
-    ///
-    /// The preview is built here, once per selection, and not while drawing:
-    /// decoding a photograph on every frame would make the window crawl.
-    fn select_asset(&mut self, name: ss550_engine::AssetName) {
-        self.selected_asset = Some(name.clone());
-
-        let Some(spec) = self.session.as_ref().map(session::DeckSession::image_spec) else {
-            self.preview = None;
-            self.note = "Connect a deck to see a picture at the size it will use.".into();
-            return;
-        };
-
-        let source = match self.assets.read(&name) {
-            Ok(source) => source,
-            Err(error) => {
-                self.preview = None;
-                self.note = format!("Could not read {name}: {error}").into();
-                return;
-            }
-        };
-
-        match render::preview_frame(spec, &name, &source) {
-            Ok(frame) => {
-                self.preview = Some((name.clone(), Arc::new(gpui_kit::RenderImage::new([frame]))));
-                self.note = format!("{name} is ready for a key.").into();
+    /// [`Controller::refresh_library`] for the button, which wants the answer.
+    fn reload_library(&mut self) {
+        match self.refresh_library() {
+            Ok(count) => {
+                self.note = format!(
+                    "{count} picture{} in the library.",
+                    if count == 1 { "" } else { "s" }
+                )
+                .into();
             }
             Err(error) => {
-                self.preview = None;
-                self.note = format!("{error}").into();
+                self.note = format!("Could not read the picture folder: {error}").into();
             }
         }
     }
 
-    /// Makes the selected key show the highlighted picture, and saves it.
-    fn assign_asset(&mut self) {
-        let Some(name) = self.selected_asset.clone() else {
-            self.note = "Pick a picture first.".into();
+    /// Shows or hides the list of pictures the selected key can wear.
+    ///
+    /// Opening it is the click that asks for the thumbnails: every picture in
+    /// the folder is decoded and fitted once, here, and the rows then paint what
+    /// the cache holds. A second open lists what the first one built, and a
+    /// closed list keeps its cache until the folder is re-read.
+    fn toggle_picture_list(&mut self) {
+        self.picture_list_open = !self.picture_list_open;
+        if self.picture_list_open {
+            self.ensure_library_previews();
+        }
+    }
+
+    /// Makes the selected key show a picture from the library, and saves it.
+    ///
+    /// The picture is the profile's; the key and the deck are then repainted
+    /// from the same plan every other write uses, so what the window shows and
+    /// what the deck received are one picture.
+    fn assign_asset(&mut self, name: ss550_engine::AssetName) {
+        // A picture is fitted to the deck's tile and written to the profile of
+        // that deck. With none in front of the window there is nothing to fit it
+        // to, so the click says why instead of doing nothing.
+        if self.session.is_none() {
+            self.note = NO_DECK_PICTURE.into();
             return;
-        };
+        }
 
         let key = u16::from(self.selected_key.get());
         if let Err(error) = self
@@ -1912,7 +1936,8 @@ impl Controller {
 
         self.save_profile();
         // The key now shows a picture, so the tile needs it fitted before the
-        // next frame rather than during it.
+        // next frame rather than during it. Only the profile's pictures are
+        // rebuilt: the library's own thumbnails stay as they are.
         self.rebuild_previews();
         if self.repaint_key(key) {
             self.note = format!("Key #{key} now shows {name}.").into();
@@ -1921,6 +1946,11 @@ impl Controller {
 
     /// Takes the artwork off the selected key, so it shows the profile colour.
     fn remove_artwork(&mut self) {
+        if self.session.is_none() {
+            self.note = NO_DECK_PICTURE.into();
+            return;
+        }
+
         let key = u16::from(self.selected_key.get());
         if let Err(error) = self.profile_store.set_appearance(key, None) {
             self.note = format!("Key #{key} was not changed: {error}").into();

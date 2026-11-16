@@ -55,7 +55,7 @@ crates/ss550-tray/Cargo.toml`.
 | T3 | Envío de pulsaciones (Win32 `SendInput`) en `ss550-tray` | S4, S8 | delegado | hecho — `f2845b0` |
 | T4 | Paleta lateral arrastrable + soltar sobre tecla + editor por tecla | S2, S3 | delegado | hecho — `f36ef07` |
 | T5 | Icono del ejecutable como imagen de la tecla | S5, S7 | delegado | hecho |
-| T6 | Artwork dentro del editor de la tecla | S6 | delegado | pendiente — el editor ya vive en la columna del `Deck`; falta mover ahí la imagen personalizada |
+| T6 | Artwork dentro del editor de la tecla | S6 | delegado | hecho |
 | T7 | Icono del destino de un `.lnk`, sin la flecha de acceso directo | S11 | delegado | hecho |
 | T8 | Desplegable de aplicaciones instaladas en la acción `Run app` | S10 | delegado | hecho |
 
@@ -134,4 +134,19 @@ botón que abre una lista con buscador, nombre e icono; elegir una rellena
 mismo, así que la tecla enseña la imagen real antes de guardar. El escaneo corre
 en el executor de fondo y se guarda: la única vez que se paga es el clic que abre
 la lista. Escribir la ruta a mano sigue funcionando igual.
+
+**L6** (2026-11-15): T6 entregada. La imagen personalizada dejó de ser una página
+y pasó a ser un control de la tecla: bajo la fila de color, el editor enseña la
+imagen que la tecla lleva —miniatura ajustada, o una caja discontinua cuando no
+lleva ninguna—, `CHOOSE A PICTURE` abre la biblioteca ahí mismo con una fila por
+archivo (miniatura de 44 px, nombre y tamaño, la que está en uso marcada), elegir
+una la asigna por el mismo camino que ya usaba `assign_asset` y repinta la tecla
+y el deck, `REMOVE PICTURE` la quita por `remove_artwork`, y `REFRESH` /
+`OPEN FOLDER` siguen siendo lo que eran. Sin deck la lista se abre igual y el clic
+dice por qué no puede asignar, en vez de quedarse mudo. La página `Artwork`
+desapareció entera —variante, fila del rail, textos y `artwork_page`—: el rail
+lista tres páginas. Las miniaturas de la biblioteca tienen ahora caché propia,
+que se llena al abrir la lista y al releer la carpeta y nunca dentro de `render`;
+asignar una imagen decodifica esa imagen y ninguna más, porque el caché del
+perfil ya no se vacía en cada asignación. 106 pruebas del GUI en verde.
 

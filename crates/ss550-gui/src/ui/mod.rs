@@ -1,7 +1,7 @@
 //! The window's shared visual language: tokens, spacing, type scale, and the
 //! few primitives every page is built from.
 //!
-//! One place owns the palette, so four pages cannot drift apart. The dark
+//! One place owns the palette, so three pages cannot drift apart. The dark
 //! values are the design's fixed palette; the light values are derived from the
 //! active theme, because a window painted with a dark palette in light mode is
 //! an unreadable window. The two colours a key can show are *data* — they are

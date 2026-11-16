@@ -1,14 +1,15 @@
-//! The `Actions`, `Artwork` and `Settings` pages.
+//! The `Actions` and `Settings` pages.
 //!
 //! Each page is a stack of cards in the same language the `Deck` page uses:
 //! a micro-labelled title, a short line of secondary text, and controls that
 //! are only offered when they can act. Nothing here decodes a picture while a
-//! frame is being drawn: the gallery asks the controller to fit the library when
-//! the page opens, and paints what the cache already holds.
+//! frame is being drawn: the picture list inside the key editor asks the
+//! controller to fit the library when it is opened, and paints what the cache
+//! already holds.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Theme, ThemeMode};
+use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
 use gpui_kit::{
     div, px, AnyElement, ClickEvent, Context, Div, FontWeight, InteractiveElement as _,
     IntoElement, ParentElement as _, SharedString, Styled as _,
@@ -21,17 +22,16 @@ use super::{
 };
 use crate::{ms_text, Controller};
 
-/// The width of the column that holds the big preview on the Artwork page.
-const PREVIEW_W: f32 = 320.;
-
 // ── Actions ─────────────────────────────────────────────────────────────
 
 /// What each key runs when it is pressed on the deck.
 ///
 /// The overview: every key as a chip, the editor for the one the window is
-/// looking at, and what is bound right now. The editor itself is
-/// [`super::editor::key_editor`], the same widget the `Deck` page's inspector
-/// draws, so there is one implementation of "edit this key" and not two.
+/// looking at — the action and the picture the key shows — and what is bound
+/// right now. The editor is [`super::editor::key_editor`] and
+/// [`super::editor::picture_block`], the same two widgets the `Deck` page's
+/// inspector draws, so there is one implementation of "edit this key" and not
+/// two.
 pub(crate) fn actions_page(
     controller: &mut Controller,
     tokens: Tokens,
@@ -70,7 +70,10 @@ pub(crate) fn actions_page(
     let editor_card = card(tokens)
         .w_full()
         .child(super::editor::editor_heading(selected, tokens))
-        .child(super::editor::key_editor(controller, tokens, cx));
+        .child(super::editor::key_editor(controller, tokens, cx))
+        // What the key shows is part of what it is: the picture controls sit in
+        // the same card as the action, so a key is edited in one place.
+        .child(super::editor::picture_block(controller, tokens, cx));
 
     div()
         .flex()
@@ -234,279 +237,6 @@ fn bound_card(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Cont
             ),
             false => div().flex().flex_col().gap(px(8.)).children(rows),
         })
-}
-
-// ── Artwork ─────────────────────────────────────────────────────────────
-
-/// The pictures a key can show, and what one looks like on the deck.
-pub(crate) fn artwork_page(
-    controller: &mut Controller,
-    tokens: Tokens,
-    cx: &mut Context<Controller>,
-) -> Div {
-    let has_deck = controller.session.is_some();
-    let has_selection = controller.selected_asset.is_some();
-    let selected = controller.selected_key;
-    let folder = controller.assets.root().display().to_string();
-    let count = controller.library.len();
-
-    // The gallery: one row per picture, with the fitted tile as its thumbnail.
-    let mut rows: Vec<AnyElement> = Vec::new();
-    for (position, asset) in controller.library.iter().enumerate() {
-        let is_selected = controller.selected_asset.as_ref() == Some(&asset.name);
-        let thumb = controller.previews.get(&asset.name).cloned();
-        let name = asset.name.clone();
-
-        let row = div()
-            .id(SharedString::from(format!("asset-row-{position}")))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(12.))
-            .w_full()
-            .min_w(px(0.))
-            .p(px(8.))
-            .rounded(px(RADIUS_SM))
-            .border_1()
-            .border_color(if is_selected {
-                tokens.accent.opacity(0.6)
-            } else {
-                tokens.border
-            })
-            .bg(if is_selected {
-                tokens.accent_tint
-            } else {
-                tokens.elevated
-            })
-            .child(thumbnail(thumb, tokens))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .flex_1()
-                    .min_w(px(0.))
-                    .child(one_line(
-                        SharedString::from(asset.name.to_string()),
-                        FONT_SUB,
-                        tokens.ink,
-                    ))
-                    .child(one_line(
-                        format!("{:.0} KB", asset.bytes as f64 / 1024.0),
-                        FONT_CAPTION,
-                        tokens.soft,
-                    )),
-            )
-            .child(match is_selected {
-                true => div()
-                    .flex_none()
-                    .text_size(px(FONT_MICRO))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(tokens.accent_ink)
-                    .child("SELECTED")
-                    .into_any_element(),
-                false => div().into_any_element(),
-            })
-            .hover(|style| style.bg(tokens.hover));
-
-        rows.push(
-            activate(row, cx, move |this, _window, cx| {
-                this.select_asset(name.clone());
-                cx.notify();
-            })
-            .into_any_element(),
-        );
-    }
-
-    let library_body = match rows.is_empty() {
-        true => placeholder(
-            "No pictures yet",
-            &format!(
-                "Drop a picture into {folder}, then press REFRESH. Nothing is stretched: it is \
-                 fitted to the deck's tile, and re-encoded smaller if it would not fit."
-            ),
-            tokens,
-        ),
-        false => div().flex().flex_col().gap(px(8.)).children(rows),
-    };
-
-    let library = card(tokens)
-        .flex_1()
-        .min_w(px(280.))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(micro_label("PICTURES", tokens))
-                .child(muted(
-                    format!("{count} picture{}", if count == 1 { "" } else { "s" }),
-                    tokens,
-                )),
-        )
-        .child(library_body);
-
-    // The big tile: the picker's own preview when there is one, and otherwise
-    // whatever the cache already holds for the highlighted picture — so a
-    // selection made before this page was opened still shows its picture.
-    let large: AnyElement = match &controller.preview {
-        Some((name, image)) => big_preview(name.as_str(), image.clone(), tokens),
-        None => match controller.selected_asset.as_ref().and_then(|name| {
-            controller
-                .previews
-                .get(name)
-                .map(|image| (name.clone(), image.clone()))
-        }) {
-            Some((name, image)) => big_preview(name.as_str(), image, tokens),
-            None => placeholder(
-                "Nothing picked",
-                "Pick a picture from the gallery to see what the deck will show, black bands \
-                 and all.",
-                tokens,
-            )
-            .into_any_element(),
-        },
-    };
-
-    let preview = card(tokens)
-        .w(px(PREVIEW_W))
-        .min_w(px(0.))
-        .child(micro_label("PREVIEW", tokens))
-        .child(large)
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .w_full()
-                .child(
-                    Button::new("use-asset")
-                        .primary()
-                        .label(format!("USE ON KEY #{}", selected.get()))
-                        .disabled(!has_deck || !has_selection)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.assign_asset();
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    Button::new("remove-artwork")
-                        .secondary()
-                        .label("REMOVE ARTWORK")
-                        .disabled(!has_deck)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.remove_artwork();
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(
-                            Button::new("refresh-assets")
-                                .ghost()
-                                .label("REFRESH")
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    match this.refresh_library() {
-                                        Ok(count) => {
-                                            this.note = format!(
-                                                "{count} picture{} in the library.",
-                                                if count == 1 { "" } else { "s" }
-                                            )
-                                            .into();
-                                        }
-                                        Err(error) => {
-                                            this.note = format!(
-                                                "Could not read the picture folder: {error}"
-                                            )
-                                            .into();
-                                        }
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("open-assets")
-                                .ghost()
-                                .label("OPEN FOLDER")
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.open_assets_folder();
-                                    cx.notify();
-                                })),
-                        ),
-                ),
-        )
-        .child(match has_deck {
-            true => one_line(
-                format!("The picture is assigned to key #{}.", selected.get()),
-                FONT_CAPTION,
-                tokens.soft,
-            ),
-            false => one_line(
-                "Connect a deck to put a picture on a key: the tile size comes from it.",
-                FONT_CAPTION,
-                tokens.soft,
-            ),
-        })
-        .child(one_line(folder, FONT_CAPTION, tokens.soft));
-
-    div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_start()
-        .gap(px(24.))
-        .w_full()
-        .child(library)
-        .child(preview)
-}
-
-/// A gallery thumbnail: the fitted tile, or a quiet box when it is not ready.
-pub(crate) fn thumbnail(picture: Option<Arc<gpui_kit::RenderImage>>, tokens: Tokens) -> Div {
-    let boxed = div()
-        .flex_none()
-        .w(px(44.))
-        .h(px(44.))
-        .rounded(px(6.))
-        .overflow_hidden()
-        .bg(color(0x000000))
-        .border_1()
-        .border_color(tokens.border);
-
-    match picture {
-        Some(picture) => boxed.child(gpui_kit::img(picture).w(px(44.)).h(px(44.))),
-        None => boxed.bg(tokens.surface),
-    }
-}
-
-/// The fitted tile at full size, with the name under it.
-fn big_preview(name: &str, image: Arc<gpui_kit::RenderImage>, tokens: Tokens) -> AnyElement {
-    let side = 168.;
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(8.))
-        .items_center()
-        .w_full()
-        .child(
-            div()
-                .w(px(side))
-                .h(px(side))
-                .rounded(px(RADIUS_SM))
-                .overflow_hidden()
-                .bg(color(0x000000))
-                .child(gpui_kit::img(image).w(px(side)).h(px(side))),
-        )
-        .child(one_line(
-            format!("{name} · fitted to the deck's tile"),
-            FONT_CAPTION,
-            tokens.soft,
-        ))
-        .into_any_element()
 }
 
 // ── Settings ────────────────────────────────────────────────────────────
@@ -693,7 +423,28 @@ pub(crate) fn settings_page(
         .child(about)
 }
 
-// ── Shared pieces for the three pages ───────────────────────────────────
+// ── Shared pieces for the pages ─────────────────────────────────────────
+
+/// A 44 px thumbnail: the fitted tile, or a quiet box when it is not ready.
+///
+/// One box, so a picture looks the same wherever the window shows it small: the
+/// key's own picture in the editor and every row of the library list.
+pub(crate) fn thumbnail(picture: Option<Arc<gpui_kit::RenderImage>>, tokens: Tokens) -> Div {
+    let boxed = div()
+        .flex_none()
+        .w(px(44.))
+        .h(px(44.))
+        .rounded(px(6.))
+        .overflow_hidden()
+        .bg(color(0x000000))
+        .border_1()
+        .border_color(tokens.border);
+
+    match picture {
+        Some(picture) => boxed.child(gpui_kit::img(picture).w(px(44.)).h(px(44.))),
+        None => boxed.bg(tokens.surface),
+    }
+}
 
 /// A framed explanation, used wherever a list would be empty.
 pub(crate) fn placeholder(title: &'static str, text: &str, tokens: Tokens) -> Div {

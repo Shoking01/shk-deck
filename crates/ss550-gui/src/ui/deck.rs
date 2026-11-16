@@ -727,13 +727,13 @@ fn deck_actions(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Co
         ))
 }
 
-/// The card beside the grid: the key the window is looking at, and the editor
-/// for what it runs.
+/// The card beside the grid: the key the window is looking at, the editor for
+/// what it runs, and the picture it shows.
 ///
-/// The editor is [`editor::key_editor`], the same widget the `Actions` page
-/// draws, so "edit this key" exists once. It is here — on the page the key is
-/// on — because a drop lands on a key and must not throw the user onto another
-/// page to fill in a form.
+/// The editor is [`editor::key_editor`] and [`editor::picture_block`], the same
+/// widgets the `Actions` page draws, so "edit this key" exists once. They are
+/// here — on the page the key is on — because a drop lands on a key and must not
+/// throw the user onto another page to fill in a form.
 fn inspector_card(
     controller: &mut Controller,
     tokens: Tokens,
@@ -869,6 +869,10 @@ fn inspector_card(
                         }),
                 ),
         )
+        // Under the colour row: the picture the key shows. A picture wins over
+        // the colour and the colour wins over what the key runs, so the card
+        // states them from the action up: action, colour, picture.
+        .child(editor::picture_block(controller, tokens, cx))
 }
 
 /// The deck's profiles, under the inspector.

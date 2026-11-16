@@ -1,4 +1,4 @@
-//! The four pages the rail offers, and the words each one is introduced with.
+//! The three pages the rail offers, and the words each one is introduced with.
 //!
 //! The mapping lives here rather than inside `render` so it can be tested with
 //! no window: a page whose title is empty, or two pages that share a title,
@@ -15,22 +15,19 @@ pub(crate) enum Page {
     Deck,
     /// What each key runs when it is pressed.
     Actions,
-    /// The pictures a key can show.
-    Artwork,
     /// How the controller behaves away from the window.
     Settings,
 }
 
 impl Page {
     /// Every page, in the order the rail lists them.
-    pub(crate) const ALL: [Page; 4] = [Page::Deck, Page::Actions, Page::Artwork, Page::Settings];
+    pub(crate) const ALL: [Page; 3] = [Page::Deck, Page::Actions, Page::Settings];
 
-    /// The rail label: one word, so four rows stay a column and not a table.
+    /// The rail label: one word, so the rows stay a column and not a table.
     pub(crate) fn label(self) -> &'static str {
         match self {
             Page::Deck => "Deck",
             Page::Actions => "Actions",
-            Page::Artwork => "Artwork",
             Page::Settings => "Settings",
         }
     }
@@ -40,7 +37,6 @@ impl Page {
         match self {
             Page::Deck => "Deck",
             Page::Actions => "Actions",
-            Page::Artwork => "Artwork",
             Page::Settings => "Settings",
         }
     }
@@ -55,10 +51,6 @@ impl Page {
             Page::Actions => {
                 "Every key as a chip, the editor for the selected one, and what is bound right \
                  now. A key with no action still lights up and still says so."
-            }
-            Page::Artwork => {
-                "The pictures a key can show, and what one looks like at the size the deck asks \
-                 for."
             }
             Page::Settings => {
                 "How the controller behaves when the window is closed and the deck is left to it."
@@ -85,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn the_four_pages_are_all_different() {
+    fn the_three_pages_are_all_different() {
         let titles: BTreeSet<&str> = Page::ALL.iter().map(|page| page.title()).collect();
         let descriptions: BTreeSet<&str> =
             Page::ALL.iter().map(|page| page.description()).collect();
@@ -103,13 +95,21 @@ mod tests {
     #[test]
     fn the_rail_starts_on_the_deck_and_lists_the_pages_in_order() {
         assert_eq!(Page::default(), Page::Deck);
-        assert_eq!(
-            Page::ALL,
-            [Page::Deck, Page::Actions, Page::Artwork, Page::Settings]
-        );
+        assert_eq!(Page::ALL, [Page::Deck, Page::Actions, Page::Settings]);
         assert_eq!(Page::Deck.label(), "Deck");
         assert_eq!(Page::Actions.label(), "Actions");
-        assert_eq!(Page::Artwork.label(), "Artwork");
         assert_eq!(Page::Settings.label(), "Settings");
+    }
+
+    #[test]
+    fn there_is_no_page_of_its_own_for_the_picture() {
+        // The picture a key shows belongs to the key, and the key is edited on
+        // the `Deck` page and summarised on `Actions`. A fourth page for it was
+        // retired, and a rail row reappearing there would be the regression.
+        assert_eq!(Page::ALL.len(), 3, "the rail lists exactly three pages");
+        for page in Page::ALL {
+            assert_ne!(page.label(), "Artwork");
+            assert_ne!(page.title(), "Artwork");
+        }
     }
 }
