@@ -277,7 +277,7 @@ impl ProfileStore {
         if !path.exists() {
             return Ok(Self::new());
         }
-        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let text = crate::config::read_json(path).map_err(|e| e.to_string())?;
         let mut store: Self = serde_json::from_str(&text).map_err(|e| e.to_string())?;
         for profile in store.profiles.values_mut() {
             profile.migrate_legacy_colors();

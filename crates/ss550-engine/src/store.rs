@@ -119,7 +119,7 @@ impl ActionStore {
         if !path.exists() {
             return Ok(Self::new());
         }
-        let text = fs::read_to_string(path).map_err(|source| ActionError::Read {
+        let text = crate::config::read_json(path).map_err(|source| ActionError::Read {
             path: path.display().to_string(),
             source,
         })?;
@@ -345,6 +345,25 @@ mod tests {
         let path = dir.path().join("bindings.json");
         let store = ActionStore::load(&path).expect("a missing file is not an error");
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn a_file_with_a_byte_order_mark_still_loads() {
+        // Every editor that offers "UTF-8" in older Windows tooling writes a BOM,
+        // and serde_json refuses one at byte zero. Treating that as corruption
+        // would report the user's bindings as lost over an invisible character.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("bindings.json");
+        std::fs::write(
+            &path,
+            "\u{feff}{\"version\":1,\"bindings\":[{\"key\":4,\"action\":{\"type\":\"open_url\",\"url\":\"https://example.com\"}}]}",
+        )
+        .expect("the file can be written");
+
+        let store = ActionStore::load(&path).expect("a BOM is not a syntax error");
+
+        assert_eq!(store.len(), 1);
+        assert!(store.get(key(4)).is_some());
     }
 
     #[test]

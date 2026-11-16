@@ -102,6 +102,20 @@ pub(crate) fn profiles_path_in(root: &Path, deck_key: &str) -> PathBuf {
         .join(format!("{}.json", file_stem(deck_key)))
 }
 
+/// Reads a JSON file, ignoring a UTF-8 byte-order mark.
+///
+/// A BOM is legal UTF-8 and every Windows editor that offers "UTF-8" in an
+/// older PowerShell writes one. `serde_json` refuses it at byte zero, so without
+/// this a hand-edited bindings or profile file would read as "not valid JSON"
+/// and the user's data would look lost. Dropping it costs one comparison.
+pub(crate) fn read_json(path: &Path) -> std::io::Result<String> {
+    let text = std::fs::read_to_string(path)?;
+    Ok(match text.strip_prefix('\u{feff}') {
+        Some(rest) => rest.to_owned(),
+        None => text,
+    })
+}
+
 /// A stable file name for a deck key: a readable slug plus a fingerprint.
 ///
 /// The fingerprint is what keeps two decks apart when their slugs collide, and
