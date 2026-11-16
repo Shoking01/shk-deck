@@ -51,6 +51,7 @@ use ui::Page;
 mod apps;
 mod diagnostics;
 mod icons;
+mod pictures;
 mod provider;
 mod render;
 mod session;
@@ -400,13 +401,6 @@ struct Controller {
     profile_store: ss550_engine::ProfileStore,
     /// The pictures a key can show.
     assets: ss550_engine::AssetLibrary,
-    /// The library as the picture list shows it, re-read when the user asks.
-    library: Vec<ss550_engine::Asset>,
-    /// Whether the list of pictures is open under the key editor.
-    ///
-    /// It is the key's own control, not a page: the list opens in place, and an
-    /// open list is what asks for the library's thumbnails.
-    picture_list_open: bool,
     /// The pictures the keys show, already fitted to the deck's tile size and
     /// swapped for the renderer.
     ///
@@ -415,18 +409,12 @@ struct Controller {
     /// its flat colour, so a picture deleted from the library while a profile
     /// still names it cannot blank a key or panic the window.
     previews: BTreeMap<ss550_engine::AssetName, Arc<gpui_kit::RenderImage>>,
-    /// The whole library, fitted to the deck's tile, for the picture list.
-    ///
-    /// Its own cache on purpose: it is filled when the list opens and when the
-    /// folder is re-read, so putting one picture on one key does not re-decode
-    /// every other picture in the folder.
-    library_previews: BTreeMap<ss550_engine::AssetName, Arc<gpui_kit::RenderImage>>,
     /// The icon of every program the deck can run, and the initial of every
     /// action that has no icon.
     ///
-    /// Filled by [`Controller::rebuild_icons`] on a rebind, a profile switch, a
-    /// deck change or a library refresh, and only read while drawing: extracting
-    /// an icon is a shell call, and a frame must never make one.
+    /// Filled by [`Controller::rebuild_icons`] on a rebind, a profile switch or a
+    /// deck change, and only read while drawing: extracting an icon is a shell
+    /// call, and a frame must never make one.
     icons: icons::IconCache,
     /// Tiles already rendered for this deck's image size, so switching profile
     /// back and forth does not re-decode every picture.
@@ -617,17 +605,13 @@ impl Controller {
             blind,
             profile_store: ss550_engine::ProfileStore::new(),
             assets: ss550_engine::AssetLibrary::at_config_dir(&ss550_engine::config_dir()),
-            library: Vec::new(),
-            picture_list_open: false,
             previews: BTreeMap::new(),
-            library_previews: BTreeMap::new(),
             icons: icons::IconCache::new(),
             tiles: None,
         };
 
         // Look for the deck right away: its settle window starts the moment
         // it appears, so every second counts.
-        let _ = controller.refresh_library();
         controller.request_attempt();
         controller
     }
@@ -725,9 +709,6 @@ impl Controller {
             .map(session::DeckSession::image_spec)
             .expect("the session was just stored");
         self.tiles = Some(render::TileCache::new(spec));
-        // A thumbnail fitted for the previous deck's tile is the wrong size for
-        // this one: the library's own cache starts over with the deck.
-        self.library_previews.clear();
 
         // The profile is where this deck's bindings live now, and the per-deck
         // file is where they lived before profiles existed. A profile that has
@@ -786,8 +767,8 @@ impl Controller {
     /// Fits every picture the active profile shows to the deck's tile, once.
     ///
     /// This is the only place the grid's pictures are decoded and encoded: it
-    /// runs on a deck change, a profile switch, an assignment or a library
-    /// refresh, and never while a frame is being drawn.
+    /// runs on a deck change, a profile switch or an assignment, and never while
+    /// a frame is being drawn.
     fn rebuild_previews(&mut self) {
         // The icons are part of the same promise — a tile that draws a program
         // draws the picture the deck received — so they are rebuilt with them.
@@ -807,14 +788,6 @@ impl Controller {
         };
         self.previews.retain(|name, _| names.contains(name));
         self.ensure_previews(names);
-
-        // An open picture list lists every picture, not only the ones the
-        // profile names. Its own cache is not cleared here: it survives an
-        // assignment, so putting one picture on one key decodes that picture and
-        // nothing else.
-        if self.picture_list_open {
-            self.ensure_library_previews();
-        }
     }
 
     /// Fits one picture to the deck's tile, ready for the renderer.
@@ -850,37 +823,12 @@ impl Controller {
         }
     }
 
-    /// Fits every picture in the library to the deck's tile.
-    ///
-    /// Called when the picture list opens and when the folder is re-read, so the
-    /// list draws thumbnails without decoding anything during a frame. A picture
-    /// the profile already shows is shared rather than decoded twice.
-    fn ensure_library_previews(&mut self) {
-        let names: Vec<ss550_engine::AssetName> = self
-            .library
-            .iter()
-            .map(|asset| asset.name.clone())
-            .collect();
-        for name in names {
-            if self.library_previews.contains_key(&name) {
-                continue;
-            }
-            let image = match self.previews.get(&name) {
-                Some(image) => Some(image.clone()),
-                None => self.fit_preview(&name),
-            };
-            if let Some(image) = image {
-                self.library_previews.insert(name, image);
-            }
-        }
-    }
-
     /// Reads the picture of every program the deck can run.
     ///
     /// One extraction per program path, on the change that made it necessary — a
-    /// rebind, a profile switch, a deck change or a library refresh — and never
-    /// while a frame is being drawn. The cache keeps what it built, so a rebind
-    /// that touches one key asks Windows about one program.
+    /// rebind, a profile switch or a deck change — and never while a frame is
+    /// being drawn. The cache keeps what it built, so a rebind that touches one
+    /// key asks Windows about one program.
     ///
     /// The program in the editor's field comes with them: it is not a binding
     /// yet, but the key it is about to become will show exactly this picture.
@@ -1862,59 +1810,43 @@ impl Controller {
         }
     }
 
-    /// Re-reads the picture library, so a file the user just dropped in shows up.
+    /// Asks the user for a picture and puts it on the selected key.
     ///
-    /// Returns how many pictures the library holds. The caller decides what to
-    /// say about it: this runs at startup, where the connection note matters
-    /// more than the library count, and from a button, where the count is the
-    /// answer the user asked for.
-    fn refresh_library(&mut self) -> Result<usize, String> {
-        let assets = self.assets.list().map_err(|error| error.to_string())?;
-        let count = assets.len();
-        self.library = assets;
-
-        // A file the user replaced by hand has the same name the cache already
-        // holds. Refreshing is the moment they asked to look again, so every
-        // cache starts over.
-        if let Some(tiles) = self.tiles.as_mut() {
-            tiles.clear();
-        }
-        self.previews.clear();
-        self.library_previews.clear();
-
-        // The pictures the keys show are rebuilt whether or not the list is
-        // open; the library's own thumbnails with them, when it is.
-        self.rebuild_previews();
-
-        Ok(count)
-    }
-
-    /// [`Controller::refresh_library`] for the button, which wants the answer.
-    fn reload_library(&mut self) {
-        match self.refresh_library() {
-            Ok(count) => {
-                self.note = format!(
-                    "{count} picture{} in the library.",
-                    if count == 1 { "" } else { "s" }
-                )
-                .into();
-            }
-            Err(error) => {
-                self.note = format!("Could not read the picture folder: {error}").into();
-            }
-        }
-    }
-
-    /// Shows or hides the list of pictures the selected key can wear.
+    /// The three steps are one click, in this order, and each one decides whether
+    /// the next happens:
     ///
-    /// Opening it is the click that asks for the thumbnails: every picture in
-    /// the folder is decoded and fitted once, here, and the rows then paint what
-    /// the cache holds. A second open lists what the first one built, and a
-    /// closed list keeps its cache until the folder is re-read.
-    fn toggle_picture_list(&mut self) {
-        self.picture_list_open = !self.picture_list_open;
-        if self.picture_list_open {
-            self.ensure_library_previews();
+    /// 1. the system's own dialog, filtered to the formats the library accepts —
+    ///    a cancel ends here, with nothing said, because the user just said it;
+    /// 2. the file is **imported** into the library, which copies the bytes and
+    ///    gives the picture the name the profile will store. An import that fails
+    ///    — not an image this build reads, a name the library already holds, a
+    ///    file over the size limit — ends here too, and the key keeps what it
+    ///    had: a profile must never name a picture the library does not hold;
+    /// 3. the key is told that name, which is [`Controller::assign_asset`]: the
+    ///    profile is saved, the one picture the key now shows is fitted to the
+    ///    deck's tile, and the key is repainted on the deck.
+    ///
+    /// The dialog blocks until it is answered, so this runs on the click and
+    /// never inside a frame. The decode in step 3 is the same one an assignment
+    /// has always done: one picture, before the next frame, not during it.
+    fn choose_picture(&mut self) {
+        // Checked before the dialog opens, not after: a file copied into the
+        // library for a key that cannot wear it is a picture the user now has
+        // and did not ask for.
+        if self.session.is_none() {
+            self.note = NO_DECK_PICTURE.into();
+            return;
+        }
+
+        let Some(path) = ss550_tray::dialog::open_image() else {
+            return;
+        };
+
+        match pictures::import(&self.assets, &path) {
+            Ok(name) => self.assign_asset(name),
+            // The engine's own sentence, unchanged: it names the refusal and the
+            // file, and restating it here would be a second copy of the rules.
+            Err(sentence) => self.note = sentence.into(),
         }
     }
 
@@ -1943,8 +1875,9 @@ impl Controller {
 
         self.save_profile();
         // The key now shows a picture, so the tile needs it fitted before the
-        // next frame rather than during it. Only the profile's pictures are
-        // rebuilt: the library's own thumbnails stay as they are.
+        // next frame rather than during it. Only the pictures the profile names
+        // are rebuilt: the one that was just chosen is decoded here, on the
+        // click, and nothing else is.
         self.rebuild_previews();
         if self.repaint_key(key) {
             self.note = format!("Key #{key} now shows {name}.").into();
@@ -2068,10 +2001,11 @@ impl Controller {
 
     /// Opens the picture folder in the file manager.
     ///
-    /// There is no file dialog in this delivery: the user drops files in the
-    /// folder the app owns and presses REFRESH. This button exists so "the
-    /// folder" is a place they can reach without knowing where the app keeps
-    /// its configuration.
+    /// A picture reaches a key through the system's own dialog, which copies it
+    /// in — so the folder is where they end up, not where they come from. This
+    /// button exists so "the folder" is a place the user can reach without
+    /// knowing where the app keeps its configuration: to look at what has been
+    /// imported, or to delete one.
     fn open_assets_folder(&mut self) {
         if let Err(error) = self.assets.ensure() {
             self.note = format!("Could not create the picture folder: {error}").into();

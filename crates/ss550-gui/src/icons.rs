@@ -105,8 +105,8 @@ impl IconCache {
     /// Builds every picture `actions` needs, and forgets the rest.
     ///
     /// This is the whole of the work: one icon extraction per program path and
-    /// one glyph per distinct initial. Called on a rebind, a profile switch, a
-    /// library refresh and a deck change — never from a frame.
+    /// one glyph per distinct initial. Called on a rebind, a profile switch and a
+    /// deck change — never from a frame.
     ///
     /// `draft` is the program the editor is about to bind. It is not a binding
     /// yet, but the key's face is decided by it, so its icon is read here — once,

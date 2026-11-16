@@ -3,9 +3,9 @@
 //! Each page is a stack of cards in the same language the `Deck` page uses:
 //! a micro-labelled title, a short line of secondary text, and controls that
 //! are only offered when they can act. Nothing here decodes a picture while a
-//! frame is being drawn: the picture list inside the key editor asks the
-//! controller to fit the library when it is opened, and paints what the cache
-//! already holds.
+//! frame is being drawn: the key editor's picture controls paint the thumbnail
+//! the key's tile is fed from, and the picture itself is chosen and imported on
+//! a click.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::switch::Switch;
@@ -428,7 +428,8 @@ pub(crate) fn settings_page(
 /// A 44 px thumbnail: the fitted tile, or a quiet box when it is not ready.
 ///
 /// One box, so a picture looks the same wherever the window shows it small: the
-/// key's own picture in the editor and every row of the library list.
+/// key's own picture in the editor, and the icon of an application in the
+/// picker.
 pub(crate) fn thumbnail(picture: Option<Arc<gpui_kit::RenderImage>>, tokens: Tokens) -> Div {
     let boxed = div()
         .flex_none()

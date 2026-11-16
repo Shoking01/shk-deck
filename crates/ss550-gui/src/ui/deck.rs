@@ -381,7 +381,7 @@ fn swatch(paint: Paint, active: bool, tokens: Tokens, cx: &mut Context<Controlle
 fn grid(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller>) -> Div {
     // The whole grid is resolved first, so the controller is not borrowed while
     // the rows are being built. No picture is decoded here: the cache was
-    // filled when the deck, the profile or the library last changed.
+    // filled when the deck or the profile last changed.
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     // A drop lands on a key, and a key belongs to a deck: with no session there
     // is nothing to bind, so no tile accepts a palette entry.

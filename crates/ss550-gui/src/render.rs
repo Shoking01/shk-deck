@@ -316,9 +316,9 @@ fn frame_from_rgb(fitted: &RgbImage) -> Frame {
 ///
 /// An entry is keyed by the asset's name, which is enough because the library
 /// never replaces a name: [`AssetLibrary::import`] refuses to overwrite, so the
-/// bytes behind a name cannot change behind the cache's back. A file the user
-/// edits by hand is picked up after [`TileCache::invalidate`] or
-/// [`TileCache::clear`].
+/// bytes behind a name cannot change behind the cache's back. That is also why
+/// there is no way to invalidate one entry: a deck that takes a different image
+/// gets a cache of its own, and on one deck a name always means the same bytes.
 ///
 /// [`AssetLibrary::import`]: ss550_engine::AssetLibrary::import
 pub struct TileCache {
@@ -346,16 +346,6 @@ impl TileCache {
             .get(name)
             .expect("the tile was just inserted")
             .as_slice())
-    }
-
-    /// Forgets every tile, so the next [`TileCache::get`] re-reads each picture.
-    ///
-    /// Used when the library changed under the cache: the user dropped a file
-    /// in, replaced one by hand, or asked to look again. A cache that kept
-    /// serving the old bytes would make a replaced picture look like it never
-    /// changed.
-    pub fn clear(&mut self) {
-        self.tiles.clear();
     }
 }
 
@@ -588,19 +578,6 @@ mod tests {
             .expect("from the cache")
             .to_vec();
         assert_eq!(first, second);
-    }
-
-    #[test]
-    fn clearing_the_cache_makes_the_next_read_see_the_new_file() {
-        let red = png(72, 72, |_, _| [0xFF, 0x00, 0x00]);
-        let blue = png(72, 72, |_, _| [0x00, 0x00, 0xFF]);
-        let mut cache = TileCache::new(spec());
-
-        let before = cache.get(&name(), &red).expect("render").to_vec();
-        cache.clear();
-
-        let after = cache.get(&name(), &blue).expect("render again").to_vec();
-        assert_ne!(before, after, "the cleared tile was read again");
     }
 
     #[test]
