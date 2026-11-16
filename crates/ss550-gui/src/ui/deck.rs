@@ -14,9 +14,10 @@ use gpui_kit::{
 use std::sync::Arc;
 
 use super::{
-    activate, body, card, color, micro_label, muted, one_line, palette, Tokens, CARD_PAD, FONT_APP,
-    FONT_CAPTION, FONT_MICRO, FONT_SUB, FONT_TITLE, RADIUS_MD, RADIUS_SM,
+    activate, body, card, color, editor, micro_label, muted, one_line, palette, Tokens, CARD_PAD,
+    FONT_APP, FONT_CAPTION, FONT_MICRO, FONT_SUB, FONT_TITLE, RADIUS_MD, RADIUS_SM,
 };
+use crate::icons::{glyph_letter, Artwork};
 use crate::{Controller, Paint, Slot};
 
 /// The width a grid of keys may grow into before the tiles stop growing. Tiles
@@ -57,39 +58,65 @@ pub(crate) fn grid_card_min(columns: usize) -> f32 {
     columns * tile_size(columns as usize) + (columns - 1.) * GRID_GAP + 2. * CARD_PAD
 }
 
-/// What a tile draws: a flat colour, or the picture the key shows.
+/// What a tile draws: a flat colour, a picture, or an initial.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Face {
     /// A solid: white, red, or nothing at all.
     Swatch(Slot),
-    /// The picture the profile put on this key.
+    /// The picture of what the key runs, or the one the profile put on it.
     Picture,
+    /// No picture to draw: the initial of what the key runs, on the accent.
+    Glyph,
 }
 
-/// What a key's tile asks for, before the picture is looked up.
+/// What a key's tile asks for, before any picture is looked up.
 ///
-/// The profile is the authority on a key that has an appearance; a key with
-/// none shows whatever colour the window last painted on it.
-pub(crate) fn face_for(appearance: Option<&ss550_engine::Appearance>, slot: Slot) -> Face {
+/// The profile is the authority on a key that has an appearance; a key with none
+/// shows what the deck shows, which is what the key runs — its program's icon or
+/// its initial — unless the user painted it a colour, which is the explicit
+/// override and wins.
+pub(crate) fn face_for(
+    appearance: Option<&ss550_engine::Appearance>,
+    slot: Slot,
+    artwork: Artwork,
+) -> Face {
     match appearance {
         Some(ss550_engine::Appearance::Image { .. }) => Face::Picture,
         Some(ss550_engine::Appearance::Solid { rgb }) => Face::Swatch(crate::slot_for(*rgb)),
-        None => Face::Swatch(slot),
+        None => match slot {
+            // The colour row is the explicit override: a key the user painted
+            // keeps that colour rather than the icon of what it runs.
+            Slot::White | Slot::Red => Face::Swatch(slot),
+            // The deck is showing the picture of what the key runs, so the tile
+            // shows the same picture. A key that runs nothing has none, and
+            // keeps the flat tile it had.
+            Slot::Image => match artwork {
+                Artwork::Icon => Face::Picture,
+                Artwork::Glyph => Face::Glyph,
+                Artwork::None => Face::Swatch(Slot::Image),
+            },
+            Slot::Off => Face::Swatch(Slot::Off),
+        },
     }
 }
 
 /// What the tile really draws once the cache has answered.
 ///
 /// A picture the cache cannot supply — the file was removed from the library
-/// while the profile still names it — falls back to the flat colour. The tile
-/// is never blank and the window never panics over a missing file.
+/// while the profile still names it, or the deck changed under the picture —
+/// falls back to the initial and then to the flat colour. The tile is never
+/// blank and the window never panics over a missing file.
 pub(crate) fn resolved_face(
     appearance: Option<&ss550_engine::Appearance>,
     slot: Slot,
+    artwork: Artwork,
     picture_ready: bool,
 ) -> Face {
-    match face_for(appearance, slot) {
-        Face::Picture if !picture_ready => Face::Swatch(slot),
+    match face_for(appearance, slot, artwork) {
+        Face::Picture if !picture_ready => match artwork {
+            Artwork::Glyph => Face::Glyph,
+            _ => Face::Swatch(slot),
+        },
         face => face,
     }
 }
@@ -124,8 +151,10 @@ struct Cell {
     number: Option<ss550_engine::KeyNumber>,
     /// What the tile draws.
     face: Face,
-    /// The fitted picture, when the face is a picture.
+    /// The picture the tile draws, when the face is a picture or an initial.
     picture: Option<Arc<RenderImage>>,
+    /// The initial the tile draws, when there is no picture of it.
+    glyph: Option<char>,
     pressed: bool,
     selected: bool,
     binding: Option<SharedString>,
@@ -363,21 +392,31 @@ fn grid(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
                 let mut cells = Vec::new();
                 for &index in row {
                     let number = crate::binding_number(session, index);
-                    let binding = number
-                        .and_then(|number| controller.store.get(number))
-                        .map(|action| SharedString::from(action.summary()));
+                    let action = number.and_then(|number| controller.store.get(number));
+                    let binding = action.map(|action| SharedString::from(action.summary()));
                     let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
                     let appearance = profile.and_then(|profile| profile.appearance_for(key));
+                    // The picture comes from the library when the profile names
+                    // one, and from the icon cache otherwise. Both were built
+                    // when the deck, the profile or the binding changed, so this
+                    // is a lookup and never a decode.
                     let picture = appearance
                         .and_then(|appearance| appearance.asset())
                         .and_then(|name| controller.previews.get(name))
-                        .cloned();
+                        .cloned()
+                        .or_else(|| {
+                            action
+                                .and_then(|action| controller.icons.frame(action))
+                                .cloned()
+                        });
+                    let artwork = controller.icons.artwork(action);
                     let slot = controller.slots.get(index).copied().unwrap_or(Slot::Off);
                     cells.push(Cell {
                         index,
                         number,
-                        face: resolved_face(appearance, slot, picture.is_some()),
+                        face: resolved_face(appearance, slot, artwork, picture.is_some()),
                         picture,
+                        glyph: action.map(glyph_letter),
                         pressed: controller.pressed.get(index).copied().unwrap_or(false),
                         selected: number == Some(controller.selected_key),
                         binding,
@@ -444,6 +483,7 @@ fn tile(
         .bg(match cell.face {
             Face::Swatch(slot) => slot_colours(slot, tokens).0,
             Face::Picture => color(0x000000),
+            Face::Glyph => tokens.accent,
         })
         .cursor_pointer();
 
@@ -479,17 +519,57 @@ fn tile(
                         ),
                 )
                 .child(badge(format!("#{}", index + 1)))
-                .child(
-                    div()
+                .child(scrim(binding));
+        }
+        Face::Glyph => {
+            // No icon to draw: the initial of what the key runs, on the accent
+            // colour. The deck receives the same initial as a picture, so the
+            // two never disagree about which letter a key is.
+            let ring = if cell.pressed {
+                tokens.accent
+            } else if cell.selected {
+                tokens.accent.opacity(0.55)
+            } else {
+                tokens.border
+            };
+            let letter = div()
+                .w_full()
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(size * 0.42))
+                .font_weight(FontWeight::BOLD)
+                .text_color(color(0xffffff))
+                .child(SharedString::from(cell.glyph.unwrap_or('#').to_string()));
+
+            tile = tile
+                .relative()
+                .overflow_hidden()
+                .border_color(ring)
+                .child(match cell.picture.clone() {
+                    // The cache built the initial as a picture too; painting it
+                    // is what keeps the tile and the deck the same image.
+                    Some(picture) => div()
                         .absolute()
-                        .bottom(px(0.))
+                        .top(px(0.))
                         .left(px(0.))
                         .w_full()
-                        .px(px(8.))
-                        .py(px(4.))
-                        .bg(color(0x000000).opacity(0.55))
-                        .child(one_line(binding, FONT_MICRO, color(0xffffff))),
-                );
+                        .h_full()
+                        .child(gpui_kit::img(picture).w_full().h_full()),
+                    // A deck that has not answered yet has no picture size to
+                    // build one for; the letter is drawn instead, so the tile is
+                    // never empty.
+                    None => div()
+                        .absolute()
+                        .top(px(0.))
+                        .left(px(0.))
+                        .w_full()
+                        .h_full()
+                        .child(letter),
+                })
+                .child(badge(format!("#{}", index + 1)))
+                .child(scrim(binding));
         }
         Face::Swatch(slot) => {
             let (_, ink) = slot_colours(slot, tokens);
@@ -581,6 +661,19 @@ fn badge(text: String) -> Div {
         .child(text)
 }
 
+/// The band along the bottom of a picture tile: what the key runs.
+fn scrim(binding: SharedString) -> Div {
+    div()
+        .absolute()
+        .bottom(px(0.))
+        .left(px(0.))
+        .w_full()
+        .px(px(8.))
+        .py(px(4.))
+        .bg(color(0x000000).opacity(0.55))
+        .child(one_line(binding, FONT_MICRO, color(0xffffff)))
+}
+
 /// The buttons that act on the whole deck, below the grid.
 fn deck_actions(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller>) -> Div {
     let capabilities = controller
@@ -634,7 +727,13 @@ fn deck_actions(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Co
         ))
 }
 
-/// The card beside the grid: the key the window is looking at.
+/// The card beside the grid: the key the window is looking at, and the editor
+/// for what it runs.
+///
+/// The editor is [`editor::key_editor`], the same widget the `Actions` page
+/// draws, so "edit this key" exists once. It is here — on the page the key is
+/// on — because a drop lands on a key and must not throw the user onto another
+/// page to fill in a form.
 fn inspector_card(
     controller: &mut Controller,
     tokens: Tokens,
@@ -643,9 +742,9 @@ fn inspector_card(
     let number = controller.selected_key;
     let index = usize::from(number.get().saturating_sub(1));
     let slot = controller.slots.get(index).copied().unwrap_or(Slot::Off);
-    let action = controller
-        .store
-        .get(number)
+    let bound = controller.store.get(number).cloned();
+    let action = bound
+        .as_ref()
         .map(|action| action.summary())
         .unwrap_or_else(|| "Nothing yet".to_string());
     let can_clear = controller
@@ -653,22 +752,31 @@ fn inspector_card(
         .as_ref()
         .is_some_and(|session| session.capabilities().clear_key());
 
-    // An image key shows its picture here too: "SHOWS IMAGE" is the fact, the
-    // picture is the confirmation the user actually wants before pressing
-    // PAINT or CLEAR.
+    // A key that shows a picture shows it here too: "SHOWS IMAGE" is the fact,
+    // the picture is the confirmation the user actually wants. The picture is
+    // the profile's when it names one, and the icon of what the key runs
+    // otherwise — the same lookup the tile makes, so the two never disagree.
     let appearance = controller
         .profile_store
         .active()
         .and_then(|profile| profile.appearance_for(u16::from(number.get())));
+    let artwork = controller.icons.artwork(bound.as_ref());
     let selected_picture = appearance
         .and_then(|appearance| appearance.asset())
         .and_then(|name| controller.previews.get(name))
-        .cloned();
+        .cloned()
+        .or_else(|| {
+            bound
+                .as_ref()
+                .and_then(|action| controller.icons.frame(action))
+                .cloned()
+        });
     // The label follows what the tile draws, not what the key was last painted:
     // a key whose profile carries a picture shows the picture even when the
     // colour slot still holds the last solid it had.
-    let shows = match resolved_face(appearance, slot, selected_picture.is_some()) {
+    let shows = match resolved_face(appearance, slot, artwork, selected_picture.is_some()) {
         Face::Picture => "IMAGE",
+        Face::Glyph => "INITIAL",
         Face::Swatch(_) => appearance_label(slot),
     };
 
@@ -728,7 +836,11 @@ fn inspector_card(
                 .child(micro_label("ACTION", tokens))
                 .child(one_line(action, FONT_SUB, tokens.ink)),
         )
+        .child(editor::key_editor(controller, tokens, cx))
+        .child(div().h(px(1.)).w_full().bg(tokens.border))
         .child(
+            // The colour row is the explicit override: a key painted here keeps
+            // that colour instead of the icon of what it runs.
             div()
                 .flex()
                 .flex_col()
@@ -756,15 +868,6 @@ fn inspector_card(
                             false => div().into_any_element(),
                         }),
                 ),
-        )
-        .child(
-            Button::new("inspector-bind")
-                .ghost()
-                .label("BIND AN ACTION")
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.show_page(super::Page::Actions);
-                    cx.notify();
-                })),
         )
 }
 
@@ -919,6 +1022,7 @@ mod tests {
         appearance_label, face_for, grid_card_min, resolved_face, slot_colours, tile_size, Face,
         TILE_MAX, TILE_MIN,
     };
+    use crate::icons::Artwork;
     use crate::ui::{Tokens, PAGE_PAD, RAIL_W, WINDOW_MIN_W};
     use crate::Slot;
     use gpui_kit::component::Theme;
@@ -990,10 +1094,16 @@ mod tests {
     fn a_profile_picture_asks_the_tile_for_the_picture() {
         let picture = Appearance::image(AssetName::parse("cover.png").expect("a plain name"));
 
-        assert_eq!(face_for(Some(&picture), Slot::Off), Face::Picture);
+        assert_eq!(
+            face_for(Some(&picture), Slot::Off, Artwork::None),
+            Face::Picture
+        );
         // A picture wins over whatever colour the key was last painted: the
         // profile is the authority on a key that has an appearance.
-        assert_eq!(face_for(Some(&picture), Slot::Red), Face::Picture);
+        assert_eq!(
+            face_for(Some(&picture), Slot::Red, Artwork::Glyph),
+            Face::Picture
+        );
     }
 
     #[test]
@@ -1002,9 +1112,55 @@ mod tests {
 
         // A solid is drawn as the swatch that matches it, not as the slot the
         // window happens to be holding.
-        assert_eq!(face_for(Some(&solid), Slot::White), Face::Swatch(Slot::Red));
-        assert_eq!(face_for(None, Slot::White), Face::Swatch(Slot::White));
-        assert_eq!(face_for(None, Slot::Off), Face::Swatch(Slot::Off));
+        assert_eq!(
+            face_for(Some(&solid), Slot::White, Artwork::None),
+            Face::Swatch(Slot::Red)
+        );
+        assert_eq!(
+            face_for(None, Slot::White, Artwork::Icon),
+            Face::Swatch(Slot::White)
+        );
+        assert_eq!(
+            face_for(None, Slot::Off, Artwork::None),
+            Face::Swatch(Slot::Off)
+        );
+    }
+
+    #[test]
+    fn a_key_shows_what_it_runs_when_the_user_has_not_chosen_a_colour() {
+        // The deck is showing the picture of what the key runs, so the tile
+        // shows the same one: the program's icon, or its initial when the icon
+        // could not be read.
+        assert_eq!(
+            face_for(None, Slot::Image, Artwork::Icon),
+            Face::Picture,
+            "a program's icon"
+        );
+        assert_eq!(
+            face_for(None, Slot::Image, Artwork::Glyph),
+            Face::Glyph,
+            "the initial of what the key runs"
+        );
+        // A key that runs nothing has no picture to show and keeps its tile.
+        assert_eq!(
+            face_for(None, Slot::Image, Artwork::None),
+            Face::Swatch(Slot::Image)
+        );
+    }
+
+    #[test]
+    fn the_colour_row_wins_over_the_icon() {
+        // The colour row is the explicit override: a key painted white or red
+        // keeps that colour, whatever it runs.
+        for slot in [Slot::White, Slot::Red] {
+            for artwork in [Artwork::Icon, Artwork::Glyph, Artwork::None] {
+                assert_eq!(
+                    face_for(None, slot, artwork),
+                    Face::Swatch(slot),
+                    "{slot:?} must survive {artwork:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1014,11 +1170,11 @@ mod tests {
         let picture = Appearance::image(AssetName::parse("gone.png").expect("a plain name"));
 
         assert_eq!(
-            resolved_face(Some(&picture), Slot::Off, false),
+            resolved_face(Some(&picture), Slot::Off, Artwork::None, false),
             Face::Swatch(Slot::Off)
         );
         assert_eq!(
-            resolved_face(Some(&picture), Slot::Off, true),
+            resolved_face(Some(&picture), Slot::Off, Artwork::None, true),
             Face::Picture
         );
         // A solid never consults the picture cache at all.
@@ -1026,9 +1182,25 @@ mod tests {
             resolved_face(
                 Some(&Appearance::solid([0xFF, 0xFF, 0xFF])),
                 Slot::Red,
+                Artwork::None,
                 false
             ),
             Face::Swatch(Slot::White)
+        );
+    }
+
+    #[test]
+    fn an_icon_that_is_not_cached_falls_back_to_the_initial() {
+        // A key that runs a program is never blank, even when the picture of it
+        // is not in the cache: the initial is drawn instead.
+        assert_eq!(
+            resolved_face(None, Slot::Image, Artwork::Glyph, false),
+            Face::Glyph
+        );
+        assert_eq!(
+            resolved_face(None, Slot::Image, Artwork::Icon, false),
+            Face::Swatch(Slot::Image),
+            "an icon with no picture and no letter to draw keeps the tile"
         );
     }
 }

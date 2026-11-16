@@ -49,6 +49,7 @@ use ss550_tray::{autostart, install, TrayCommand, TrayHost};
 use ui::Page;
 
 mod diagnostics;
+mod icons;
 mod provider;
 mod render;
 mod session;
@@ -118,6 +119,44 @@ impl Paint {
 enum PaintFailure {
     Session(session::SessionError),
     Picture(String),
+}
+
+/// What one key is going to be painted with.
+///
+/// Decided from the profile, the bindings and the icon cache *before* the first
+/// byte goes out. A plan that is resolved first cannot leave the window's idea
+/// of a key and the deck's disagreeing about everything after the one that
+/// failed.
+enum Tile {
+    /// A picture from the asset library, encoded for this deck.
+    Asset(ss550_engine::AssetName),
+    /// The encoded picture of what the key runs: the program's own icon, or the
+    /// initial of what it runs.
+    Art(Vec<u8>),
+    /// One flat colour.
+    Colour([u8; 3]),
+}
+
+/// Decides one key's face, before anything is sent.
+///
+/// The order is the whole of the rule: the profile's appearance first, because
+/// that is what the user chose; then what the key runs, which is the icon or the
+/// initial; then the flat colour, for a key that runs nothing or whose picture
+/// this build could not build.
+fn plan_tile(
+    appearance: Option<&ss550_engine::Appearance>,
+    action: Option<&Action>,
+    default_colour: [u8; 3],
+    icons: &icons::IconCache,
+) -> Tile {
+    match appearance {
+        Some(ss550_engine::Appearance::Image { asset }) => Tile::Asset(asset.clone()),
+        Some(ss550_engine::Appearance::Solid { rgb }) => Tile::Colour(*rgb),
+        None => match action.and_then(|action| icons.tile(action)) {
+            Some(picture) => Tile::Art(picture.to_vec()),
+            None => Tile::Colour(default_colour),
+        },
+    }
 }
 
 /// Which kind of action the bindings panel is editing.
@@ -345,6 +384,13 @@ struct Controller {
     /// not falls back to its flat colour, so a picture deleted from the library
     /// while a profile still names it cannot blank a key or panic the window.
     previews: BTreeMap<ss550_engine::AssetName, Arc<gpui_kit::RenderImage>>,
+    /// The icon of every program the deck can run, and the initial of every
+    /// action that has no icon.
+    ///
+    /// Filled by [`Controller::rebuild_icons`] on a rebind, a profile switch, a
+    /// deck change or a library refresh, and only read while drawing: extracting
+    /// an icon is a shell call, and a frame must never make one.
+    icons: icons::IconCache,
     /// Tiles already rendered for this deck's image size, so switching profile
     /// back and forth does not re-decode every picture.
     tiles: Option<render::TileCache>,
@@ -521,6 +567,7 @@ impl Controller {
             selected_asset: None,
             preview: None,
             previews: BTreeMap::new(),
+            icons: icons::IconCache::new(),
             tiles: None,
         };
 
@@ -653,10 +700,16 @@ impl Controller {
         // Apply the active profile on connect
         if let Some(profile) = self.profile_store.active_profile() {
             self.store = profile.bindings.clone();
+            // Every key's face is decided from what it runs, so the icons of
+            // those programs have to be read before the keys are painted. This
+            // is the deck change, and it is the only reason the cache is
+            // rebuilt here.
+            self.rebuild_icons();
             let slot = self.paint_from_profile(&profile, key_count);
             let default_colour = self.paint.rgb();
             self.apply_all_appearances(slot, &profile.appearance, default_colour, key_count);
         } else {
+            self.rebuild_icons();
             let slot = self.paint.slot();
             self.apply_all(slot);
         }
@@ -683,6 +736,10 @@ impl Controller {
     /// runs on a deck change, a profile switch or a library refresh, and never
     /// while a frame is being drawn.
     fn rebuild_previews(&mut self) {
+        // The icons are part of the same promise — a tile that draws a program
+        // draws the picture the deck received — so they are rebuilt with them.
+        self.rebuild_icons();
+
         self.previews.clear();
         let names: Vec<ss550_engine::AssetName> = match self.profile_store.active() {
             Some(profile) => profile
@@ -740,6 +797,32 @@ impl Controller {
             .map(|asset| asset.name.clone())
             .collect();
         self.ensure_previews(names);
+    }
+
+    /// Reads the picture of every program the deck can run.
+    ///
+    /// One extraction per program path, on the change that made it necessary — a
+    /// rebind, a profile switch, a deck change or a library refresh — and never
+    /// while a frame is being drawn. The cache keeps what it built, so a rebind
+    /// that touches one key asks Windows about one program.
+    fn rebuild_icons(&mut self) {
+        let spec = self.session.as_ref().map(session::DeckSession::image_spec);
+        let actions: Vec<Action> = self
+            .store
+            .bindings()
+            .iter()
+            .map(|binding| binding.action.clone())
+            .collect();
+        self.icons.prepare(spec, &actions);
+    }
+
+    /// The action bound to a key, if any.
+    ///
+    /// The key is the deck's 1-based number, which is what a binding and a
+    /// profile appearance are keyed by.
+    fn action_for(&self, key: u16) -> Option<&Action> {
+        let number = KeyNumber::new(u8::try_from(key).ok()?).ok()?;
+        self.store.get(number)
     }
 
     /// Loads the bindings for one deck.
@@ -884,7 +967,7 @@ impl Controller {
         }
 
         // If deck is connected, apply the profile
-        if let Some(session) = self.session.as_mut() {
+        if let Some(key_count) = self.session.as_ref().map(session::DeckSession::key_count) {
             // Get profile data before mutating self.store
             let profile_data = self.profile_store.active_profile();
 
@@ -892,8 +975,11 @@ impl Controller {
                 // Apply bindings
                 self.store = profile.bindings.clone();
 
+                // The keys of this profile run different programs, so their
+                // icons are read before anything is painted.
+                self.rebuild_icons();
+
                 // Paint all keys according to profile colors or slot
-                let key_count = session.key_count();
                 let slot = self.paint_from_profile(&profile, key_count);
                 let default_colour = self.paint.rgb();
                 self.apply_all_appearances(slot, &profile.appearance, default_colour, key_count);
@@ -996,11 +1082,15 @@ impl Controller {
 
     /// Paints every key, honouring what the profile says each one shows.
     ///
-    /// A key the profile says nothing about gets `default_colour`. A key with an
-    /// appearance gets exactly that: a flat colour, or a picture read from the
-    /// library, fitted to the deck's image size and encoded within its byte
-    /// limit. The picture path never touches the wire with bytes the deck has
-    /// not already accepted at this size — a refusal here names the file.
+    /// A key the profile says nothing about shows what it runs: its program's
+    /// icon, or the initial of what it runs, encoded once at the deck's image
+    /// size. A key with no action gets `default_colour`, and a key the profile
+    /// gives an appearance gets exactly that — a flat colour, or a picture read
+    /// from the library, fitted and encoded within the deck's byte limit.
+    ///
+    /// Every face is decided before the first write, so a refusal halfway
+    /// through cannot leave the window and the deck disagreeing about the keys
+    /// that came after it.
     fn apply_all_appearances(
         &mut self,
         slot: Slot,
@@ -1008,17 +1098,32 @@ impl Controller {
         default_colour: [u8; 3],
         key_count: usize,
     ) {
-        let Some(session) = self.session.as_mut() else {
+        if self.session.is_none() {
             self.note = "Not connected. Press RECONNECT first.".into();
+            return;
+        }
+
+        let plans: Vec<Tile> = (0..key_count)
+            .map(|index| {
+                let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
+                plan_tile(
+                    appearances.get(&key),
+                    self.action_for(key),
+                    default_colour,
+                    &self.icons,
+                )
+            })
+            .collect();
+
+        let Some(session) = self.session.as_mut() else {
             return;
         };
 
         let mut failure = None;
         let mut painted = vec![slot; key_count];
-        for (index, entry) in painted.iter_mut().enumerate() {
-            let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
-            let result = match appearances.get(&key) {
-                Some(ss550_engine::Appearance::Image { asset }) => {
+        for (index, plan) in plans.iter().enumerate() {
+            let result = match plan {
+                Tile::Asset(asset) => {
                     let tile = self
                         .assets
                         .read(asset)
@@ -1031,27 +1136,26 @@ impl Controller {
                             None => Err("the deck has not stated an image size yet".to_string()),
                         });
                     match tile {
-                        Ok(jpeg) => {
-                            *entry = Slot::Image;
-                            session
-                                .paint_encoded(index, &jpeg)
-                                .map_err(PaintFailure::Session)
-                        }
+                        Ok(jpeg) => session
+                            .paint_encoded(index, &jpeg)
+                            .map_err(PaintFailure::Session),
                         Err(message) => Err(PaintFailure::Picture(message)),
                     }
                 }
-                Some(ss550_engine::Appearance::Solid { rgb }) => {
-                    session.paint(index, *rgb).map_err(PaintFailure::Session)
-                }
-                None => session
-                    .paint(index, default_colour)
+                Tile::Art(picture) => session
+                    .paint_encoded(index, picture)
                     .map_err(PaintFailure::Session),
+                Tile::Colour(rgb) => session.paint(index, *rgb).map_err(PaintFailure::Session),
             };
 
             if let Err(error) = result {
                 failure = Some(error);
                 break;
             }
+            painted[index] = match plan {
+                Tile::Asset(_) | Tile::Art(_) => Slot::Image,
+                Tile::Colour(_) => slot,
+            };
         }
 
         match failure {
@@ -1063,7 +1167,7 @@ impl Controller {
                 self.note = if shown == 0 {
                     format!("All {key_count} keys painted {}.", slot_name(slot)).into()
                 } else {
-                    format!("{shown} of {key_count} keys show a picture.").into()
+                    format!("{shown} of {key_count} keys show what they run.").into()
                 };
             }
         }
@@ -1422,11 +1526,12 @@ impl Controller {
 
     /// Acts on a palette entry dropped on a key.
     ///
-    /// A template is an intent: it selects the key, opens the `Actions` page and
-    /// aims the editor at that kind, and the key is not touched until SAVE
-    /// BINDING. An action that is already bound has nothing left to ask for, so
-    /// it goes straight to the save path — the same one the editor uses, file
-    /// and deck included.
+    /// A template is an intent: it selects the key and aims the editor at that
+    /// kind, in place — the drop happens on the `Deck` page, where the key is,
+    /// so the window must not move to another page to show a form. The key is
+    /// not touched until SAVE BINDING. An action that is already bound has
+    /// nothing left to ask for, so it goes straight to the save path — the same
+    /// one the editor uses, file and deck included.
     fn drop_palette_entry(
         &mut self,
         number: KeyNumber,
@@ -1438,7 +1543,6 @@ impl Controller {
             ui::palette::DropPlan::OpenEditor(kind) => {
                 self.select_key(number, window, cx);
                 self.open_editor(kind, window, cx);
-                self.show_page(Page::Actions);
                 self.note = format!(
                     "Key #{} — set it to {} and press SAVE BINDING.",
                     number.get(),
@@ -1505,6 +1609,9 @@ impl Controller {
     fn bind_and_repaint(&mut self, number: KeyNumber, action: Action) {
         match self.save_action(number, action) {
             Ok(saved) => {
+                // The key's face comes from what it now runs, so the icon of the
+                // new program is read before the repaint and never during it.
+                self.rebuild_icons();
                 if self.repaint_key(u16::from(number.get())) {
                     self.note = saved.into();
                 }
@@ -1570,6 +1677,10 @@ impl Controller {
                 Ok(()) => {
                     self.note =
                         format!("Key #{} cleared — it does nothing now.", number.get()).into();
+                    // A key that runs nothing shows the flat colour again, and
+                    // the icon it no longer needs leaves the cache with it.
+                    self.rebuild_icons();
+                    self.repaint_key(u16::from(number.get()));
                 }
                 Err(err) => {
                     self.note = format!(
@@ -1727,14 +1838,23 @@ impl Controller {
             .active()
             .and_then(|profile| profile.appearance_for(key))
             .cloned();
+        // The plan is resolved from the profile, the binding and the icon cache
+        // before the session is borrowed: nothing here reads the wire, and
+        // nothing here can fail after the first byte.
+        let plan = plan_tile(
+            appearance.as_ref(),
+            self.action_for(key),
+            self.paint.rgb(),
+            &self.icons,
+        );
         let index = usize::from(key.saturating_sub(1));
 
         let Some(session) = self.session.as_mut() else {
             return true;
         };
 
-        let result = match &appearance {
-            Some(ss550_engine::Appearance::Image { asset }) => {
+        let result = match &plan {
+            Tile::Asset(asset) => {
                 let tile = self
                     .assets
                     .read(asset)
@@ -1753,20 +1873,17 @@ impl Controller {
                     Err(message) => Err(PaintFailure::Picture(message)),
                 }
             }
-            Some(ss550_engine::Appearance::Solid { rgb }) => {
-                session.paint(index, *rgb).map_err(PaintFailure::Session)
-            }
-            None => session
-                .paint(index, self.paint.rgb())
+            Tile::Art(picture) => session
+                .paint_encoded(index, picture)
                 .map_err(PaintFailure::Session),
+            Tile::Colour(rgb) => session.paint(index, *rgb).map_err(PaintFailure::Session),
         };
 
         match result {
             Ok(()) => {
-                let slot = match &appearance {
-                    Some(ss550_engine::Appearance::Image { .. }) => Slot::Image,
-                    Some(ss550_engine::Appearance::Solid { rgb }) => slot_for(*rgb),
-                    None => self.paint.slot(),
+                let slot = match &plan {
+                    Tile::Asset(_) | Tile::Art(_) => Slot::Image,
+                    Tile::Colour(rgb) => slot_for(*rgb),
                 };
                 if let Some(entry) = self.slots.get_mut(index) {
                     *entry = slot;

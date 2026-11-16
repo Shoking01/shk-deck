@@ -2,10 +2,10 @@
 //!
 //! A palette entry is a promise, not a write. Dragging a *template* — `Run app`,
 //! `Open URL`, `Keystrokes` — onto a key only opens that key's editor on that
-//! kind; dragging an action that is already bound copies it, because it has
-//! nothing left to ask for. Neither path touches the store from here: both end
-//! in the save the editor already uses, and a template only ends there when the
-//! user presses SAVE BINDING.
+//! kind, where the key is; dragging an action that is already bound copies it,
+//! because it has nothing left to ask for. Neither path touches the store from
+//! here: both end in the save the editor already uses, and a template only ends
+//! there when the user presses SAVE BINDING.
 //!
 //! This module owns what can be *dragged*; the drop target is the key tile in
 //! [`super::deck`], because that is where a key is. The two halves meet on

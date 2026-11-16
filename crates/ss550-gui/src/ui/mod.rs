@@ -15,6 +15,7 @@ use gpui_kit::{
 };
 
 pub(crate) mod deck;
+pub(crate) mod editor;
 pub(crate) mod page;
 pub(crate) mod palette;
 pub(crate) mod panels;
@@ -354,7 +355,7 @@ pub(crate) fn path_line(
 
 #[cfg(test)]
 mod tests {
-    use super::{shorten, Tokens, PAGE_PAD, RADIUS_MD, RADIUS_PILL, RADIUS_SM};
+    use super::{color, shorten, Tokens, PAGE_PAD, RADIUS_MD, RADIUS_PILL, RADIUS_SM};
     use gpui_kit::component::{Theme, ThemeMode};
 
     #[test]
@@ -398,5 +399,26 @@ mod tests {
         assert_eq!(RADIUS_SM, 8.);
         assert_eq!(RADIUS_MD, 12.);
         assert_eq!(RADIUS_PILL, 999.);
+    }
+
+    #[test]
+    fn the_glyph_a_key_receives_is_the_accent_the_window_shows() {
+        // The initial of a key is drawn twice — as an element on the tile and as
+        // a picture for the deck — and the two have to be the same colour, or a
+        // key would change tone when it is sent.
+        let rgb = crate::icons::GLYPH_ACCENT;
+        let accent = color(u32::from_be_bytes([0, rgb[0], rgb[1], rgb[2]]));
+
+        let mut dark_theme = Theme::default();
+        dark_theme.mode = ThemeMode::Dark;
+        let mut light_theme = Theme::default();
+        light_theme.mode = ThemeMode::Light;
+
+        assert_eq!(Tokens::new(&dark_theme).accent, accent);
+        assert_eq!(
+            Tokens::new(&light_theme).accent,
+            accent,
+            "the accent does not change with the theme"
+        );
     }
 }

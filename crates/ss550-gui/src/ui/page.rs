@@ -49,12 +49,12 @@ impl Page {
     pub(crate) fn description(self) -> &'static str {
         match self {
             Page::Deck => {
-                "What every key shows right now. Pick a key to inspect what it runs; touching \
-                 one never changes it."
+                "What every key shows right now, and the editor for the key you pick. Touching \
+                 a key never changes it."
             }
             Page::Actions => {
-                "What each key runs when it is pressed on the deck. A key with no action still \
-                 lights up and still says so."
+                "Every key as a chip, the editor for the selected one, and what is bound right \
+                 now. A key with no action still lights up and still says so."
             }
             Page::Artwork => {
                 "The pictures a key can show, and what one looks like at the size the deck asks \

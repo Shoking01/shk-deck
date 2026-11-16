@@ -104,6 +104,8 @@ fn render_with_ladder(
     source: &[u8],
     ladder: &[u8],
 ) -> Result<Vec<u8>, RenderError> {
+    // A deck that asks for no pixels is refused before an image is decoded:
+    // there is nothing to fit anything into.
     let (width, height) = (spec.width(), spec.height());
     if width == 0 || height == 0 {
         return Err(RenderError::EmptySpec { width, height });
@@ -118,8 +120,45 @@ fn render_with_ladder(
     // notes, so the encoded tile is flipped once here, before it is fitted:
     // every caller then sends bytes the deck shows the right way up.
     let rgb = decoded.to_rgb8();
-    let rotated = imageops::rotate180(&rgb);
+    encode_tile(spec, &name.to_string(), &rgb, ladder)
+}
 
+/// The deck's payload for pixels this build already holds.
+///
+/// A program's icon is decoded by Windows, not by an image codec, so there are
+/// no bytes to read: [`render`] would have to be handed a re-encoded copy of a
+/// picture that is already in memory. This is the same pipeline — the same
+/// flip, the same fit, the same quality ladder — entered one step later.
+///
+/// # Errors
+///
+/// [`RenderError::EmptySpec`] when the deck asks for no pixels, and
+/// [`RenderError::TooLarge`] when even [`QUALITY_LADDER`]'s floor exceeds the
+/// deck's byte limit.
+pub fn render_rgba(
+    spec: ImageSpec,
+    name: &str,
+    picture: &RgbaImage,
+) -> Result<Vec<u8>, RenderError> {
+    let rgb = on_black(picture);
+    encode_tile(spec, name, &rgb, &QUALITY_LADDER)
+}
+
+/// The tile one deck accepts, from a picture already in RGB.
+fn encode_tile(
+    spec: ImageSpec,
+    name: &str,
+    picture: &RgbImage,
+    ladder: &[u8],
+) -> Result<Vec<u8>, RenderError> {
+    let (width, height) = (spec.width(), spec.height());
+    if width == 0 || height == 0 {
+        return Err(RenderError::EmptySpec { width, height });
+    }
+
+    // The deck's display is mounted the other way up; the flip is stated once,
+    // here, for every picture that reaches it.
+    let rotated = imageops::rotate180(picture);
     let canvas = fit(spec, &rotated);
 
     let mut smallest = 0;
@@ -137,6 +176,27 @@ fn render_with_ladder(
         bytes: smallest,
         max_bytes: spec.max_bytes(),
     })
+}
+
+/// An RGBA picture flattened onto black, in straight alpha.
+///
+/// A key has no background of its own and a JPEG has no alpha channel, so a
+/// transparent pixel becomes the same black the fit path leaves in its bands.
+/// The multiply happens here, once: what reaches the deck and the tile is
+/// opaque, and nothing downstream has to know what premultiplied means.
+pub fn on_black(picture: &RgbaImage) -> RgbImage {
+    let (width, height) = picture.dimensions();
+    let mut flat = RgbImage::new(width, height);
+    for (x, y, pixel) in picture.enumerate_pixels() {
+        let alpha = u16::from(pixel[3]);
+        let channel = |value: u8| ((u16::from(value) * alpha) / 255) as u8;
+        flat.put_pixel(
+            x,
+            y,
+            Rgb([channel(pixel[0]), channel(pixel[1]), channel(pixel[2])]),
+        );
+    }
+    flat
 }
 
 /// Scales `picture` to fit inside the deck's image, centred on black.
@@ -208,23 +268,48 @@ pub fn preview_frame(
     // show the tile upside down next to a key that is the right way up.
     let rgb = decoded.to_rgb8();
     let fitted = fit(spec, &rgb);
+    Ok(frame_from_rgb(&fitted))
+}
 
-    // The renderer takes its pixels in BGRA, alpha first byte last, the same
-    // layout it produces when it decodes a PNG itself. A `Frame` is built from
-    // an RGBA buffer, so the red and blue channels are swapped once here;
-    // handing it RGBA gives a preview whose reds and blues are exchanged.
-    // Opaque alpha is its own premultiplied value, so the bands stay black.
+/// [`preview_frame`] for pixels this build already holds.
+///
+/// The same tile the deck would receive from [`render_rgba`], letterboxing and
+/// all, so a key that draws its program's icon draws exactly what it sends.
+pub fn preview_frame_rgba(spec: ImageSpec, picture: &RgbaImage) -> Result<Frame, RenderError> {
+    let (width, height) = (spec.width(), spec.height());
+    if width == 0 || height == 0 {
+        return Err(RenderError::EmptySpec { width, height });
+    }
+    let fitted = fit(spec, &on_black(picture));
+    Ok(frame_from_rgb(&fitted))
+}
+
+/// Pixels this build already holds, at their own size, as the window's frame.
+///
+/// Used when there is no deck to state an image size: the window still has to
+/// show what a key would run, and a picture scaled to a deck that is not there
+/// would be a promise nobody asked for.
+pub fn frame_from_rgba(picture: &RgbaImage) -> Frame {
+    frame_from_rgb(&on_black(picture))
+}
+
+/// One RGB picture as the renderer's own frame.
+///
+/// The renderer takes its pixels in BGRA, alpha first byte last, the same
+/// layout it produces when it decodes a PNG itself. A `Frame` is built from an
+/// RGBA buffer, so the red and blue channels are swapped once here; handing it
+/// RGBA gives a preview whose reds and blues are exchanged. Opaque alpha is its
+/// own premultiplied value, so the bands stay black.
+fn frame_from_rgb(fitted: &RgbImage) -> Frame {
     let (w, h) = fitted.dimensions();
     let mut rgba = RgbaImage::new(w, h);
     for y in 0..h {
         for x in 0..w {
             let pixel = fitted.get_pixel(x, y);
-            // Swap R and B for BGRA format
             rgba.put_pixel(x, y, Rgba([pixel[2], pixel[1], pixel[0], 0xFF]));
         }
     }
-    let frame = Frame::new(rgba);
-    Ok(frame)
+    Frame::new(rgba)
 }
 
 /// The tiles already rendered, so a profile switch does not re-decode them.
@@ -595,5 +680,88 @@ mod tests {
             .err()
             .expect("text is not an image");
         assert!(matches!(error, RenderError::Decode { .. }), "{error}");
+    }
+
+    /// An RGBA picture whose pixels come from `pixel(x, y)`.
+    fn rgba(width: u32, height: u32, pixel: impl Fn(u32, u32) -> [u8; 4]) -> RgbaImage {
+        let mut picture = RgbaImage::new(width, height);
+        for (x, y, colour) in picture.enumerate_pixels_mut() {
+            *colour = Rgba(pixel(x, y));
+        }
+        picture
+    }
+
+    #[test]
+    fn a_transparent_pixel_is_flattened_onto_black() {
+        // Half-transparent white is the grey the multiply produces, and a
+        // pixel that is not there at all is the black a JPEG can hold.
+        let picture = rgba(2, 1, |x, _| {
+            if x == 0 {
+                [0xFF, 0xFF, 0xFF, 0x80]
+            } else {
+                [0xFF, 0xFF, 0xFF, 0x00]
+            }
+        });
+        let flat = on_black(&picture);
+
+        assert_eq!(flat.get_pixel(0, 0).0, [0x80, 0x80, 0x80]);
+        assert_eq!(flat.get_pixel(1, 0).0, [0, 0, 0]);
+    }
+
+    #[test]
+    fn an_icon_goes_through_the_same_pipeline_as_a_picture() {
+        // The same pixels, once as an image file and once as the pixels
+        // Windows handed over: the payload must be byte for byte the same, or
+        // a key would show one thing and send another.
+        let pixels = rgba(32, 32, |x, y| [(x * 8) as u8, (y * 8) as u8, 0x40, 0xFF]);
+        let source = png(32, 32, |x, y| [(x * 8) as u8, (y * 8) as u8, 0x40]);
+
+        let from_pixels = render_rgba(spec(), "app.exe", &pixels).expect("a tile");
+        let from_file = render(spec(), &name(), &source).expect("a tile");
+
+        assert_eq!(from_pixels, from_file);
+        assert!(from_pixels.len() <= spec().max_bytes());
+    }
+
+    #[test]
+    fn a_preview_from_pixels_is_the_fitted_tile_the_deck_would_show() {
+        // A 4:1 picture, so the fit leaves black bands above and below, exactly
+        // as it does for a picture that came out of a file.
+        let pixels = rgba(144, 36, |_, _| [0xFF, 0x00, 0x00, 0xFF]);
+        let frame = preview_frame_rgba(spec(), &pixels).expect("a preview");
+
+        assert_eq!(frame.buffer().dimensions(), (72, 72));
+        assert_eq!(frame.buffer().get_pixel(36, 0).0, [0, 0, 0, 255]);
+        assert_eq!(
+            frame.buffer().get_pixel(36, 36).0,
+            [0, 0, 0xFF, 0xFF],
+            "the picture reaches the window in the renderer's BGRA"
+        );
+    }
+
+    #[test]
+    fn pixels_with_no_deck_to_size_them_keep_their_own_size() {
+        // Before a deck answers there is no image size to fit to, and the window
+        // still has to show what the key runs.
+        let pixels = rgba(32, 32, |_, _| [0x00, 0xFF, 0x00, 0xFF]);
+        let frame = frame_from_rgba(&pixels);
+
+        assert_eq!(frame.buffer().dimensions(), (32, 32));
+        assert_eq!(frame.buffer().get_pixel(4, 4).0, [0x00, 0xFF, 0x00, 0xFF]);
+    }
+
+    #[test]
+    fn pixels_are_refused_for_a_deck_that_asks_for_no_pixels() {
+        let empty = ImageSpec::new(72, 0, 4_096, deck_api::ImageFormat::Jpeg);
+        let pixels = rgba(32, 32, |_, _| [0xFF, 0xFF, 0xFF, 0xFF]);
+
+        assert!(matches!(
+            render_rgba(empty, "app.exe", &pixels),
+            Err(RenderError::EmptySpec { height: 0, .. })
+        ));
+        assert!(matches!(
+            preview_frame_rgba(empty, &pixels),
+            Err(RenderError::EmptySpec { height: 0, .. })
+        ));
     }
 }

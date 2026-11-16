@@ -45,10 +45,10 @@ crates/ss550-tray/Cargo.toml`.
 | --- | --- | --- | --- | --- |
 | T1 | Clic en la tecla = seleccionar; colores pasan a la tarjeta de la tecla | S1 | inline | hecho |
 | T2 | `Action::Keys` en `ss550-engine`: modelo, validación, resumen, JSON | S4 | delegado | hecho — pendiente de commit |
-| T3 | Envío de pulsaciones (Win32 `SendInput`) en `ss550-tray` | S4, S8 | delegado | pendiente |
-| T4 | Paleta lateral arrastrable + soltar sobre tecla + editor por tecla | S2, S3 | delegado | pendiente |
-| T5 | Icono del ejecutable como imagen de la tecla | S5, S7 | delegado | pendiente |
-| T6 | Artwork dentro del editor de la tecla | S6 | delegado | pendiente |
+| T3 | Envío de pulsaciones (Win32 `SendInput`) en `ss550-tray` | S4, S8 | delegado | hecho — `f2845b0` |
+| T4 | Paleta lateral arrastrable + soltar sobre tecla + editor por tecla | S2, S3 | delegado | hecho — `f36ef07` |
+| T5 | Icono del ejecutable como imagen de la tecla | S5, S7 | delegado | hecho |
+| T6 | Artwork dentro del editor de la tecla | S6 | delegado | pendiente — el editor ya vive en la columna del `Deck`; falta mover ahí la imagen personalizada |
 
 ## Log
 
@@ -85,3 +85,22 @@ la clave cruda, que contiene `:` — en Windows eso es un *alternate data stream
 no un nombre de archivo: el perfil vivía dentro del stream de un archivo llamado
 `shape`. Ahora se guarda con slug + huella, y la clave del deck ya no incluye el
 tamaño de imagen.
+
+**L4** (2026-11-15): T5 entregada, y con ella la mitad de T6 que era deuda de T4.
+Un `run app` cuyo perfil no trae imagen propia dibuja ahora el icono del
+programa: `ss550-tray` se lo pide a la shell (`SHGetFileInfoW` con
+`SHGFI_ICON | SHGFI_LARGEICON`), así que un `.lnk` da el icono de su destino y no
+el de una hoja en blanco, y el `HICON` se destruye antes de volver. La extracción
+ocurre una vez por ruta, cuando cambia la acción, el perfil o el deck, nunca en
+`render`; un rebind olvida el icono que ya no se usa. El tile y la tecla salen
+del mismo `render`: el tile pinta el frame ajustado y la tecla recibe el JPEG del
+mismo ajuste y la misma escalera de calidad. Un programa sin icono legible, una
+URL y una combinación caen a la inicial sobre el acento, dibujada como bitmap
+5×7 al tamaño de imagen del deck, así que la tecla también recibe imagen; la fila
+de color sigue siendo la excepción explícita. El editor de la tecla se mudó a la
+columna del `Deck` — soltar una plantilla ya no manda la ventana a `Actions`:
+abre el editor ahí mismo, con el primer campo enfocado — y `Actions` quedó como
+el resumen (chips de teclas, el mismo editor, la lista de lo que está atado),
+porque ahora los dos sitios dibujan un solo widget. Queda para T6 llevar la
+imagen personalizada dentro de ese editor y retirar la página.
+
