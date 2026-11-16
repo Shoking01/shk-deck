@@ -38,6 +38,13 @@ crates/ss550-tray/Cargo.toml`.
 - **S9. Sin deck conectado todo sigue siendo navegable.** Se puede armar la
   paleta, editar teclas y ver qué haría cada una; lo único que no ocurre es el
   efecto en el hardware.
+- **S10. Elegir una app, no escribir su ruta.** La acción `Run app` ofrece un
+  desplegable con las aplicaciones instaladas en el PC (accesos directos del
+  menú Inicio del usuario y de todos los usuarios), con su nombre y su icono;
+  elegir una rellena la ruta. Escribir una ruta a mano sigue siendo posible.
+- **S11. El icono es el de la aplicación, no el del acceso directo.** Un `.lnk`
+  se resuelve a su destino antes de leer el icono, así que la tecla no muestra
+  la flecha de acceso directo de Windows.
 
 ## Tasks
 
@@ -49,6 +56,8 @@ crates/ss550-tray/Cargo.toml`.
 | T4 | Paleta lateral arrastrable + soltar sobre tecla + editor por tecla | S2, S3 | delegado | hecho — `f36ef07` |
 | T5 | Icono del ejecutable como imagen de la tecla | S5, S7 | delegado | hecho |
 | T6 | Artwork dentro del editor de la tecla | S6 | delegado | pendiente — el editor ya vive en la columna del `Deck`; falta mover ahí la imagen personalizada |
+| T7 | Icono del destino de un `.lnk`, sin la flecha de acceso directo | S11 | delegado | pendiente |
+| T8 | Desplegable de aplicaciones instaladas en la acción `Run app` | S10 | delegado | pendiente |
 
 ## Log
 
