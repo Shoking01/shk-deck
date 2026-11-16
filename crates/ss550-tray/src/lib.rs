@@ -10,12 +10,19 @@
 //! it.
 //!
 //! It also reads the icon Windows shows for a program — [`appicon`] — because
-//! that is a shell call, and a key that runs a program draws it.
+//! that is a shell call, and a key that runs a program draws it. A shortcut is
+//! resolved to its target first, so the picture is the application's and not the
+//! shortcut's.
+//!
+//! It also lists the applications the Start Menu holds — [`apps`] — because
+//! finding them is the same shell work: hundreds of shortcuts, each one resolved
+//! to the program behind it.
 //!
 //! It is also the **one** place in the project that is allowed to call
 //! `unsafe` code: it owns the Win32 calls that hide and restore the native
 //! window, the icon that lives in the notification area, the `SendInput` call
-//! that delivers a keystroke, and the shell call that reads a program's icon.
+//! that delivers a keystroke, and the shell calls that read a program's icon and
+//! resolve a shortcut.
 //! Every other crate keeps `#![deny(unsafe_code)]`.
 //!
 //! # Example
@@ -40,13 +47,18 @@
 #![allow(unsafe_code)]
 
 pub mod appicon;
+pub mod apps;
 pub mod autostart;
 pub mod icon;
 pub mod install;
 mod keysend;
+#[cfg(test)]
+mod scratch;
+mod shortcut;
 mod tray;
 mod window;
 
+pub use apps::{installed_apps, InstalledApp};
 pub use keysend::SystemKeySender;
 pub use tray::{TrayCommand, TrayHost};
 pub use window::{hide_window, show_window, window_is_visible};

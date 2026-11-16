@@ -40,6 +40,10 @@ windows = { version = "0.62", features = [
     # The program's own icon: `SHGetFileInfoW` needs the shell, and its
     # `dwfileattributes` argument is a file-system flag type.
     "Win32_Storage_FileSystem",
+    # Resolving a shortcut to its target: `IShellLinkW` is loaded from the
+    # `.lnk` through `IPersistFile`, which is a COM call, and `GetPath` fills a
+    # `WIN32_FIND_DATAW` from the file-system module above.
+    "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_UI_Shell",

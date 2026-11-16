@@ -6,14 +6,19 @@
 //! that can ask Windows for it is this crate, because it is the one allowed
 //! `unsafe`.
 //!
-//! ## Why the shell, and not the executable
+//! ## Why the link is resolved first
 //!
-//! `SHGetFileInfoW` with `SHGFI_ICON | SHGFI_LARGEICON` answers with the icon
-//! the shell would show for a path. That is exactly the right question: a
-//! user's bindings point at `.lnk` shortcuts, and a shortcut has no icon of its
-//! own — the shell resolves it to the target's, follows the link, and hands back
-//! the picture Explorer draws. Asking the shell means a `.exe` and a `.lnk` to
-//! it give the same icon, without this crate ever parsing a shortcut.
+//! `SHGetFileInfoW` answers about the file it is **given**, and a `.lnk` is a
+//! file in its own right: ask about the shortcut and the shell hands back the
+//! shortcut's icon — the little arrow in the corner, and a generic sheet of
+//! paper when the link has no icon of its own. A key bound to a Start Menu
+//! shortcut then wears Windows' arrow instead of the application's mark.
+//!
+//! So a shortcut is resolved to its target first — [`crate::shortcut`] — and the
+//! shell is asked about the program. That is the difference between "the icon of
+//! this file" and "the icon of the thing this file starts", and it is the second
+//! one a key needs. `SHGFI_LINKOVERLAY` is never requested: it is the flag that
+//! *adds* the arrow, and it is exactly what must not be drawn.
 //!
 //! ## Size
 //!
@@ -30,8 +35,8 @@
 //! ever leaves this module. A path that does not exist, an icon with no pixels
 //! at all, and a monochrome icon with no colour bitmap are `None`, and the
 //! window draws the key's initial instead. A shortcut whose target is gone is
-//! not a failure: the shell still answers with the icon it would draw for that
-//! file, and that is what the key shows.
+//! not a failure: the link itself is asked about instead, so the key shows the
+//! picture the shell has for that file rather than falling back for no reason.
 //!
 //! # Example
 //!
@@ -45,6 +50,8 @@
 //! ```
 
 use std::path::Path;
+
+use crate::shortcut;
 
 /// The side of the icon this crate asks Windows for, in pixels.
 ///
@@ -102,12 +109,17 @@ impl IconPixels {
 
 /// The icon Windows shows for `path`, or `None` when there is none to read.
 ///
-/// `path` may be an executable or a shortcut to one: the shell resolves either
-/// to the picture it would draw. A path that does not exist and an icon with no
-/// pixels answer `None`; a shortcut whose target is gone answers with the icon
-/// the shell would show for that file.
+/// `path` may be an executable or a shortcut to one. A shortcut is resolved
+/// first, and the icon read is the one of the program it starts: asking the
+/// shell about the `.lnk` itself would answer with the shortcut's icon, arrow
+/// overlay and all. A path that does not exist and an icon with no pixels answer
+/// `None`; a shortcut whose target is gone answers with the icon the shell has
+/// for the link, which is something, rather than nothing.
 pub fn program_icon(path: &Path) -> Option<IconPixels> {
-    platform::program_icon(path)
+    // The one step that has to happen before the shell is asked: which file the
+    // picture is about.
+    let source = shortcut::icon_source(path);
+    platform::program_icon(&source)
 }
 
 /// Straight RGBA from a top-down DIB whose pixels are B, G, R, A.
@@ -200,6 +212,10 @@ mod platform {
         // writable record of the size passed with it, and the flags ask for an
         // icon the caller owns. A failed call answers zero and leaves `info`
         // untouched, which is why the handle is checked before it is used.
+        //
+        // `SHGFI_LINKOVERLAY` is never among the flags: it is what draws the
+        // shortcut arrow, and the caller resolved the link precisely so that
+        // arrow would not be in the picture.
         let found = unsafe {
             SHGetFileInfoW(
                 PCWSTR(wide.as_ptr()),
@@ -424,6 +440,8 @@ mod windows_tests {
     use std::path::Path;
 
     use super::{program_icon, ICON_SIDE};
+    use crate::scratch::ScratchDir;
+    use crate::shortcut::fixture::write_shortcut;
 
     #[test]
     fn a_program_answers_with_the_shell_icon_at_its_documented_size() {
@@ -447,5 +465,44 @@ mod windows_tests {
     fn a_path_that_is_not_there_has_no_icon() {
         let missing = Path::new(r"C:\this\program\was\never\installed.exe");
         assert!(program_icon(missing).is_none());
+    }
+
+    #[test]
+    fn a_shortcut_shows_the_icon_of_its_target_and_not_the_arrow() {
+        // The bug this pins down: the shell answers about the file it is given,
+        // and for a `.lnk` that picture is the shortcut — arrow overlay and all.
+        // Resolving the link first makes the two paths answer with one picture,
+        // pixel for pixel.
+        let running = std::env::current_exe().expect("the test binary has a path");
+        let scratch = ScratchDir::new("shortcut-icon");
+        let link = scratch.path().join("Shortcut.lnk");
+        if !write_shortcut(&link, &running) {
+            // No shell, no fixture, nothing to compare.
+            return;
+        }
+
+        let from_link = program_icon(&link).expect("a shortcut answers with its target's icon");
+        let from_target = program_icon(&running).expect("the program has an icon");
+
+        assert_eq!(
+            from_link, from_target,
+            "a key bound to the shortcut must wear the program's mark, not Windows' arrow"
+        );
+    }
+
+    #[test]
+    fn a_shortcut_whose_target_is_gone_still_answers_with_a_picture() {
+        // A Start Menu shortcut outlives the program it names. That is not a
+        // reason for the key to fall back to an initial: the shell still has a
+        // picture for the link.
+        let scratch = ScratchDir::new("stale-shortcut-icon");
+        let link = scratch.path().join("Gone.lnk");
+        let missing = scratch.path().join("never-installed.exe");
+        if !write_shortcut(&link, &missing) {
+            return;
+        }
+
+        let icon = program_icon(&link).expect("the shell has a picture for the link itself");
+        assert!(!icon.is_blank());
     }
 }
