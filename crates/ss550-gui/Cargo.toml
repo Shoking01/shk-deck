@@ -13,10 +13,11 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 deck-api = { path = "../deck-api" }
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit.git", tag = "v0.9.0" }
-# Decoding the user's pictures. Only the formats the asset library accepts are
-# compiled in: every extra codec is build time and attack surface for a format
-# nothing can import.
-image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }
+# Decoding the user's pictures, and the icon a website publishes. Only the
+# formats the asset library accepts are compiled in, plus `ico`: `/favicon.ico`
+# is an ICO file by convention, and the shell has no decoder for it. Every extra
+# codec is build time and attack surface for a format nothing can import.
+image = { version = "0.25", default-features = false, features = ["bmp", "ico", "jpeg", "png"] }
 jpeg-encoder = "0.7"
 ss550-driver = { path = "../ss550-driver" }
 ss550-engine = { path = "../ss550-engine" }

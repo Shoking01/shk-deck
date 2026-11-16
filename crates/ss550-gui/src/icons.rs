@@ -1,7 +1,9 @@
 //! The picture a key shows for the thing it runs.
 //!
 //! A key bound to a program draws that program's own icon, read out of the file
-//! by [`ss550_tray::appicon`]. A program whose icon cannot be read, a URL and a
+//! by [`ss550_tray::appicon`]. A key bound to a URL draws the site's own icon,
+//! fetched once by [`ss550_tray::favicon`] and kept in [`crate::favicons`]. A
+//! program whose icon cannot be read, a URL whose site has no icon, and a
 //! keystroke fall back to the initial of what they run, drawn on the accent
 //! colour: a key that runs something is never a blank tile.
 //!
@@ -12,6 +14,10 @@
 //! keeps what it built; [`IconCache::frame`] and [`IconCache::tile`] are plain
 //! lookups over that map, so a frame that draws the grid never asks Windows for
 //! anything and never touches an encoder.
+//!
+//! The one thing `prepare` cannot do is fetch: a request is a network call, and
+//! it runs on the background executor through [`crate::favicons::fetch`], coming
+//! back as state through [`IconCache::finish_site`].
 //!
 //! ## Why the deck gets the same picture
 //!
@@ -28,7 +34,7 @@
 //! let picture = icons.frame(&action);
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -37,6 +43,7 @@ use gpui_kit::RenderImage;
 use image::{imageops, Rgba, RgbaImage};
 use ss550_engine::Action;
 
+use crate::favicons;
 use crate::render;
 
 /// The side of a glyph when there is no deck to state an image size.
@@ -65,7 +72,8 @@ const GLYPH_INK: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
 pub(crate) enum Artwork {
     /// The key runs nothing, so it has nothing of its own to show.
     None,
-    /// The program's own icon, extracted from the file.
+    /// The icon of what the key runs: a program's, read out of the file, or a
+    /// site's, fetched once and kept.
     Icon,
     /// The initial of what the key runs, on the accent colour.
     Glyph,
@@ -87,6 +95,16 @@ pub(crate) struct IconCache {
     /// One entry per program path. A `None` remembers a program with no
     /// readable icon, so a rebind does not ask Windows for it again.
     icons: BTreeMap<PathBuf, Option<Art>>,
+    /// One entry per site, keyed by host. A `None` remembers a site that has no
+    /// icon to give — offline, or nothing at `/favicon.ico` — so the key draws
+    /// its initial and no second request is made.
+    ///
+    /// The entry is the **host's**, not the URL's: two bindings to the same site
+    /// share one picture, and a rebind to another host leaves this one alone.
+    sites: BTreeMap<String, Option<Art>>,
+    /// Hosts a fetch is already in flight for, so a second pass over the
+    /// bindings does not start a second request for the same site.
+    pending: BTreeSet<String>,
     /// One entry per initial, so two keys that start with the same letter share
     /// a picture instead of encoding it twice.
     glyphs: BTreeMap<char, Art>,
@@ -98,15 +116,21 @@ impl IconCache {
         Self {
             spec: None,
             icons: BTreeMap::new(),
+            sites: BTreeMap::new(),
+            pending: BTreeSet::new(),
             glyphs: BTreeMap::new(),
         }
     }
 
     /// Builds every picture `actions` needs, and forgets the rest.
     ///
-    /// This is the whole of the work: one icon extraction per program path and
-    /// one glyph per distinct initial. Called on a rebind, a profile switch and a
-    /// deck change — never from a frame.
+    /// This is the whole of the work: one icon extraction per program path, one
+    /// cached file read per site, and one glyph per distinct initial. Called on a
+    /// rebind, a profile switch and a deck change — never from a frame.
+    ///
+    /// Nothing here reaches the network: a site with no file on disk stays out of
+    /// the map, and [`IconCache::begin_site`] is what turns that absence into a
+    /// request on the background executor.
     ///
     /// `draft` is the program the editor is about to bind. It is not a binding
     /// yet, but the key's face is decided by it, so its icon is read here — once,
@@ -123,16 +147,25 @@ impl IconCache {
             // Every fitted frame and every encoded payload was built for the
             // old image size, so none of them can be served to this deck.
             self.icons.clear();
+            self.sites.clear();
             self.glyphs.clear();
             self.spec = spec;
         }
 
         let mut programs: Vec<PathBuf> = Vec::new();
+        let mut hosts: Vec<String> = Vec::new();
         let mut letters: Vec<char> = Vec::new();
         for action in actions {
             if let Action::Launch { program, .. } = action {
                 if !programs.contains(program) {
                     programs.push(program.clone());
+                }
+            }
+            if let Action::OpenUrl { url } = action {
+                if let Some(host) = favicons::host_of(url) {
+                    if !hosts.contains(&host) {
+                        hosts.push(host);
+                    }
                 }
             }
             let letter = glyph_letter(action);
@@ -151,6 +184,7 @@ impl IconCache {
         // A binding that was removed takes its picture with it: the cache is
         // the set of things the deck can run now, not a history of them.
         self.icons.retain(|path, _| programs.contains(path));
+        self.sites.retain(|host, _| hosts.contains(host));
         self.glyphs.retain(|letter, _| letters.contains(letter));
 
         for program in programs {
@@ -160,6 +194,24 @@ impl IconCache {
             let art = build_icon(self.spec, &program);
             self.icons.insert(program, art);
         }
+        // A site's icon is read from the file an earlier run kept, and only for
+        // a host this cache has never answered for. A host with no file stays
+        // absent, which is what tells the controller to fetch it.
+        let config = (!hosts.is_empty()).then(ss550_engine::config_dir);
+        for host in hosts {
+            if self.sites.contains_key(&host) {
+                continue;
+            }
+            let picture = config
+                .as_deref()
+                .and_then(|config| favicons::cached(config, &host));
+            if let Some(art) = picture
+                .as_ref()
+                .and_then(|picture| build_site(self.spec, &host, picture))
+            {
+                self.sites.insert(host, Some(art));
+            }
+        }
         for letter in letters {
             if self.glyphs.contains_key(&letter) {
                 continue;
@@ -167,6 +219,39 @@ impl IconCache {
             let art = build_glyph(self.spec, letter);
             self.glyphs.insert(letter, art);
         }
+    }
+
+    /// Whether `host` has no answer yet, marking it as being fetched.
+    ///
+    /// `false` means one of three ordinary things: the site's icon is already in
+    /// the cache, a fetch is already in flight, or the site was asked and had
+    /// none to give. None of them is worth a second request.
+    pub(crate) fn begin_site(&mut self, host: &str) -> bool {
+        if self.sites.contains_key(host) || self.pending.contains(host) {
+            return false;
+        }
+        self.pending.insert(host.to_string());
+        true
+    }
+
+    /// Records what a fetch found for `host`.
+    ///
+    /// `None` is a site with no icon — offline, a `404`, an SVG — and it is
+    /// remembered as a miss, the way a program with no readable icon is: the key
+    /// draws its initial, and the site is not asked again in this session.
+    pub(crate) fn finish_site(&mut self, host: &str, picture: Option<&RgbaImage>) {
+        self.pending.remove(host);
+        let art = picture.and_then(|picture| build_site(self.spec, host, picture));
+        self.sites.insert(host.to_string(), art);
+    }
+
+    /// Whether the cache holds a picture for `host`.
+    ///
+    /// The grid asks this through [`IconCache::artwork`]; this is the same fact
+    /// without the picture, for the tests that pin the cache's bookkeeping.
+    #[cfg(test)]
+    pub(crate) fn has_site(&self, host: &str) -> bool {
+        matches!(self.sites.get(host), Some(Some(_)))
     }
 
     /// What the tile should draw for `action`, when the profile says nothing.
@@ -180,7 +265,11 @@ impl IconCache {
                 Some(Some(_)) => Artwork::Icon,
                 _ => Artwork::Glyph,
             },
-            Some(Action::OpenUrl { .. } | Action::Keys { .. }) => Artwork::Glyph,
+            Some(Action::OpenUrl { url }) => match self.site_art(url) {
+                Some(_) => Artwork::Icon,
+                None => Artwork::Glyph,
+            },
+            Some(Action::Keys { .. }) => Artwork::Glyph,
         }
     }
 
@@ -202,16 +291,17 @@ impl IconCache {
             .map(|art| &art.frame)
     }
 
-    /// The payload the deck receives for `action`, once it stated a size.
+    /// The picture the deck receives for `action`, once it stated a size.
     pub(crate) fn tile(&self, action: &Action) -> Option<&[u8]> {
         self.art(action).and_then(|art| art.tile.as_deref())
     }
 
-    /// The picture one action has: its program's icon first, its initial second.
+    /// The picture one action has: the icon of what it runs first, its initial
+    /// second.
     ///
-    /// A program whose icon could not be read falls through to its initial, so a
-    /// key that runs something always has a picture — and the deck receives the
-    /// one the tile draws.
+    /// A program whose icon could not be read, and a site with no icon to give,
+    /// fall through to the initial, so a key that runs something always has a
+    /// picture — and the deck receives the one the tile draws.
     fn art(&self, action: &Action) -> Option<&Art> {
         let letter = glyph_letter(action);
         match action {
@@ -220,8 +310,15 @@ impl IconCache {
                 .get(program)
                 .and_then(Option::as_ref)
                 .or_else(|| self.glyphs.get(&letter)),
-            Action::OpenUrl { .. } | Action::Keys { .. } => self.glyphs.get(&letter),
+            Action::OpenUrl { url } => self.site_art(url).or_else(|| self.glyphs.get(&letter)),
+            Action::Keys { .. } => self.glyphs.get(&letter),
         }
+    }
+
+    /// The site's icon for `url`, when the cache holds one.
+    fn site_art(&self, url: &str) -> Option<&Art> {
+        let host = favicons::host_of(url)?;
+        self.sites.get(&host).and_then(Option::as_ref)
     }
 }
 
@@ -314,6 +411,28 @@ fn build_icon(spec: Option<ImageSpec>, program: &Path) -> Option<Art> {
     // look at, and two programs can share a file name.
     let name = program.to_string_lossy();
     Some(art(spec, &picture, &name))
+}
+
+/// The icon of one site, composed for the tile the way a program's is.
+///
+/// The picture is already decoded — [`crate::favicons`] did that off the UI
+/// thread — so this is the compose and the encode, and nothing else. A site
+/// icon is drawn on the same margin budget as a program icon, because the two
+/// sit side by side in the same grid and a key is not a browser tab.
+fn build_site(spec: Option<ImageSpec>, host: &str, picture: &RgbaImage) -> Option<Art> {
+    let (width, height) = picture.dimensions();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    if picture.pixels().all(|pixel| pixel[3] == 0) {
+        return None;
+    }
+    let side = spec.map_or(width.max(height), |spec| {
+        u32::from(spec.width().max(spec.height())).max(1)
+    });
+    let composed = compose_icon(picture, side);
+    // The host, so a refusal names the site the user can go and look at.
+    Some(art(spec, &composed, host))
 }
 
 /// The share of the tile the icon covers; the rest is the margin.
@@ -874,6 +993,92 @@ mod tests {
         // and the grid asks for its flat colour instead of a picture.
         let cache = super::IconCache::new();
         assert_eq!(cache.artwork(None), Artwork::None);
+    }
+
+    #[test]
+    fn a_url_whose_site_has_no_icon_falls_back_to_its_initial() {
+        // The ordinary case on the open web: a site that answers nothing at
+        // `/favicon.ico`. The key is an initial, never a blank tile.
+        let cache = super::IconCache::new();
+        let action = Action::OpenUrl {
+            url: "https://example.com/".to_string(),
+        };
+
+        assert_eq!(cache.artwork(Some(&action)), Artwork::Glyph);
+        assert!(cache.frame(&action).is_none());
+        assert!(!cache.has_site("example.com"));
+    }
+
+    #[test]
+    fn a_site_icon_the_cache_holds_is_what_the_key_wears() {
+        // What a completed fetch does: the picture goes in once, and the key
+        // then shows it — in the window and on the deck — instead of the letter.
+        let spec = deck_api::ImageSpec::new(72, 72, 4_096, deck_api::ImageFormat::Jpeg);
+        let mut cache = super::IconCache::new();
+        cache.prepare(Some(spec), &[], None);
+
+        let picture = image::RgbaImage::from_pixel(32, 32, image::Rgba([0x91, 0x45, 0xFF, 0xFF]));
+        cache.finish_site("twitch.tv", Some(&picture));
+
+        let action = Action::OpenUrl {
+            url: "https://twitch.tv/dashboard".to_string(),
+        };
+        assert_eq!(cache.artwork(Some(&action)), Artwork::Icon);
+        assert!(cache.frame(&action).is_some(), "the tile has a picture");
+        let tile = cache.tile(&action).expect("the deck gets the same picture");
+        assert!(tile.len() <= spec.max_bytes(), "{} bytes", tile.len());
+        assert!(cache.has_site("twitch.tv"));
+    }
+
+    #[test]
+    fn a_site_with_no_icon_is_asked_once_and_remembered_as_a_miss() {
+        // Offline, or a site with nothing at that path: the answer is the
+        // initial, and the next pass over the bindings must not ask again.
+        let mut cache = super::IconCache::new();
+
+        assert!(cache.begin_site("example.com"), "the first pass asks");
+        assert!(
+            !cache.begin_site("example.com"),
+            "the request is in flight: no second one"
+        );
+        cache.finish_site("example.com", None);
+
+        assert!(!cache.begin_site("example.com"), "a miss is an answer");
+        assert!(!cache.has_site("example.com"));
+    }
+
+    #[test]
+    fn each_host_keeps_its_own_picture() {
+        // A rebind to another site must not take the first site's icon with it,
+        // and must not ask for a picture that is already in the cache.
+        let mut cache = super::IconCache::new();
+        let picture = image::RgbaImage::from_pixel(16, 16, image::Rgba([0x00, 0x80, 0x00, 0xFF]));
+        cache.finish_site("twitch.tv", Some(&picture));
+        cache.finish_site("github.com", None);
+
+        let first = Action::OpenUrl {
+            url: "https://twitch.tv/".to_string(),
+        };
+        let second = Action::OpenUrl {
+            url: "https://github.com/".to_string(),
+        };
+        assert_eq!(cache.artwork(Some(&first)), Artwork::Icon);
+        assert_eq!(cache.artwork(Some(&second)), Artwork::Glyph);
+        assert!(!cache.begin_site("github.com"), "asked and answered");
+        assert!(cache.begin_site("wikipedia.org"), "a new host is fetched");
+    }
+
+    #[test]
+    fn a_site_icon_that_is_gone_takes_its_picture_with_it() {
+        // The cache is the set of sites the deck can reach now: a key rebound
+        // to a program does not keep the site's picture alive.
+        let mut cache = super::IconCache::new();
+        let picture = image::RgbaImage::from_pixel(16, 16, image::Rgba([0x11, 0x22, 0x33, 0xFF]));
+        cache.finish_site("twitch.tv", Some(&picture));
+
+        cache.prepare(None, &[launch(r"C:\Apps\brave.exe")], None);
+
+        assert!(!cache.has_site("twitch.tv"));
     }
 
     #[test]

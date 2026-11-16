@@ -50,6 +50,7 @@ use ui::Page;
 
 mod apps;
 mod diagnostics;
+mod favicons;
 mod icons;
 mod pictures;
 mod provider;
@@ -544,6 +545,9 @@ impl Controller {
                 }
                 changed |= this.drain_action_failures();
                 changed |= this.handle_tray(cx);
+                // A site's icon is a request, so it is started here and its
+                // answer arrives as state: the frame never waits for a host.
+                this.fetch_site_icons(cx);
                 if changed {
                     cx.notify();
                 }
@@ -842,6 +846,83 @@ impl Controller {
             .collect();
         self.icons
             .prepare(spec, &actions, self.draft_program.as_deref());
+    }
+
+    /// Fetches the icon of every site a bound URL points at, off the UI thread.
+    ///
+    /// Only a key that actually shows what it runs asks for one. A key the user
+    /// painted, or gave a picture, has an appearance, and the appearance wins
+    /// over the action's own icon — so no request is made for it. That is the
+    /// same ordering the tile obeys, stated once in [`ui::deck::face_for`].
+    ///
+    /// Each host is asked once: the cache answers whether it already holds a
+    /// picture, whether a request is in flight, or whether the site was already
+    /// asked and had none. The request and the decode both run on the background
+    /// executor, so a site that answers in twenty milliseconds and a site that
+    /// never answers cost this frame the same: nothing.
+    fn fetch_site_icons(&mut self, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            return;
+        }
+
+        // Every key that points at a site is grouped under its host: two keys on
+        // the same site share one request, and both are repainted when it
+        // answers, because the deck must not keep a letter the window dropped.
+        let mut wanted: Vec<(Vec<KeyNumber>, String)> = Vec::new();
+        for binding in self.store.bindings() {
+            let Action::OpenUrl { url } = &binding.action else {
+                continue;
+            };
+            let Some(host) = favicons::host_of(url) else {
+                continue;
+            };
+            // The colour or the picture the user chose is what the key shows,
+            // so the site's icon is neither needed nor requested.
+            let key = u16::from(binding.key.get());
+            let chosen = self
+                .profile_store
+                .active()
+                .and_then(|profile| profile.appearance_for(key));
+            if chosen.is_some() {
+                continue;
+            }
+            // The deck is showing a flat colour on this key, and the tile shows
+            // the same, so there is no face to fill.
+            let index = usize::from(binding.key.get().saturating_sub(1));
+            if self.slots.get(index) != Some(&Slot::Image) {
+                continue;
+            }
+            match wanted.iter_mut().find(|(_, known)| *known == host) {
+                Some((keys, _)) => keys.push(binding.key),
+                None => wanted.push((vec![binding.key], host)),
+            }
+        }
+
+        for (keys, host) in wanted {
+            if !self.icons.begin_site(&host) {
+                continue;
+            }
+            let config = ss550_engine::config_dir();
+            let site = host.clone();
+            cx.spawn(async move |this, cx| {
+                let picture = cx
+                    .background_spawn(async move { favicons::fetch(&site, &config) })
+                    .await;
+                let found = picture.is_some();
+                let _ = this.update(cx, |this, cx| {
+                    this.icons.finish_site(&host, picture.as_ref());
+                    if found {
+                        // Every key on this site now wears its mark, and the
+                        // deck receives the same picture on its next paint.
+                        for number in &keys {
+                            this.repaint_key(u16::from(number.get()));
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
     }
 
     /// The action bound to a key, if any.
@@ -1666,7 +1747,7 @@ impl Controller {
             }
             ui::palette::DropPlan::Assign(action) => {
                 self.selected_key = number;
-                self.bind_and_repaint(number, action);
+                self.bind_and_repaint(number, action, cx);
                 // The editor follows the key that just changed, so the form and
                 // the tile never disagree about what the key runs.
                 self.load_draft(number, window, cx);
@@ -1710,7 +1791,7 @@ impl Controller {
             }
         };
 
-        self.bind_and_repaint(self.selected_key, action);
+        self.bind_and_repaint(self.selected_key, action, cx);
     }
 
     /// Writes one binding and puts the key in step with it.
@@ -1720,7 +1801,7 @@ impl Controller {
     /// matters — a deck that refused the repaint keeps its own sentence, which
     /// names the picture that would not fit, instead of being overwritten by
     /// "saved".
-    fn bind_and_repaint(&mut self, number: KeyNumber, action: Action) {
+    fn bind_and_repaint(&mut self, number: KeyNumber, action: Action, cx: &mut Context<Self>) {
         match self.save_action(number, action) {
             Ok(saved) => {
                 // The key's face comes from what it now runs, so the icon of the
@@ -1729,6 +1810,10 @@ impl Controller {
                 if self.repaint_key(u16::from(number.get())) {
                     self.note = saved.into();
                 }
+                // A URL's site icon is fetched on the save that bound it: the
+                // key has just been painted with its initial, and the site's
+                // picture replaces it when the request answers.
+                self.fetch_site_icons(cx);
             }
             Err(message) => self.note = message.into(),
         }
