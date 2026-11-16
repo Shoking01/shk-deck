@@ -11,9 +11,10 @@ messages; the file below is a human summary, not a substitute for
 - A key bound to a program draws the application's own icon. A `.lnk` is resolved
   to its target before the shell is asked, because `SHGetFileInfoW` answers about
   the file it is handed and a shortcut's own icon carries Windows' arrow overlay.
-  The icon is composed at whole pixels with a margin rather than resampled, so a
-  32-pixel icon stays the icon the user recognises instead of a blur, and the
-  same pixels are encoded for the deck: window and key cannot disagree.
+  The icon comes from the shell's jumbo image list (256×256 on this machine) and
+  is scaled **down** into the tile with a smoothing filter, so it stays sharp at
+  the deck's resolution instead of being blown up from 32 pixels. The same pixels
+  are encoded for the deck: window and key cannot disagree.
 - A program with no readable icon, a URL and a keystroke fall back to the
   initial of what they run, drawn on the accent colour, so a key that runs
   something is never a blank tile. The initial is a five-by-seven bitmap drawn at
