@@ -55,7 +55,9 @@ impl Profile {
             bindings: ActionStore::new(),
             appearance: BTreeMap::new(),
             colors: BTreeMap::new(),
-            slot: String::new(),
+            // A profile with nothing on it is blank, not white: a key the user
+            // has not touched should look like a key with nothing on it.
+            slot: "blank".to_string(),
         }
     }
 
@@ -101,7 +103,7 @@ impl Profile {
 }
 
 fn default_slot() -> String {
-    "white".to_string()
+    "blank".to_string()
 }
 
 /// The profiles owned by a deck.
@@ -293,56 +295,20 @@ pub fn create_default_profiles() -> BTreeMap<String, Profile> {
         map.insert(profile.name.clone(), profile);
     };
 
-    // default: blank slate
-    add(Profile::new("default"));
-
-    // stream: common streaming actions
-    add(Profile::with_solids(
+    // Six profiles, all blank. The names are the feature — a deck can keep one
+    // set of bindings per situation — and the colours that used to come with
+    // them were a test fixture: a key with nothing on it should look like
+    // nothing, not like a red button nobody chose.
+    for name in [
+        "default",
         "stream",
-        "red",
-        &[
-            (1, [255, 0, 0]),   // Start/Stop Stream (red)
-            (2, [0, 255, 0]),   // Mute (green)
-            (3, [0, 0, 255]),   // Camera (blue)
-            (4, [255, 255, 0]), // Stop Recording (yellow)
-            (5, [255, 0, 255]), // Switch Scene (magenta)
-        ],
-    ));
-
-    // meetings: zoom/teamspeak/etc
-    add(Profile::with_solids(
         "meetings",
-        "white",
-        &[
-            (1, [255, 0, 0]),   // Leave Meeting (red)
-            (2, [0, 255, 0]),   // Mute (green)
-            (3, [0, 0, 255]),   // Webcam (blue)
-            (4, [255, 255, 0]), // Share Screen (yellow)
-        ],
-    ));
-
-    // gaming: switch game profile
-    add(Profile::with_solids(
         "gaming",
-        "red",
-        &[(1, [200, 0, 0]), (2, [0, 200, 0]), (3, [0, 0, 200])],
-    ));
-
-    // work: productivity tools
-    add(Profile::new("work"));
-
-    // entertainment: media controls
-    add(Profile::with_solids(
+        "work",
         "entertainment",
-        "white",
-        &[
-            (1, [200, 0, 0]),   // Play/Pause
-            (2, [0, 200, 0]),   // Next
-            (3, [0, 0, 200]),   // Previous
-            (4, [200, 200, 0]), // Stop
-            (5, [200, 0, 200]), // Mute
-        ],
-    ));
+    ] {
+        add(Profile::new(name));
+    }
 
     map
 }
@@ -396,24 +362,16 @@ mod tests {
     }
 
     #[test]
-    fn the_default_profiles_keep_their_colours_as_appearances() {
+    fn the_default_profiles_carry_no_colours() {
         let store = ProfileStore::new();
-        let stream = store
-            .profiles()
-            .into_iter()
-            .find(|profile| profile.name == "stream")
-            .expect("the stream profile");
-
-        assert_eq!(
-            stream.appearance_for(1),
-            Some(&Appearance::solid([255, 0, 0]))
-        );
-        assert_eq!(stream.key_color(1), Some([255, 0, 0]));
-        assert!(
-            stream.colors.is_empty(),
-            "the legacy map must stay empty: {}",
-            stream.colors.len()
-        );
+        for profile in store.profiles() {
+            assert!(
+                profile.appearance.is_empty(),
+                "{} must start blank, not painted",
+                profile.name
+            );
+            assert_eq!(profile.slot_name(), "blank", "{}", profile.name);
+        }
     }
 
     #[test]
@@ -510,10 +468,6 @@ mod tests {
 
         assert_eq!(stream.appearance_for(2), Some(&Appearance::image(name)));
         assert_eq!(stream.key_color(2), None, "an image is not a colour");
-        assert_eq!(
-            stream.appearance_for(1),
-            Some(&Appearance::solid([255, 0, 0]))
-        );
     }
 
     #[test]
@@ -522,12 +476,15 @@ mod tests {
 
         let mut store = ProfileStore::new();
         store.activate("stream").expect("activate");
-        store
+        let stream = store
             .profiles
             .get_mut("stream")
-            .expect("the stream profile")
+            .expect("the stream profile");
+        stream.appearance.insert(1, Appearance::solid([255, 0, 0]));
+        stream
             .appearance
-            .insert(3, Appearance::image(name));
+            .insert(5, Appearance::solid([255, 0, 255]));
+        stream.appearance.insert(3, Appearance::image(name));
 
         let (_, solids, _) = store.active_profile_colors().expect("the active profile");
         assert_eq!(solids.get(&1), Some(&[255, 0, 0]));

@@ -86,6 +86,9 @@ fn advance_clicks(clicks: u8) -> (u8, bool) {
 /// Colour the user can paint with.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Paint {
+    /// No light: the key is dark. This is the default, because a key with
+    /// nothing on it should look like nothing, not like a white button.
+    Blank,
     White,
     Red,
 }
@@ -94,6 +97,7 @@ impl Paint {
     /// The colour this paint puts on a key, as an image encoder sees it.
     fn rgb(self) -> [u8; 3] {
         match self {
+            Paint::Blank => [0x00, 0x00, 0x00],
             Paint::White => [0xE4, 0xE4, 0xE7],
             Paint::Red => [0xDC, 0x26, 0x26],
         }
@@ -114,6 +118,7 @@ impl Paint {
     /// The slot a key gets when it is painted with this colour.
     fn slot(self) -> Slot {
         match self {
+            Paint::Blank => Slot::Off,
             Paint::White => Slot::White,
             Paint::Red => Slot::Red,
         }
@@ -574,7 +579,7 @@ impl Controller {
                 None => "Looking for the deck…".into(),
             },
             page: Page::Deck,
-            paint: Paint::White,
+            paint: Paint::Blank,
             slots: Vec::new(),
             pressed: Vec::new(),
             brightness: deck_api::VALUE_MAX,
@@ -1067,14 +1072,16 @@ impl Controller {
         self.rebuild_previews();
     }
 
-    /// Determines the paint slot from a profile (uses per-key color override if available).
+    /// The fill a profile gives a key that names no appearance of its own.
+    ///
+    /// A profile with no slot, or one this build does not know, is **blank**:
+    /// the old fallback was white, which is how every untouched key ended up
+    /// glowing on a desk where nothing was bound to it.
     fn paint_from_profile(&self, profile: &ss550_engine::Profile, _key_count: usize) -> Slot {
-        // Default slot based on profile's slot name
-        let slot_name = profile.slot_name();
-        if slot_name == "red" {
-            Slot::Red
-        } else {
-            Slot::White
+        match profile.slot_name() {
+            "white" => Slot::White,
+            "red" => Slot::Red,
+            _ => Slot::Off,
         }
     }
 

@@ -326,6 +326,7 @@ fn brightness_row(current: u8, tokens: Tokens, cx: &mut Context<Controller>) -> 
 /// not change it.
 fn swatch(paint: Paint, active: bool, tokens: Tokens, cx: &mut Context<Controller>) -> AnyElement {
     let (fill, ink, label) = match paint {
+        Paint::Blank => (color(0x000000), color(0xffffff), "BLANK"),
         Paint::White => (color(0xe4e4e7), color(0x18181b), "WHITE"),
         Paint::Red => (color(0xdc2626), color(0xffffff), "RED"),
     };
@@ -852,6 +853,7 @@ fn inspector_card(
                         .flex_row()
                         .items_center()
                         .gap(px(8.))
+                        .child(swatch(Paint::Blank, slot == Slot::Off, tokens, cx))
                         .child(swatch(Paint::White, slot == Slot::White, tokens, cx))
                         .child(swatch(Paint::Red, slot == Slot::Red, tokens, cx))
                         .child(match can_clear {
