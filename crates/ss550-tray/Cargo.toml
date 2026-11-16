@@ -40,6 +40,11 @@ windows = { version = "0.62", features = [
     # The program's own icon: `SHGetFileInfoW` needs the shell, and its
     # `dwfileattributes` argument is a file-system flag type.
     "Win32_Storage_FileSystem",
+    # Fetching a site's icon: `InternetOpenW`, `InternetOpenUrlW`,
+    # `InternetReadFile` and the timeout options are WinINet's, and using the
+    # system HTTP client is what keeps this a one-file feature instead of a TLS
+    # stack.
+    "Win32_Networking_WinInet",
     # Resolving a shortcut to its target: `IShellLinkW` is loaded from the
     # `.lnk` through `IPersistFile`, which is a COM call, and `GetPath` fills a
     # `WIN32_FIND_DATAW` from the file-system module above.

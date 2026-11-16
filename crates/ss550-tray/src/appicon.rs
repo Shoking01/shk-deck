@@ -562,7 +562,10 @@ mod windows_tests {
             .or_else(|| std::env::current_exe().ok())
             .expect("some executable to ask about");
         let Some(icon) = program_icon(&target) else {
-            eprintln!("the shell answered no icon for {}; skipping", target.display());
+            eprintln!(
+                "the shell answered no icon for {}; skipping",
+                target.display()
+            );
             return;
         };
 

@@ -14,6 +14,10 @@
 //! resolved to its target first, so the picture is the application's and not the
 //! shortcut's.
 //!
+//! It also reads the icon a website publishes — [`favicon`] — because a key
+//! bound to a URL draws the site's own mark, and the HTTP client that can fetch
+//! it without a new dependency is the one Windows ships.
+//!
 //! It also lists the applications the Start Menu holds — [`apps`] — because
 //! finding them is the same shell work: hundreds of shortcuts, each one resolved
 //! to the program behind it.
@@ -25,8 +29,8 @@
 //! It is also the **one** place in the project that is allowed to call
 //! `unsafe` code: it owns the Win32 calls that hide and restore the native
 //! window, the icon that lives in the notification area, the `SendInput` call
-//! that delivers a keystroke, and the shell calls that read a program's icon and
-//! resolve a shortcut.
+//! that delivers a keystroke, the shell calls that read a program's icon and
+//! resolve a shortcut, and the WinINet calls that fetch a site's icon.
 //! Every other crate keeps `#![deny(unsafe_code)]`.
 //!
 //! # Example
@@ -54,6 +58,7 @@ pub mod appicon;
 pub mod apps;
 pub mod autostart;
 pub mod dialog;
+pub mod favicon;
 pub mod icon;
 pub mod install;
 mod keysend;
