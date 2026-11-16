@@ -8,12 +8,12 @@ messages; the file below is a human summary, not a substitute for
 ## Unreleased
 
 ### Added — a key shows what it runs, and is edited where it is
-- A key bound to a program draws that program's own icon. `ss550-tray` asks the
-  shell for it (`SHGetFileInfoW` with `SHGFI_ICON | SHGFI_LARGEICON`), so a
-  `.exe` and a `.lnk` to it answer with the same picture, and hands back straight
-  RGBA with the `HICON` destroyed before it returns. The window and the deck are
-  built from the same pixels: the tile draws the fitted frame and the key
-  receives the JPEG the same fit and quality ladder produced.
+- A key bound to a program draws the application's own icon. A `.lnk` is resolved
+  to its target before the shell is asked, because `SHGetFileInfoW` answers about
+  the file it is handed and a shortcut's own icon carries Windows' arrow overlay.
+  The icon is composed at whole pixels with a margin rather than resampled, so a
+  32-pixel icon stays the icon the user recognises instead of a blur, and the
+  same pixels are encoded for the deck: window and key cannot disagree.
 - A program with no readable icon, a URL and a keystroke fall back to the
   initial of what they run, drawn on the accent colour, so a key that runs
   something is never a blank tile. The initial is a five-by-seven bitmap drawn at
@@ -23,24 +23,17 @@ messages; the file below is a human summary, not a substitute for
   deck changes and never inside `render`. A rebind forgets the icon of the
   program that is gone and reads the one that replaced it; the colour row is
   still the explicit override, so a key the user painted keeps that colour.
+- `Run app` offers the applications installed on the PC — the Start Menu of this
+  user and of all users, links resolved and deduplicated — in a searchable list
+  with icons. Choosing one fills the path; typing one by hand still works. The
+  scan runs once, on the click that opens the list (102 applications in 185 ms on
+  this machine), and never during a frame.
 - The editor for a key now lives on the `Deck` page, in the column beside the
   grid: the three kinds, their fields, SAVE BINDING, CLEAR KEY and the colour
   row. A palette template dropped on a key opens it in place, first field
   focused, and no longer moves the window to the `Actions` page. The `Actions`
   page keeps the overview — key chips, the same editor, the bound list — because
   both places draw one widget and not two.
-
-### Added — a key shows the icon of what it runs
-- A key bound to `Run app` draws the program's own icon, taken from whatever the
-  shell shows for the path, which resolves an `.exe` and a `.lnk` alike. It is
-  composed at whole pixels with a margin rather than resampled, so a 32-pixel
-  icon stays the icon the user recognises instead of a blur, and the same pixels
-  are encoded for the deck: window and key cannot disagree. A URL or a keystroke
-  gets its initial on the accent colour, and a colour the user picked by hand
-  still wins over both.
-- The editor for a key now lives on the Deck page beside the key, in the same
-  widget the Actions overview uses. Dropping an action opens it in place instead
-  of moving the window to another page.
 
 ### Fixed — a JSON file saved with a byte-order mark read as corrupt
 - A BOM is legal UTF-8 and the tooling people edit these files with writes one.
