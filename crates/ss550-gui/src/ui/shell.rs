@@ -281,10 +281,11 @@ fn rail(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
         .border_color(tokens.border)
         .children(items)
         // The palette sits under the pages: the pages are where you go, the
-        // palette is what you drag onto a key from anywhere.
+        // palette is what you drag onto a key from anywhere. It takes the
+        // height the deck card leaves, so its recents list scrolls inside the
+        // rail instead of pushing the card off the bottom.
         .child(div().h(px(1.)).w_full().bg(tokens.border).my(px(8.)))
         .child(palette::actions_palette(controller, tokens))
-        .child(div().flex_1())
         .child(rail_deck_card(controller, tokens, cx))
 }
 

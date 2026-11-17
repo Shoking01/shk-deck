@@ -43,7 +43,7 @@ use gpui_kit::{
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use ss550_driver::{is_deck_present, LONG_CONNECT_TIMEOUT};
-use ss550_engine::{Action, ActionRunner, ActionStore, KeyNumber};
+use ss550_engine::{Action, ActionRunner, ActionStore, KeyNumber, Recents};
 use ss550_tray::{autostart, install, TrayCommand, TrayHost};
 
 use ui::Page;
@@ -340,6 +340,12 @@ struct Controller {
     store: ActionStore,
     /// Where this deck's bindings live, once a deck answered.
     store_path: Option<PathBuf>,
+    /// The actions this deck was last given, newest first.
+    ///
+    /// A convenience for the rail, not a second source of truth: the bindings
+    /// file still says what each key does. It is loaded with the bindings and
+    /// saved on the same click that adds an action to a key.
+    recents: Recents,
     /// Runs bound actions off the UI thread.
     runner: ActionRunner,
     /// The key the bindings panel is editing.
@@ -584,6 +590,7 @@ impl Controller {
             reconnect_at: Instant::now(),
             store,
             store_path,
+            recents: Recents::new(),
             runner: ActionRunner::with_key_sender(key_sender),
             selected_key: KeyNumber::default(),
             draft: DraftKind::Launch,
@@ -686,6 +693,12 @@ impl Controller {
 
         let path = ss550_engine::bindings_path_for(session.key());
         let (store, mut note) = self.load_store(&path, &session);
+        // Recents live beside the bindings and are read at the same moment:
+        // both belong to the deck that just answered, and a file that cannot be
+        // read starts empty with its own sentence, never a half-filled list.
+        let (recents, recents_note) =
+            load_recents_at(&ss550_engine::recents_path_for(session.key()));
+        note = join_notes(note, recents_note);
 
         // Load profiles for this deck
         let deck_key = session.key().to_string();
@@ -696,6 +709,7 @@ impl Controller {
 
         self.store = store;
         self.store_path = Some(path);
+        self.recents = recents;
         self.slots = vec![Slot::Off; key_count];
         self.pressed = vec![false; key_count];
         if !key_exists(&session, self.selected_key) {
@@ -728,9 +742,15 @@ impl Controller {
                     &deck_key,
                     &ss550_engine::config_dir(),
                 ) {
-                    note = Some(format!(
-                        "The bindings were read but not saved into the profile: {error}"
-                    ));
+                    // Joined, not replaced: a recents file that also failed to
+                    // read has its own sentence, and the status line is the only
+                    // place either one can be seen.
+                    note = join_notes(
+                        note,
+                        Some(format!(
+                            "The bindings were read but not saved into the profile: {error}"
+                        )),
+                    );
                 }
             }
         }
@@ -1802,13 +1822,26 @@ impl Controller {
     /// names the picture that would not fit, instead of being overwritten by
     /// "saved".
     fn bind_and_repaint(&mut self, number: KeyNumber, action: Action, cx: &mut Context<Self>) {
+        // Recording belongs to the moment an action is *added to a key*, not to
+        // the moment it runs. Every successful save below — the editor's SAVE
+        // BINDING and a finished action dropped from the palette — passes
+        // through here exactly once, so a template drop records only after the
+        // editor it opened is saved.
+        let recent = action.clone();
         match self.save_action(number, action) {
             Ok(saved) => {
+                let recents_error = self.record_recent(&recent);
                 // The key's face comes from what it now runs, so the icon of the
                 // new program is read before the repaint and never during it.
                 self.rebuild_icons();
                 if self.repaint_key(u16::from(number.get())) {
                     self.note = saved.into();
+                }
+                // A recents write that failed is a status line of its own: the
+                // binding was made, but the rail must not pretend it remembered
+                // something it did not.
+                if let Some(error) = recents_error {
+                    self.note = format!("{} {error}", self.note).into();
                 }
                 // A URL's site icon is fetched on the save that bound it: the
                 // key has just been painted with its initial, and the site's
@@ -1817,6 +1850,19 @@ impl Controller {
             }
             Err(message) => self.note = message.into(),
         }
+    }
+
+    /// Records an action that was just added to a key, and saves the list.
+    ///
+    /// Returns the sentence for the status line when the file could not be
+    /// written. The in-memory list keeps the action regardless: the binding it
+    /// belongs to was already made, and losing the reminder must not undo it.
+    fn record_recent(&mut self, action: &Action) -> Option<String> {
+        let path = {
+            let session = self.session.as_ref()?;
+            ss550_engine::recents_path_for(session.key())
+        };
+        record_recent_at(&mut self.recents, action, &path)
     }
 
     /// Stores, profiles and saves one binding, returning the sentence that says
@@ -2180,6 +2226,44 @@ fn binding_number(session: &session::DeckSession, index: usize) -> Option<KeyNum
     KeyNumber::new(u8::try_from(key + 1).ok()?).ok()
 }
 
+/// Reads one deck's recent actions, starting empty when the file cannot be read.
+///
+/// The engine refuses an unreadable, corrupt, newer or unvalidatable file whole,
+/// so there is no partial list to reconcile here: the window takes the sentence
+/// it is given, puts it on the status line, and shows an empty `RECENTS`.
+fn load_recents_at(path: &std::path::Path) -> (Recents, Option<String>) {
+    match Recents::load(path) {
+        Ok(recents) => (recents, None),
+        Err(error) => (Recents::new(), Some(error)),
+    }
+}
+
+/// Records one action and writes the list, returning the sentence on failure.
+///
+/// Split from the controller so the round trip — record, save, read back — is a
+/// test over a scratch file, with no window and no deck in the loop.
+fn record_recent_at(
+    recents: &mut Recents,
+    action: &Action,
+    path: &std::path::Path,
+) -> Option<String> {
+    recents.record(action);
+    recents.save(path).err()
+}
+
+/// Joins two status sentences, keeping whichever ones exist.
+///
+/// The bindings and the recents are read together and either can fail on its
+/// own. The window has one status line, so both failures survive it instead of
+/// one silently replacing the other.
+fn join_notes(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first} {second}")),
+        (Some(note), None) | (None, Some(note)) => Some(note),
+        (None, None) => None,
+    }
+}
+
 impl Render for Controller {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Measured from here to the finished tree: that is what the window
@@ -2321,7 +2405,9 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{advance_clicks, slot_for, Slot};
+    use super::{advance_clicks, join_notes, load_recents_at, record_recent_at, slot_for, Slot};
+    use ss550_engine::{Action, Recents};
+    use std::path::PathBuf;
 
     #[test]
     fn the_version_line_reveals_on_the_fifth_click() {
@@ -2334,6 +2420,136 @@ mod tests {
         let (next, due) = advance_clicks(clicks);
         assert!(due, "the fifth click must reveal");
         assert_eq!(next, 0, "the counter starts over after a reveal");
+    }
+
+    #[test]
+    fn a_missing_recents_file_is_empty_and_says_nothing() {
+        let dir = scratch("missing-recents");
+        let (recents, note) = load_recents_at(&dir.join("recents.json"));
+
+        assert!(recents.entries().is_empty());
+        assert!(
+            note.is_none(),
+            "a deck that has never been used is not an error"
+        );
+
+        cleanup(dir);
+    }
+
+    #[test]
+    fn a_recents_file_that_cannot_be_read_starts_empty_and_says_why() {
+        let dir = scratch("corrupt-recents");
+        let path = dir.join("recents.json");
+        std::fs::write(&path, "{ not json").expect("write the test's own file");
+
+        let (recents, note) = load_recents_at(&path);
+
+        assert!(
+            recents.entries().is_empty(),
+            "the list must not be half-read"
+        );
+        let note = note.expect("the file's refusal must reach the status line");
+        assert!(note.contains("is not valid"), "{note}");
+
+        cleanup(dir);
+    }
+
+    #[test]
+    fn an_action_the_build_cannot_use_starts_empty_and_says_why() {
+        let dir = scratch("invalid-action-recents");
+        let path = dir.join("recents.json");
+        std::fs::write(
+            &path,
+            r#"{"version": 1, "actions": [{"type": "open_url", "url": "example.com"}]}"#,
+        )
+        .expect("write the test's own file");
+
+        let (recents, note) = load_recents_at(&path);
+
+        assert!(
+            recents.entries().is_empty(),
+            "an entry this build cannot validate must not reach the rail"
+        );
+        let note = note.expect("the refusal must reach the status line");
+        assert!(note.contains("cannot use"), "{note}");
+
+        cleanup(dir);
+    }
+
+    #[test]
+    fn recording_an_action_saves_it_newest_first() {
+        let dir = scratch("recording-recents");
+        let path = dir.join("recents.json");
+        let mut recents = Recents::new();
+        let launch = Action::Launch {
+            program: PathBuf::from("C:\\Apps\\brave.exe"),
+            args: Vec::new(),
+        };
+        let keys = Action::keys("ctrl+shift+m").expect("a valid combination");
+
+        assert_eq!(record_recent_at(&mut recents, &launch, &path), None);
+        assert_eq!(record_recent_at(&mut recents, &keys, &path), None);
+
+        let (read_back, note) = load_recents_at(&path);
+        assert!(note.is_none(), "{note:?}");
+        assert_eq!(read_back.entries(), &[keys, launch]);
+
+        cleanup(dir);
+    }
+
+    #[test]
+    fn a_recents_write_that_fails_returns_a_sentence() {
+        let dir = scratch("unwritable-recents");
+        // A file where the folder should be: `save` cannot create the parent.
+        let blocker = dir.join("blocked");
+        std::fs::write(&blocker, "not a folder").expect("write the test's own file");
+        let path = blocker.join("recents.json");
+        let mut recents = Recents::new();
+        let action = Action::keys("ctrl+shift+m").expect("a valid combination");
+
+        let error = record_recent_at(&mut recents, &action, &path)
+            .expect("a write that cannot land must be reported");
+
+        assert!(error.contains("could not"), "{error}");
+        assert_eq!(
+            recents.entries(),
+            &[action],
+            "the in-memory list keeps what the binding added"
+        );
+
+        cleanup(dir);
+    }
+
+    #[test]
+    fn two_failures_share_the_one_status_line() {
+        assert_eq!(join_notes(None, None), None);
+        assert_eq!(
+            join_notes(Some("bindings".into()), None).as_deref(),
+            Some("bindings")
+        );
+        assert_eq!(
+            join_notes(None, Some("recents".into())).as_deref(),
+            Some("recents")
+        );
+        assert_eq!(
+            join_notes(Some("bindings".into()), Some("recents".into())).as_deref(),
+            Some("bindings recents")
+        );
+    }
+
+    /// A scratch folder under the system temp directory, unique per test.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ss550-gui-{}-{name}", std::process::id()));
+        // A previous run that panicked can leave a file behind; the test's own
+        // folder starts empty either way.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the test's scratch folder");
+        dir
+    }
+
+    /// Best-effort removal: a leftover folder is not a test failure.
+    fn cleanup(dir: PathBuf) {
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
