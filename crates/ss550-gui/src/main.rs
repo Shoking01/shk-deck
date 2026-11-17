@@ -30,7 +30,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -228,6 +228,110 @@ impl Link {
     }
 }
 
+/// The picture dialog, when one is open.
+///
+/// The system's dialog pumps a message loop of its own, so opening it from a
+/// click hands GPUI a second, re-entrant dispatch while the app is already
+/// mutably borrowed for that click — which is a panic, not a dialog. It is
+/// opened on a worker thread instead, and the answer comes back over this
+/// channel and is read on the poll, where a mutable borrow is the normal state
+/// of affairs.
+///
+/// One slot, deliberately: a click that arrives while a dialog is open is
+/// ignored rather than queued, so modal windows cannot stack, and the key it
+/// would have painted is still the key the open dialog is choosing for.
+#[derive(Default)]
+struct PictureDialog {
+    /// The channel of the dialog that is open, until its answer is read.
+    answer: Option<Receiver<Option<PathBuf>>>,
+}
+
+impl PictureDialog {
+    /// Takes the one slot a dialog can occupy, and answers the sender for it.
+    ///
+    /// `None` when a dialog is already open: that is the whole of the
+    /// one-at-a-time rule, stated where the slot is taken so no caller can
+    /// forget it.
+    fn claim(&mut self) -> Option<Sender<Option<PathBuf>>> {
+        if self.answer.is_some() {
+            return None;
+        }
+        let (sender, answer) = mpsc::channel();
+        self.answer = Some(answer);
+        Some(sender)
+    }
+
+    /// Gives the slot back when the worker could not be started.
+    ///
+    /// Without this a thread that fails to spawn would hold the slot forever
+    /// and the button would never answer again.
+    fn release(&mut self) {
+        self.answer = None;
+    }
+
+    /// Takes the answer, once the dialog has closed.
+    ///
+    /// `None` while the dialog is still up. `Some(None)` is a dialog that
+    /// answered "cancel" — and also a worker that died before answering, which
+    /// leaves the caller exactly the same nothing to do.
+    fn take_answer(&mut self) -> Option<Option<PathBuf>> {
+        let answer = self.answer.as_ref()?;
+        match answer.try_recv() {
+            Ok(answer) => {
+                self.answer = None;
+                Some(answer)
+            }
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                self.answer = None;
+                Some(None)
+            }
+        }
+    }
+}
+
+/// What one answer from the picture dialog amounts to.
+///
+/// Split out from the window so the two rules that matter — a click with no deck
+/// imports nothing, and a cancelled or refused file leaves the key alone — are
+/// testable without a screen, a deck or a dialog.
+#[derive(Debug)]
+enum PickOutcome {
+    /// The dialog was cancelled, or never opened: nothing was touched.
+    Cancelled,
+    /// No deck in front of the window, so there is no tile to fit a picture to.
+    NoDeck,
+    /// The file is in the library under this name, and the key should show it.
+    Imported(ss550_engine::AssetName),
+    /// The library refused the file; the sentence is the engine's own.
+    Refused(String),
+}
+
+/// Turns the dialog's answer into the next step, in the order the click means.
+///
+/// The deck is checked before the file is copied, not after: a picture imported
+/// for a key that cannot wear it is a file the user now has and did not ask for.
+///
+/// Nothing here assigns anything. Only [`PickOutcome::Imported`] leads to an
+/// assignment, which is what keeps the key, the profile and the library
+/// untouched on every other answer.
+fn apply_pick(
+    deck_present: bool,
+    library: &ss550_engine::AssetLibrary,
+    answer: Option<PathBuf>,
+) -> PickOutcome {
+    let Some(path) = answer else {
+        return PickOutcome::Cancelled;
+    };
+    if !deck_present {
+        return PickOutcome::NoDeck;
+    }
+    match pictures::import(library, &path) {
+        Ok(name) => PickOutcome::Imported(name),
+        Err(sentence) => PickOutcome::Refused(sentence),
+    }
+}
+
 /// How often the deck is polled for key presses.
 ///
 /// The poll is non-blocking, so this only costs a read that usually returns
@@ -408,6 +512,12 @@ struct Controller {
     profile_store: ss550_engine::ProfileStore,
     /// The pictures a key can show.
     assets: ss550_engine::AssetLibrary,
+    /// The picture dialog, while one is open.
+    ///
+    /// The dialog runs on a worker thread — see [`PictureDialog`] for why — and
+    /// this is the only place its answer can arrive. Its presence is also the
+    /// one-dialog-at-a-time rule.
+    picture: PictureDialog,
     /// The pictures the keys show, already fitted to the deck's tile size and
     /// swapped for the renderer.
     ///
@@ -550,6 +660,11 @@ impl Controller {
                     changed = true;
                 }
                 changed |= this.drain_action_failures();
+                // The picture dialog answered on its own thread; its answer is
+                // state like any other, so it is applied here, where a mutable
+                // borrow is normal. Importing and assigning happen on this
+                // line, never while the dialog runs.
+                changed |= this.collect_picture_pick();
                 changed |= this.handle_tray(cx);
                 // A site's icon is a request, so it is started here and its
                 // answer arrives as state: the frame never waits for a host.
@@ -616,6 +731,7 @@ impl Controller {
             blind,
             profile_store: ss550_engine::ProfileStore::new(),
             assets: ss550_engine::AssetLibrary::at_config_dir(&ss550_engine::config_dir()),
+            picture: PictureDialog::default(),
             previews: BTreeMap::new(),
             icons: icons::IconCache::new(),
             tiles: None,
@@ -1957,9 +2073,11 @@ impl Controller {
     ///    profile is saved, the one picture the key now shows is fitted to the
     ///    deck's tile, and the key is repainted on the deck.
     ///
-    /// The dialog blocks until it is answered, so this runs on the click and
-    /// never inside a frame. The decode in step 3 is the same one an assignment
-    /// has always done: one picture, before the next frame, not during it.
+    /// Only step 1 happens here, and only the request for it: the dialog is
+    /// opened on a worker thread, because it pumps a message loop of its own and
+    /// doing that inside a click re-enters GPUI while the app is already borrowed
+    /// for the click. Steps 2 and 3 run in [`Controller::collect_picture_pick`]
+    /// once the answer arrives, on the poll.
     fn choose_picture(&mut self) {
         // Checked before the dialog opens, not after: a file copied into the
         // library for a key that cannot wear it is a picture the user now has
@@ -1969,15 +2087,66 @@ impl Controller {
             return;
         }
 
-        let Some(path) = ss550_tray::dialog::open_image() else {
+        // One dialog at a time. A second click while one is open is ignored
+        // rather than queued: two modal windows over the same key is a question
+        // asked twice, and the second answer would overwrite the first.
+        let Some(answer) = self.picture.claim() else {
             return;
         };
 
-        match pictures::import(&self.assets, &path) {
-            Ok(name) => self.assign_asset(name),
+        // The owner handle is the only thing that crosses the thread boundary:
+        // no app, no window, no entity. The dialog is still modal to this
+        // window — Windows disables it while the dialog is up — even though the
+        // dialog runs on another thread.
+        let owner = self.native;
+        let spawned = std::thread::Builder::new()
+            .name("picture-dialog".to_string())
+            .spawn(move || {
+                // Blocks here, on a thread with no borrow of the app, until the
+                // user answers. Sending the answer is the last thing this
+                // thread does.
+                let _ = answer.send(ss550_tray::dialog::open_image_owned_by(owner));
+            });
+
+        if let Err(error) = spawned {
+            // The slot goes back, or the button would never answer again.
+            self.picture.release();
+            self.note = format!("The picture dialog could not start: {error}").into();
+        }
+    }
+
+    /// Applies the picture dialog's answer, once the dialog has closed.
+    ///
+    /// Called on the poll, beside the connection results and the site icons:
+    /// the dialog answered on another thread, so its answer is state, and state
+    /// is applied where a mutable borrow is the normal state of affairs. This is
+    /// the step that imports the file and assigns it, and it only runs when
+    /// there is an answer to apply.
+    fn collect_picture_pick(&mut self) -> bool {
+        let Some(answer) = self.picture.take_answer() else {
+            return false;
+        };
+
+        match apply_pick(self.session.is_some(), &self.assets, answer) {
+            // The user said no, or the dialog never opened. Nothing is said
+            // about it and nothing is touched: they already know.
+            PickOutcome::Cancelled => false,
+            // The deck left while the dialog was up, so there is nothing to fit
+            // the picture to. The file is not imported at all.
+            PickOutcome::NoDeck => {
+                self.note = NO_DECK_PICTURE.into();
+                true
+            }
+            PickOutcome::Imported(name) => {
+                self.assign_asset(name);
+                true
+            }
             // The engine's own sentence, unchanged: it names the refusal and the
             // file, and restating it here would be a second copy of the rules.
-            Err(sentence) => self.note = sentence.into(),
+            PickOutcome::Refused(sentence) => {
+                self.note = sentence.into();
+                true
+            }
         }
     }
 
@@ -2007,8 +2176,8 @@ impl Controller {
         self.save_profile();
         // The key now shows a picture, so the tile needs it fitted before the
         // next frame rather than during it. Only the pictures the profile names
-        // are rebuilt: the one that was just chosen is decoded here, on the
-        // click, and nothing else is.
+        // are rebuilt: the one that was just chosen is decoded here, on the poll
+        // that read the dialog's answer, and nothing else is.
         self.rebuild_previews();
         if self.repaint_key(key) {
             self.note = format!("Key #{key} now shows {name}.").into();
@@ -2405,8 +2574,11 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{advance_clicks, join_notes, load_recents_at, record_recent_at, slot_for, Slot};
-    use ss550_engine::{Action, Recents};
+    use super::{
+        advance_clicks, apply_pick, join_notes, load_recents_at, record_recent_at, slot_for,
+        PickOutcome, PictureDialog, Slot,
+    };
+    use ss550_engine::{Action, AssetLibrary, Recents};
     use std::path::PathBuf;
 
     #[test]
@@ -2420,6 +2592,120 @@ mod tests {
         let (next, due) = advance_clicks(clicks);
         assert!(due, "the fifth click must reveal");
         assert_eq!(next, 0, "the counter starts over after a reveal");
+    }
+
+    #[test]
+    fn one_picture_dialog_at_a_time() {
+        let mut dialog = PictureDialog::default();
+        let first = dialog.claim().expect("the first click opens a dialog");
+
+        // A second click while the dialog is up is ignored, not queued: two
+        // modal windows over one key is the same question asked twice.
+        assert!(
+            dialog.claim().is_none(),
+            "a second click must not open a second dialog"
+        );
+
+        // The dialog answers; the slot frees and the next click may open one.
+        let _ = first.send(None);
+        assert_eq!(dialog.take_answer(), Some(None), "a cancel is an answer");
+        assert!(
+            dialog.claim().is_some(),
+            "once the dialog closed, the button answers again"
+        );
+    }
+
+    #[test]
+    fn a_worker_that_dies_frees_the_slot() {
+        // A dialog thread that never answers — it panicked, or the dialog could
+        // not open at all — must not leave the button dead forever.
+        let mut dialog = PictureDialog::default();
+        let worker = dialog.claim().expect("a dialog slot");
+        drop(worker);
+
+        assert_eq!(
+            dialog.take_answer(),
+            Some(None),
+            "a worker that went away is a cancel, not a dialog that is still open"
+        );
+        assert!(dialog.claim().is_some(), "and the slot is free again");
+    }
+
+    #[test]
+    fn a_cancelled_dialog_imports_nothing_and_leaves_the_key_alone() {
+        let dir = scratch("pick-cancel");
+        let source = dir.join("live.png");
+        std::fs::write(&source, b"pretend this is a png").expect("a file the dialog could answer");
+        let library = AssetLibrary::new(dir.join("assets"));
+
+        // Cancel: the dialog answered with nothing, so there is nothing to
+        // import and nothing to assign. The key keeps the face it had.
+        let outcome = apply_pick(true, &library, None);
+
+        assert!(
+            matches!(outcome, PickOutcome::Cancelled),
+            "a cancel is not an import"
+        );
+        assert!(
+            !library.root().join("live.png").exists(),
+            "a cancel copies nothing into the library"
+        );
+
+        // The same file, named, does import — so the check above is about the
+        // cancel, not about a file the library would have refused anyway.
+        assert!(
+            matches!(
+                apply_pick(true, &library, Some(source)),
+                PickOutcome::Imported(_)
+            ),
+            "the same file is importable when it is actually chosen"
+        );
+
+        cleanup(dir);
+    }
+
+    #[test]
+    fn an_import_error_keeps_the_key_and_says_why() {
+        let dir = scratch("pick-refused");
+        let source = dir.join("notes.txt");
+        std::fs::write(&source, b"not a picture").expect("a file to refuse");
+        let library = AssetLibrary::new(dir.join("assets"));
+
+        match apply_pick(true, &library, Some(source)) {
+            PickOutcome::Refused(sentence) => {
+                assert!(sentence.contains("notes.txt"), "{sentence}");
+            }
+            other => panic!("a text file must be refused, not {other:?}"),
+        }
+        assert!(
+            !library.root().join("notes.txt").exists(),
+            "a refusal copies nothing"
+        );
+
+        cleanup(dir);
+    }
+
+    #[test]
+    fn a_click_with_no_deck_copies_nothing() {
+        // The dialog can outlive the deck: the answer is applied after the
+        // click, so the deck is checked again before the file is copied.
+        let dir = scratch("pick-no-deck");
+        let source = dir.join("live.png");
+        std::fs::write(&source, b"pretend this is a png").expect("a file the dialog could answer");
+        let library = AssetLibrary::new(dir.join("assets"));
+
+        let outcome = apply_pick(false, &library, Some(source));
+
+        assert!(
+            matches!(outcome, PickOutcome::NoDeck),
+            "a picture is fitted to the deck's tile, so no deck means no import"
+        );
+        assert!(
+            !library.root().join("live.png").exists(),
+            "a click with no deck copies nothing into the library"
+        );
+
+        cleanup(dir);
     }
 
     #[test]
