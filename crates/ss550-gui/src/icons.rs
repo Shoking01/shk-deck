@@ -55,6 +55,7 @@ use ss550_engine::Action;
 
 use crate::favicons;
 use crate::render;
+use crate::titlestyle::{TitleFace, TitlePosition, TitleSize, TitleStyle};
 
 /// The side of a glyph when there is no deck to state an image size.
 const GLYPH_SIDE: u32 = 32;
@@ -163,6 +164,12 @@ pub(crate) struct IconCache {
     /// Built by [`IconCache::prepare`] on the change that added the title, and
     /// read by [`IconCache::tile`] at paint time — never composed in a frame.
     titled: BTreeMap<(Base, String), Art>,
+    /// The style every titled variant is composed with.
+    ///
+    /// Held here so the two paths that compose a title — a key's picture and a
+    /// flat colour — cannot use two different styles, and so a style change can
+    /// throw away the variants it invalidated in one place.
+    style: TitleStyle,
 }
 
 impl IconCache {
@@ -175,7 +182,23 @@ impl IconCache {
             pending: BTreeSet::new(),
             glyphs: BTreeMap::new(),
             titled: BTreeMap::new(),
+            style: TitleStyle::default(),
         }
+    }
+
+    /// Sets the style the next composed title uses.
+    ///
+    /// Every variant already built carries the old size, position and face, so
+    /// they are dropped rather than served: the caller rebuilds them through
+    /// [`IconCache::prepare`] on the same change, which is the path a title
+    /// change already takes. Until then a titled key falls back to its untitled
+    /// picture, never to words in the wrong place.
+    pub(crate) fn set_style(&mut self, style: TitleStyle) {
+        if self.style == style {
+            return;
+        }
+        self.style = style;
+        self.titled.clear();
     }
 
     /// Builds every picture `actions` needs, and forgets the rest.
@@ -301,7 +324,7 @@ impl IconCache {
             let Some(picture) = self.base_picture(&key.0) else {
                 continue;
             };
-            let composed = compose_title(picture, &key.1, Placement::Band);
+            let composed = compose_title(picture, &key.1, self.style);
             self.titled.insert(key, art(self.spec, &composed, "title"));
         }
     }
@@ -406,7 +429,7 @@ impl IconCache {
         let width = u32::from(spec.width()).max(1);
         let height = u32::from(spec.height()).max(1);
         let picture = RgbaImage::from_pixel(width, height, Rgba([rgb[0], rgb[1], rgb[2], 0xff]));
-        let composed = compose_title(&picture, title, Placement::Block);
+        let composed = compose_title(&picture, title, self.style);
         render::render_rgba(spec, "title", &composed).ok()
     }
 
@@ -781,9 +804,6 @@ fn glyph_image(letter: char, side: u32) -> RgbaImage {
 /// The ink a title is drawn in.
 const TITLE_INK: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
 
-/// How far one character advances: five dots and one of gap.
-const TITLE_ADVANCE: u32 = 6;
-
 /// The gap between two lines of a title, in dots.
 const TITLE_LINE_GAP: u32 = 2;
 
@@ -794,20 +814,11 @@ const TITLE_LINE_GAP: u32 = 2;
 /// can show.
 const TITLE_MAX_LINES: usize = 3;
 
-/// The share of a tile's height the bottom band takes, in percent.
+/// The share of a tile's height a band takes, in percent.
 const BAND_PERCENT: u32 = 38;
 
-/// The share of a tile's height a block on a flat colour may use, in percent.
+/// The share of a tile's height a centred block may use, in percent.
 const BLOCK_PERCENT: u32 = 80;
-
-/// Where a title sits on the tile.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Placement {
-    /// A dark band along the bottom, over a picture or an initial.
-    Band,
-    /// A dark block in the middle, on a key that has no picture of its own.
-    Block,
-}
 
 /// A title broken into lines, with the whole-pixel scale it is drawn at.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -823,52 +834,60 @@ pub(crate) struct TitleLayout {
 /// The words go into the pixels the encoder receives, not into the window's
 /// layout: the deck has no text, only a JPEG. The scale is whole pixels and the
 /// layout is resolved first, so the same string always lands on the same dots.
-pub(crate) fn compose_title(picture: &RgbaImage, title: &str, placement: Placement) -> RgbaImage {
+/// The style decides how large the type may get, which face draws it and which
+/// edge of the tile it hugs; the fit still wins over the size, so a long title
+/// is never cut off to honour a larger one.
+pub(crate) fn compose_title(picture: &RgbaImage, title: &str, style: TitleStyle) -> RgbaImage {
     let mut picture = picture.clone();
     let (width, height) = picture.dimensions();
-    let Some(layout) = layout_title(title, width, height, placement) else {
+    let Some(layout) = layout_title(title, width, height, style) else {
         return picture;
     };
 
+    let (_, dot_height) = style.face.dots();
     let scale = layout.scale;
-    let line_height = 7 * scale;
+    let line_height = dot_height * scale;
     let gap = TITLE_LINE_GAP * scale;
     let count = layout.lines.len() as u32;
     let block_height = count * line_height + count.saturating_sub(1) * gap;
     let block_width = layout
         .lines
         .iter()
-        .map(|line| line_width(line, scale))
+        .map(|line| line_width(line, scale, style.face))
         .max()
         .unwrap_or(0);
 
     let pad = (height / 32).max(1);
-    let top = match placement {
+    let top = match style.position {
+        // A band at the top starts at the edge, with the same padding the
+        // bottom band leaves under the words.
+        TitlePosition::Top => pad,
+        // A block is centred, because it sits on the words and not on a picture.
+        TitlePosition::Middle => height.saturating_sub(block_height) / 2,
         // A band is bottom-aligned, the way a caption sits on a picture.
-        Placement::Band => height.saturating_sub(block_height + pad),
-        // A block is centred, because there is no picture to sit under.
-        Placement::Block => height.saturating_sub(block_height) / 2,
+        TitlePosition::Bottom => height.saturating_sub(block_height + pad),
     };
     let left = width.saturating_sub(block_width) / 2;
 
-    // The scrim: a band across the bottom over a picture, a block just behind
-    // the words on a flat colour. White on a white key is unreadable, which is
-    // why a colour tile gets one too.
-    let (x0, y0, x1, y1) = match placement {
-        Placement::Band => (0, top.saturating_sub(pad), width, height),
-        Placement::Block => (
+    // The scrim: a band across the tile at an edge, a block just behind the
+    // words in the middle. White on a white key is unreadable, which is why a
+    // flat colour gets one too.
+    let (x0, y0, x1, y1) = match style.position {
+        TitlePosition::Top => (0, 0, width, (top + block_height + pad).min(height)),
+        TitlePosition::Middle => (
             left.saturating_sub(pad),
             top.saturating_sub(pad),
             (left + block_width + pad).min(width),
             (top + block_height + pad).min(height),
         ),
+        TitlePosition::Bottom => (0, top.saturating_sub(pad), width, height),
     };
     darken(&mut picture, x0, y0, x1, y1);
 
     let mut y = top;
     for line in &layout.lines {
-        let x = width.saturating_sub(line_width(line, scale)) / 2;
-        draw_line(&mut picture, line, x, y, scale);
+        let x = width.saturating_sub(line_width(line, scale, style.face)) / 2;
+        draw_line(&mut picture, line, x, y, scale, style.face);
         y += line_height + gap;
     }
     picture
@@ -878,9 +897,11 @@ pub(crate) fn compose_title(picture: &RgbaImage, title: &str, placement: Placeme
 ///
 /// The largest whole scale at which the whole string fits — at most three
 /// lines — wins, so a short title gets big type and the cap lands on three
-/// small lines. A title that fits at no scale keeps what fits at one dot a
-/// pixel and drops the rest: shrinking below that is a blur, not a title.
-fn layout_title(title: &str, width: u32, height: u32, placement: Placement) -> Option<TitleLayout> {
+/// small lines. The style's size is a ceiling on that fit, never a floor: a
+/// title too long for the size still steps down rather than being cut. A title
+/// that fits at no scale keeps what fits at one dot a pixel and drops the rest:
+/// shrinking below that is a blur, not a title.
+fn layout_title(title: &str, width: u32, height: u32, style: TitleStyle) -> Option<TitleLayout> {
     if width == 0 || height == 0 {
         return None;
     }
@@ -895,20 +916,35 @@ fn layout_title(title: &str, width: u32, height: u32, placement: Placement) -> O
         return None;
     }
 
-    let margin = (width / 16).max(1);
-    let box_width = width.saturating_sub(margin * 2).max(1);
-    let box_height = match placement {
-        Placement::Band => (height * BAND_PERCENT / 100).max(1),
-        Placement::Block => (height * BLOCK_PERCENT / 100).max(1),
+    let (dot_width, dot_height) = style.face.dots();
+    let advance = dot_width + 1;
+    // A centred block may use more of a flat colour; a band hugs an edge and
+    // leaves the picture above or below it. The size decides whether that share
+    // grows, which is the only way a large title gets more room to be large.
+    let base_box = match style.position {
+        TitlePosition::Middle => BLOCK_PERCENT,
+        TitlePosition::Top | TitlePosition::Bottom => BAND_PERCENT,
     };
+    let box_percent = style.size.box_percent(base_box);
+    // Large drops the side margin as well, so the words may use the full width
+    // before the fit gives up a step. The other sizes keep the inset that keeps
+    // a word off the tile's rounded edge.
+    let margin = match style.size {
+        TitleSize::Large => 0,
+        TitleSize::Small | TitleSize::Medium => (width / 16).max(1),
+    };
+    let box_width = width.saturating_sub(margin * 2).max(1);
+    let box_height = (height * box_percent / 100).max(1);
 
-    let ceiling = (height / 8).max(1);
+    let ceiling = (height / (dot_height + TITLE_LINE_GAP))
+        .max(1)
+        .min(style.size.scale_cap());
     for scale in (1..=ceiling).rev() {
-        let line_height = (7 + TITLE_LINE_GAP) * scale;
+        let line_height = (dot_height + TITLE_LINE_GAP) * scale;
         if line_height > box_height {
             continue;
         }
-        let per_line = (box_width / (TITLE_ADVANCE * scale)).max(1) as usize;
+        let per_line = (box_width / (advance * scale)).max(1) as usize;
         let capacity = (box_height / line_height).max(1) as usize;
         let (lines, dropped) = wrap_title(&text, per_line, capacity.min(TITLE_MAX_LINES));
         if !dropped && !lines.is_empty() {
@@ -919,8 +955,8 @@ fn layout_title(title: &str, width: u32, height: u32, placement: Placement) -> O
     // One dot a pixel is the floor. What does not fit is dropped rather than
     // drawn smaller, and the height is still respected: a band that holds one
     // line gets one line.
-    let line_height = 7 + TITLE_LINE_GAP;
-    let per_line = (box_width / TITLE_ADVANCE).max(1) as usize;
+    let line_height = dot_height + TITLE_LINE_GAP;
+    let per_line = (box_width / advance).max(1) as usize;
     let capacity = (box_height / line_height).max(1) as usize;
     let (lines, _) = wrap_title(&text, per_line, capacity.min(TITLE_MAX_LINES));
     (!lines.is_empty()).then_some(TitleLayout { lines, scale: 1 })
@@ -980,6 +1016,19 @@ fn wrap_title(text: &[char], per_line: usize, max_lines: usize) -> (Vec<Vec<char
     (lines, dropped)
 }
 
+/// The dots one character of a title draws, in the face's own rows.
+///
+/// The standard face is [`text_rows`]; the compact one is [`compact_rows`].
+/// Both answer the same array shape — seven slots, of which the compact face
+/// uses the first five — so the drawing code has one loop and the two faces
+/// cannot drift into two renderers.
+fn face_rows(face: TitleFace, character: char) -> [u8; 7] {
+    match face {
+        TitleFace::Standard => text_rows(character),
+        TitleFace::Compact => compact_rows(character),
+    }
+}
+
 /// The dots one character of a title draws, five columns by seven rows.
 ///
 /// The letters and digits are [`glyph_rows`] — one table for the initial and the
@@ -997,6 +1046,99 @@ fn text_rows(character: char) -> [u8; 7] {
     }
     glyph_rows(character)
 }
+
+/// The same characters in the compact face, three columns by five rows.
+///
+/// The table is a face, not a fallback: every letter, digit and punctuation mark
+/// the standard face knows is here, at fewer dots, so choosing Compact changes
+/// the size of the words and never their spelling.
+fn compact_rows(character: char) -> [u8; 7] {
+    let glyph = if character == ' ' {
+        [0; 5]
+    } else {
+        let character = character.to_ascii_uppercase();
+        COMPACT
+            .iter()
+            .find(|(known, _)| *known == character)
+            .map(|(_, rows)| *rows)
+            .unwrap_or(COMPACT_FALLBACK)
+    };
+    let mut rows = [0; 7];
+    rows[..5].copy_from_slice(&glyph);
+    rows
+}
+
+/// What a compact glyph with no mark of its own draws: the `#` of the face.
+const COMPACT_FALLBACK: [u8; 5] = [0b101, 0b111, 0b101, 0b111, 0b101];
+
+/// A three-by-five bitmap per character, most significant bit leftmost.
+///
+/// The punctuation a title is likely to use is here for the same reason it is
+/// in [`TITLE_PUNCTUATION`]: a name, not a paragraph. A character missing from
+/// this table would be drawn as the fallback, so the coverage test holds the two
+/// faces to the same set.
+const COMPACT: &[(char, [u8; 5])] = &[
+    ('A', [0b010, 0b101, 0b111, 0b101, 0b101]),
+    ('B', [0b110, 0b101, 0b110, 0b101, 0b110]),
+    ('C', [0b011, 0b100, 0b100, 0b100, 0b011]),
+    ('D', [0b110, 0b101, 0b101, 0b101, 0b110]),
+    ('E', [0b111, 0b100, 0b110, 0b100, 0b111]),
+    ('F', [0b111, 0b100, 0b110, 0b100, 0b100]),
+    ('G', [0b011, 0b100, 0b101, 0b101, 0b011]),
+    ('H', [0b101, 0b101, 0b111, 0b101, 0b101]),
+    ('I', [0b111, 0b010, 0b010, 0b010, 0b111]),
+    ('J', [0b001, 0b001, 0b001, 0b101, 0b010]),
+    ('K', [0b101, 0b101, 0b110, 0b101, 0b101]),
+    ('L', [0b100, 0b100, 0b100, 0b100, 0b111]),
+    ('M', [0b101, 0b111, 0b111, 0b101, 0b101]),
+    ('N', [0b110, 0b101, 0b101, 0b101, 0b101]),
+    ('O', [0b010, 0b101, 0b101, 0b101, 0b010]),
+    ('P', [0b110, 0b101, 0b110, 0b100, 0b100]),
+    ('Q', [0b010, 0b101, 0b101, 0b110, 0b011]),
+    ('R', [0b110, 0b101, 0b110, 0b101, 0b101]),
+    ('S', [0b011, 0b100, 0b010, 0b001, 0b110]),
+    ('T', [0b111, 0b010, 0b010, 0b010, 0b010]),
+    ('U', [0b101, 0b101, 0b101, 0b101, 0b111]),
+    ('V', [0b101, 0b101, 0b101, 0b101, 0b010]),
+    ('W', [0b101, 0b101, 0b111, 0b111, 0b101]),
+    ('X', [0b101, 0b101, 0b010, 0b101, 0b101]),
+    ('Y', [0b101, 0b101, 0b010, 0b010, 0b010]),
+    ('Z', [0b111, 0b001, 0b010, 0b100, 0b111]),
+    ('0', [0b111, 0b101, 0b101, 0b101, 0b111]),
+    ('1', [0b010, 0b110, 0b010, 0b010, 0b111]),
+    ('2', [0b110, 0b001, 0b010, 0b100, 0b111]),
+    ('3', [0b110, 0b001, 0b010, 0b001, 0b110]),
+    ('4', [0b101, 0b101, 0b111, 0b001, 0b001]),
+    ('5', [0b111, 0b100, 0b110, 0b001, 0b110]),
+    ('6', [0b011, 0b100, 0b111, 0b101, 0b111]),
+    ('7', [0b111, 0b001, 0b010, 0b010, 0b010]),
+    ('8', [0b111, 0b101, 0b111, 0b101, 0b111]),
+    ('9', [0b111, 0b101, 0b111, 0b001, 0b110]),
+    ('#', COMPACT_FALLBACK),
+    ('.', [0b000, 0b000, 0b000, 0b000, 0b010]),
+    (',', [0b000, 0b000, 0b000, 0b010, 0b100]),
+    ('-', [0b000, 0b000, 0b111, 0b000, 0b000]),
+    ('_', [0b000, 0b000, 0b000, 0b000, 0b111]),
+    (':', [0b000, 0b010, 0b000, 0b010, 0b000]),
+    (';', [0b000, 0b010, 0b000, 0b010, 0b100]),
+    ('!', [0b010, 0b010, 0b010, 0b000, 0b010]),
+    ('?', [0b110, 0b001, 0b010, 0b000, 0b010]),
+    ('/', [0b001, 0b001, 0b010, 0b100, 0b100]),
+    ('\\', [0b100, 0b100, 0b010, 0b001, 0b001]),
+    ('\'', [0b010, 0b010, 0b000, 0b000, 0b000]),
+    ('"', [0b101, 0b101, 0b000, 0b000, 0b000]),
+    ('(', [0b001, 0b010, 0b010, 0b010, 0b001]),
+    (')', [0b100, 0b010, 0b010, 0b010, 0b100]),
+    ('[', [0b011, 0b010, 0b010, 0b010, 0b011]),
+    (']', [0b110, 0b010, 0b010, 0b010, 0b110]),
+    ('+', [0b000, 0b010, 0b111, 0b010, 0b000]),
+    ('=', [0b000, 0b111, 0b000, 0b111, 0b000]),
+    ('&', [0b010, 0b101, 0b010, 0b101, 0b011]),
+    ('*', [0b000, 0b101, 0b010, 0b101, 0b000]),
+    ('%', [0b101, 0b001, 0b010, 0b100, 0b101]),
+    ('·', [0b000, 0b000, 0b010, 0b000, 0b000]),
+    ('•', [0b000, 0b011, 0b011, 0b000, 0b000]),
+];
 
 /// The punctuation a title is likely to use, five dots wide.
 ///
@@ -1029,18 +1171,29 @@ const TITLE_PUNCTUATION: &[(char, [u8; 7])] = &[
 ];
 
 /// The width of one laid-out line, in pixels: the dots, less the last gap.
-fn line_width(line: &[char], scale: u32) -> u32 {
-    (line.len() as u32 * TITLE_ADVANCE * scale).saturating_sub(scale)
+fn line_width(line: &[char], scale: u32, face: TitleFace) -> u32 {
+    let advance = face.dots().0 + 1;
+    (line.len() as u32 * advance * scale).saturating_sub(scale)
 }
 
 /// Draws one line of dots at `scale`, starting at `left`.
-fn draw_line(picture: &mut RgbaImage, line: &[char], left: u32, top: u32, scale: u32) {
+fn draw_line(
+    picture: &mut RgbaImage,
+    line: &[char],
+    left: u32,
+    top: u32,
+    scale: u32,
+    face: TitleFace,
+) {
     let (width, height) = picture.dimensions();
+    let (dot_width, dot_height) = face.dots();
+    let advance = dot_width + 1;
     let mut x = left;
     for &character in line {
-        for (row, bits) in text_rows(character).iter().enumerate() {
-            for column in 0..5 {
-                if (bits >> (4 - column)) & 1 == 0 {
+        let rows = face_rows(face, character);
+        for (row, bits) in rows.iter().enumerate().take(dot_height as usize) {
+            for column in 0..dot_width {
+                if (bits >> (dot_width - 1 - column)) & 1 == 0 {
                     continue;
                 }
                 for dy in 0..scale {
@@ -1054,7 +1207,7 @@ fn draw_line(picture: &mut RgbaImage, line: &[char], left: u32, top: u32, scale:
                 }
             }
         }
-        x += TITLE_ADVANCE * scale;
+        x += advance * scale;
     }
 }
 
@@ -1140,9 +1293,10 @@ const GLYPHS: &[(char, [u8; 7])] = &[
 mod tests {
     use super::{
         compose_icon, compose_title, first_letter, glyph_image, glyph_letter, glyph_rows, host_of,
-        last_segment, layout_title, text_rows, Artwork, KeyArt, Placement, TitleLayout, GLYPHS,
+        last_segment, layout_title, text_rows, Artwork, KeyArt, TitleLayout, COMPACT, GLYPHS,
         GLYPH_ACCENT, TITLE_MAX_LINES, TITLE_PUNCTUATION,
     };
+    use crate::titlestyle::{TitleFace, TitlePosition, TitleSize, TitleStyle};
     use ss550_engine::Action;
     use std::path::PathBuf;
 
@@ -1324,7 +1478,7 @@ mod tests {
     fn a_title_wraps_at_the_tiles_width() {
         // A 72-pixel tile leaves ten characters a line at the floor scale, so
         // two words that would make eleven break at the space between them.
-        let layout = layout_title("stream deck", 72, 72, Placement::Band).expect("a title");
+        let layout = layout_title("stream deck", 72, 72, TitleStyle::default()).expect("a title");
 
         assert_eq!(layout.lines.len(), 2, "{:?}", layout.lines);
         assert_eq!(layout.lines[0].iter().collect::<String>(), "STREAM");
@@ -1340,8 +1494,13 @@ mod tests {
         // A 32-pixel tile holds one line of four characters in its band. The
         // rest is dropped, never shrunk: a half-dot letter is a blur, and the
         // key still has to read as words.
-        let layout = layout_title("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123", 32, 32, Placement::Band)
-            .expect("a title");
+        let layout = layout_title(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123",
+            32,
+            32,
+            TitleStyle::default(),
+        )
+        .expect("a title");
 
         assert_eq!(layout.lines.len(), 1, "{:?}", layout.lines);
         assert_eq!(layout.lines[0].len(), 4);
@@ -1353,7 +1512,7 @@ mod tests {
     fn a_single_character_is_one_line_at_a_legible_scale() {
         // One letter needs no wrapping, so the largest whole scale that fits
         // the band is chosen instead of the floor.
-        let layout = layout_title("X", 72, 72, Placement::Band).expect("a title");
+        let layout = layout_title("X", 72, 72, TitleStyle::default()).expect("a title");
 
         assert_eq!(layout.lines.len(), 1);
         assert_eq!(layout.lines[0], vec!['X']);
@@ -1372,7 +1531,7 @@ mod tests {
         let title: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123".to_string();
         assert_eq!(title.chars().count(), ss550_engine::MAX_TITLE_CHARS);
 
-        let layout = layout_title(&title, 72, 72, Placement::Band).expect("a title");
+        let layout = layout_title(&title, 72, 72, TitleStyle::default()).expect("a title");
 
         assert_eq!(layout.lines.len(), TITLE_MAX_LINES);
         assert_eq!(joined(&layout), title, "the whole cap is drawn");
@@ -1384,7 +1543,7 @@ mod tests {
         // The words are pixels, not a layout: the JPEG the deck receives is the
         // only place a title can live.
         let base = glyph_image('O', 72);
-        let composed = compose_title(&base, "live", Placement::Band);
+        let composed = compose_title(&base, "live", TitleStyle::default());
 
         assert_eq!(composed.dimensions(), base.dimensions());
         // The scrim is the bottom band; the picture above it is untouched.
@@ -1420,7 +1579,14 @@ mod tests {
         // A flat colour has no picture to darken, so the words stand on their
         // own block in the middle — and a white key is still readable.
         let base = image::RgbaImage::from_pixel(72, 72, image::Rgba([0xE4, 0xE4, 0xE7, 0xFF]));
-        let composed = compose_title(&base, "MUTE", Placement::Block);
+        let composed = compose_title(
+            &base,
+            "MUTE",
+            TitleStyle {
+                position: TitlePosition::Middle,
+                ..TitleStyle::default()
+            },
+        );
 
         // The corners are the colour, untouched: the block is centred.
         assert_eq!(composed.get_pixel(0, 0).0, [0xE4, 0xE4, 0xE7, 0xFF]);
@@ -1438,10 +1604,10 @@ mod tests {
 
     #[test]
     fn a_title_that_is_only_spaces_is_no_title_at_all() {
-        assert!(layout_title("   ", 72, 72, Placement::Band).is_none());
-        assert!(layout_title("", 72, 72, Placement::Band).is_none());
+        assert!(layout_title("   ", 72, 72, TitleStyle::default()).is_none());
+        assert!(layout_title("", 72, 72, TitleStyle::default()).is_none());
         // A control character is not drawn, and does not become a row of `#`.
-        let layout = layout_title("a\tb", 72, 72, Placement::Band).expect("a title");
+        let layout = layout_title("a\tb", 72, 72, TitleStyle::default()).expect("a title");
         assert_eq!(joined(&layout), "AB");
     }
 
@@ -1472,6 +1638,177 @@ mod tests {
                 "{character} is an empty glyph"
             );
         }
+    }
+
+    #[test]
+    fn every_compact_glyph_is_a_three_by_five_bitmap() {
+        for (character, rows) in COMPACT {
+            for row in rows {
+                assert_eq!(
+                    *row & 0b1111_1000,
+                    0,
+                    "{character} has a bit outside the compact face's width"
+                );
+            }
+            assert!(
+                rows.iter().any(|row| *row != 0),
+                "{character} is an empty glyph"
+            );
+        }
+    }
+
+    #[test]
+    fn the_compact_face_covers_every_character_the_standard_one_does() {
+        // A character in one table and not the other is a face that changes a
+        // title's spelling, so the two sets are held equal.
+        let compact = |character: char| COMPACT.iter().any(|(known, _)| *known == character);
+        for (character, _) in GLYPHS {
+            assert!(compact(*character), "{character} is missing from COMPACT");
+        }
+        for (character, _) in TITLE_PUNCTUATION {
+            assert!(compact(*character), "{character} is missing from COMPACT");
+        }
+        let standard = |character: char| {
+            GLYPHS.iter().any(|(known, _)| *known == character)
+                || TITLE_PUNCTUATION
+                    .iter()
+                    .any(|(known, _)| *known == character)
+        };
+        for (character, _) in COMPACT {
+            assert!(
+                standard(*character),
+                "{character} is in COMPACT and not in the standard face"
+            );
+        }
+    }
+
+    #[test]
+    fn the_compact_face_fits_more_of_a_long_title() {
+        // The engine's cap, on the same tile: the smaller face needs two lines
+        // where the standard one needs three, and neither drops a character.
+        let title = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123";
+        let standard =
+            layout_title(title, 72, 72, TitleStyle::default()).expect("a standard title");
+        let compact = layout_title(
+            title,
+            72,
+            72,
+            TitleStyle {
+                face: TitleFace::Compact,
+                ..TitleStyle::default()
+            },
+        )
+        .expect("a compact title");
+
+        assert_eq!(joined(&standard), title);
+        assert_eq!(joined(&compact), title);
+        assert!(
+            compact.lines.len() < standard.lines.len(),
+            "compact {} lines, standard {}",
+            compact.lines.len(),
+            standard.lines.len()
+        );
+    }
+
+    #[test]
+    fn a_size_is_a_cap_on_the_fit_and_never_a_floor() {
+        // The automatic fit is already the largest the tile holds, so Small can
+        // only step down and Large can only step up where the box has headroom.
+        let small = TitleStyle {
+            size: TitleSize::Small,
+            ..TitleStyle::default()
+        };
+        let large = TitleStyle {
+            size: TitleSize::Large,
+            ..TitleStyle::default()
+        };
+        let fits = |title: &str, style| layout_title(title, 72, 72, style).expect("a title").scale;
+
+        // On the deck's 72-pixel tile the ladder is one dot step per size for a
+        // three-letter title: the automatic fit already fills the band.
+        assert_eq!(fits("OBS", TitleStyle::default()), 3);
+        assert_eq!(fits("OBS", small), 2);
+        assert_eq!(fits("OBS", large), 4);
+
+        // A title that already sits at two dots a pixel is not made smaller by
+        // Small — the fit is the floor — but Large still finds it one step.
+        assert_eq!(fits("MUTE", TitleStyle::default()), 2);
+        assert_eq!(fits("MUTE", small), 2);
+        assert_eq!(fits("MUTE", large), 3);
+
+        // A title too long for the size still steps down: the size never cuts
+        // words off to honour itself.
+        let long = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123";
+        assert_eq!(
+            joined(&layout_title(long, 72, 72, large).expect("a title")),
+            long
+        );
+    }
+
+    #[test]
+    fn the_position_moves_the_scrim_and_the_words_with_it() {
+        // The top of a default tile is the picture; the top position darkens it
+        // and leaves the bottom alone.
+        let base = glyph_image('O', 72);
+        let top = compose_title(
+            &base,
+            "live",
+            TitleStyle {
+                position: TitlePosition::Top,
+                ..TitleStyle::default()
+            },
+        );
+        let bottom = compose_title(&base, "live", TitleStyle::default());
+
+        assert_eq!(
+            bottom.get_pixel(0, 0).0,
+            base.get_pixel(0, 0).0,
+            "the default band leaves the top edge alone"
+        );
+        assert_ne!(
+            top.get_pixel(0, 0).0,
+            base.get_pixel(0, 0).0,
+            "the top band darkens the top edge"
+        );
+        assert_eq!(
+            top.get_pixel(0, 71).0,
+            base.get_pixel(0, 71).0,
+            "the top band leaves the bottom edge alone"
+        );
+        assert_ne!(
+            bottom.get_pixel(0, 71).0,
+            base.get_pixel(0, 71).0,
+            "the default band darkens the bottom edge"
+        );
+    }
+
+    #[test]
+    fn a_style_change_changes_a_titled_keys_payload() {
+        // The style is part of the picture, like the words: the cache must not
+        // serve a variant composed under the old style.
+        let spec = deck_api::ImageSpec::new(72, 72, 4_096, deck_api::ImageFormat::Jpeg);
+        let action = Action::keys("ctrl+m").expect("a valid combination");
+        let mut cache = super::IconCache::new();
+        let with_title = titled(&action, "mute");
+
+        cache.prepare(Some(spec), &[with_title], None);
+        let bottom = cache
+            .tile(&action, Some("mute"))
+            .expect("a titled initial is a picture")
+            .to_vec();
+
+        cache.set_style(TitleStyle {
+            position: TitlePosition::Top,
+            ..TitleStyle::default()
+        });
+        cache.prepare(Some(spec), &[with_title], None);
+        let top = cache
+            .tile(&action, Some("mute"))
+            .expect("the recomposed variant")
+            .to_vec();
+
+        assert_ne!(bottom, top, "the style reaches the encoder");
+        assert!(top.len() <= spec.max_bytes());
     }
 
     #[test]

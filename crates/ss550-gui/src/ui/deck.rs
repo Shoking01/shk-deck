@@ -18,6 +18,7 @@ use super::{
     FONT_APP, FONT_CAPTION, FONT_MICRO, FONT_SUB, FONT_TITLE, RADIUS_MD, RADIUS_SM,
 };
 use crate::icons::{glyph_letter, Artwork};
+use crate::titlestyle::{TitlePosition, TitleStyle};
 use crate::{Controller, Paint, Slot};
 
 /// The width a grid of keys may grow into before the tiles stop growing. Tiles
@@ -436,12 +437,16 @@ fn grid(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
     };
 
     let size = tile_size(columns);
+    // The style is copied out before the rows are built: a tile reads the same
+    // value the deck's picture was composed with, and nothing in the frame has
+    // to reach back into the controller for it.
+    let style = controller.title_style;
     let built: Vec<Div> = rows
         .into_iter()
         .map(|cells| {
             let tiles: Vec<AnyElement> = cells
                 .into_iter()
-                .map(|cell| tile(cell, size, accepts, tokens, cx))
+                .map(|cell| tile(cell, size, accepts, style, tokens, cx))
                 .collect();
             div()
                 .flex()
@@ -470,6 +475,7 @@ fn tile(
     cell: Cell,
     size: f32,
     accepts: bool,
+    style: TitleStyle,
     tokens: Tokens,
     cx: &mut Context<Controller>,
 ) -> AnyElement {
@@ -525,7 +531,7 @@ fn tile(
                         ),
                 )
                 .child(badge(format!("#{}", index + 1)))
-                .child(scrim(cell.title.clone(), binding));
+                .child(scrim(cell.title.clone(), binding, size, style));
         }
         Face::Glyph => {
             // No icon to draw: the initial of what the key runs, on the accent
@@ -575,7 +581,7 @@ fn tile(
                         .child(letter),
                 })
                 .child(badge(format!("#{}", index + 1)))
-                .child(scrim(cell.title.clone(), binding));
+                .child(scrim(cell.title.clone(), binding, size, style));
         }
         Face::Swatch(slot) => {
             let (_, ink) = slot_colours(slot, tokens);
@@ -595,44 +601,54 @@ fn tile(
                 .gap(px(4.))
                 .p(px(8.))
                 .border_color(ring)
-                .text_color(ink)
-                .child(
-                    div()
-                        .text_size(px(FONT_SUB))
-                        .font_weight(FontWeight::BOLD)
-                        .child(format!("#{}", index + 1)),
-                )
-                .child(
-                    div()
-                        .text_size(px(FONT_MICRO))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(ink.opacity(0.7))
-                        .child(appearance_label(slot)),
-                );
-            // The title is a line of its own between the colour and what the
-            // key runs; a key with no title keeps exactly the three lines it
-            // had.
-            if let Some(title) = cell.title.clone() {
-                tile = tile.child(
-                    div()
-                        .w_full()
-                        .min_w(px(0.))
-                        .truncate()
-                        .text_size(px(FONT_MICRO))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(ink)
-                        .child(title),
-                );
-            }
-            tile = tile.child(
+                .text_color(ink);
+
+            // The lines of a flat-colour tile. The title is one of them, and the
+            // position decides where: first, between the colour and what the key
+            // runs, or last. A key with no title keeps exactly the three lines
+            // it had, whatever the position says.
+            let mut lines: Vec<AnyElement> = Vec::new();
+            lines.push(
+                div()
+                    .text_size(px(FONT_SUB))
+                    .font_weight(FontWeight::BOLD)
+                    .child(format!("#{}", index + 1))
+                    .into_any_element(),
+            );
+            lines.push(
+                div()
+                    .text_size(px(FONT_MICRO))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(ink.opacity(0.7))
+                    .child(appearance_label(slot))
+                    .into_any_element(),
+            );
+            lines.push(
                 div()
                     .w_full()
                     .min_w(px(0.))
                     .truncate()
                     .text_size(px(FONT_MICRO))
                     .text_color(ink.opacity(0.75))
-                    .child(binding),
+                    .child(binding)
+                    .into_any_element(),
             );
+            if let Some(title) = cell.title.clone() {
+                let at = match style.position {
+                    TitlePosition::Top => 0,
+                    TitlePosition::Middle => 2,
+                    // After the action, which is the last line pushed.
+                    TitlePosition::Bottom => lines.len(),
+                };
+                lines.insert(
+                    at,
+                    one_line(title, style.window_font(size), ink)
+                        .w_full()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .into_any_element(),
+                );
+            }
+            tile = tile.children(lines);
         }
     }
 
@@ -682,21 +698,24 @@ fn badge(text: String) -> Div {
         .child(text)
 }
 
-/// The band along the bottom of a picture tile: what the key says and runs.
+/// The band over a picture tile: what the key says and runs.
 ///
 /// The title goes above the action, in the same band: the two are one caption
 /// on the picture, and a key with no title keeps exactly the one line it had.
-fn scrim(title: Option<SharedString>, binding: SharedString) -> Div {
+/// The style's position decides which edge the band hugs — the same three
+/// places the deck's own band is drawn in, from the same value — so the window
+/// and the key on the desk never disagree about where a title sits.
+fn scrim(title: Option<SharedString>, binding: SharedString, size: f32, style: TitleStyle) -> Div {
     let band = div()
-        .absolute()
-        .bottom(px(0.))
-        .left(px(0.))
         .w_full()
         .px(px(8.))
         .py(px(4.))
         .bg(color(0x000000).opacity(0.55));
 
-    match title {
+    // The title's label is the style's size, computed from the style and the
+    // tile alone: a frame never measures a string to decide how big it is.
+    let title_size = style.window_font(size);
+    let band = match title {
         Some(title) => band
             .flex()
             .flex_col()
@@ -704,11 +723,28 @@ fn scrim(title: Option<SharedString>, binding: SharedString) -> Div {
             .child(
                 // Micro-label weight, like every other label in the window:
                 // the title is chrome over the picture, not part of it.
-                one_line(title, FONT_MICRO, color(0xffffff)).font_weight(FontWeight::SEMIBOLD),
+                one_line(title, title_size, color(0xffffff)).font_weight(FontWeight::SEMIBOLD),
             )
             .child(one_line(binding, FONT_MICRO, color(0xffffff))),
         None => band.child(one_line(binding, FONT_MICRO, color(0xffffff))),
+    };
+
+    // A full-tile layer with the band at one end: the flex anchor moves the
+    // band without anyone having to know how tall it turned out.
+    let layer = div()
+        .absolute()
+        .top(px(0.))
+        .left(px(0.))
+        .w_full()
+        .h_full()
+        .flex()
+        .flex_col();
+    match style.position {
+        TitlePosition::Top => layer.justify_start(),
+        TitlePosition::Middle => layer.justify_center(),
+        TitlePosition::Bottom => layer.justify_end(),
     }
+    .child(band)
 }
 
 /// The buttons that act on the whole deck, below the grid.

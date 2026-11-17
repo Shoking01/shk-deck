@@ -355,7 +355,7 @@ pub(crate) fn path_line(
 
 #[cfg(test)]
 mod tests {
-    use super::{color, shorten, Tokens, PAGE_PAD, RADIUS_MD, RADIUS_PILL, RADIUS_SM};
+    use super::{color, shorten, Tokens, FONT_MICRO, PAGE_PAD, RADIUS_MD, RADIUS_PILL, RADIUS_SM};
     use gpui_kit::component::{Theme, ThemeMode};
 
     #[test]
@@ -419,6 +419,18 @@ mod tests {
             Tokens::new(&light_theme).accent,
             accent,
             "the accent does not change with the theme"
+        );
+    }
+
+    #[test]
+    fn a_title_in_the_window_is_the_same_step_as_every_other_caption() {
+        // The title style scales the window's label from one base size. If that
+        // base drifted from the micro-label, a title would be the only text in
+        // the window that is not on the type scale.
+        assert_eq!(
+            crate::titlestyle::WINDOW_BASE,
+            FONT_MICRO,
+            "the title's base size is the window's micro-label"
         );
     }
 }

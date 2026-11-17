@@ -56,6 +56,7 @@ mod pictures;
 mod provider;
 mod render;
 mod session;
+mod titlestyle;
 mod ui;
 
 /// Clicks on the version line that open the diagnostic log.
@@ -217,6 +218,7 @@ fn asset_tile(
     spec: Option<ImageSpec>,
     name: &ss550_engine::AssetName,
     title: Option<&str>,
+    style: titlestyle::TitleStyle,
 ) -> Result<Vec<u8>, String> {
     let source = assets.read(name).map_err(|error| error.to_string())?;
 
@@ -234,7 +236,7 @@ fn asset_tile(
         return Err("the deck has not stated an image size yet".to_string());
     };
     let fitted = render::fitted_tile(spec, name, &source).map_err(|error| error.to_string())?;
-    let composed = icons::compose_title(&fitted, title, icons::Placement::Band);
+    let composed = icons::compose_title(&fitted, title, style);
     render::render_rgba(spec, &name.to_string(), &composed).map_err(|error| error.to_string())
 }
 
@@ -611,6 +613,12 @@ struct Controller {
     /// Tiles already rendered for this deck's image size, so switching profile
     /// back and forth does not re-decode every picture.
     tiles: Option<render::TileCache>,
+    /// How every title looks, in the window and in the deck's picture.
+    ///
+    /// Loaded once at start and changed only from the settings page, where the
+    /// change repaints every titled key through the same path a title edit uses.
+    /// The icon cache is told the same style, so the two cannot disagree.
+    title_style: titlestyle::TitleStyle,
 }
 
 impl Controller {
@@ -767,6 +775,11 @@ impl Controller {
         })
         .detach();
 
+        // The title style is read once, before the first key is painted. A file
+        // that exists and cannot be read replaces the startup note: the user's
+        // choice was lost, and that matters more than "looking for the deck".
+        let (title_style, title_style_note) = titlestyle::load();
+
         let mut controller = Self {
             session: None,
             link: if blind {
@@ -774,11 +787,13 @@ impl Controller {
             } else {
                 Link::Connecting
             },
-            note: match worker_error {
-                Some(err) => err.into(),
-                None if blind => "Started without looking for a deck.".into(),
-                None => "Looking for the deck…".into(),
-            },
+            note: title_style_note
+                .unwrap_or_else(|| match worker_error {
+                    Some(err) => err,
+                    None if blind => "Started without looking for a deck.".into(),
+                    None => "Looking for the deck…".into(),
+                })
+                .into(),
             page: Page::Deck,
             paint: Paint::Blank,
             slots: Vec::new(),
@@ -825,7 +840,13 @@ impl Controller {
             previews: BTreeMap::new(),
             icons: icons::IconCache::new(),
             tiles: None,
+            title_style,
         };
+
+        // The cache composes the deck's titled variants, so it is told the style
+        // before the first key is planned — never after, or the first paint of a
+        // titled key would use the default.
+        controller.icons.set_style(title_style);
 
         // Look for the deck right away: its settle window starts the moment
         // it appears, so every second counts.
@@ -1064,6 +1085,10 @@ impl Controller {
     /// yet, but the key it is about to become will show exactly this picture.
     fn rebuild_icons(&mut self) {
         let spec = self.session.as_ref().map(session::DeckSession::image_spec);
+        // The style is the cache's, not a parameter of every call: a variant
+        // composed under another size or anchor is dropped here, before the
+        // rebuild, so no key can be served words from the old style.
+        self.icons.set_style(self.title_style);
         // The title is per key and the icon is per program, so the cache is
         // told both: a key that says something gets a picture with the words in
         // it. A key with no binding has no action to wear a title, and its
@@ -1476,6 +1501,7 @@ impl Controller {
                         spec,
                         name,
                         title.as_deref(),
+                        self.title_style,
                     );
                     match tile {
                         Ok(jpeg) => Self::paint_over_black(session, index, &jpeg),
@@ -2079,6 +2105,52 @@ impl Controller {
         self.save_profile();
     }
 
+    /// Applies a title style to every titled key, and keeps it for the next start.
+    ///
+    /// This is the one path a style change takes. It repaints through the same
+    /// steps a title edit does — the icon cache drops the variants it composed
+    /// under the old style, `rebuild_icons` recomposes them, and each titled key
+    /// is repainted — so nothing here runs inside a frame and the window and the
+    /// deck are redrawn from one style. A key with no title is not touched: its
+    /// payload cannot change.
+    fn set_title_style(&mut self, style: titlestyle::TitleStyle, cx: &mut Context<Self>) {
+        if self.title_style == style {
+            return;
+        }
+        self.title_style = style;
+
+        // The file is written first, so the sentence the status line carries is
+        // about the save and not about the paint. A write that failed leaves the
+        // style in effect for this run: the user asked for it, and losing the
+        // choice at the next start is the lesser harm.
+        let saved = titlestyle::save(&style);
+        self.note = match &saved {
+            Ok(()) => format!("Titles are {} now.", style.summary()).into(),
+            Err(error) => {
+                format!("Titles are {} now, but not saved: {error}", style.summary()).into()
+            }
+        };
+
+        // Recompose every titled variant, then repaint the keys that carry one.
+        self.rebuild_icons();
+        let titled: Vec<u16> = match self.profile_store.active() {
+            Some(profile) => {
+                let count = self
+                    .session
+                    .as_ref()
+                    .map_or(0, session::DeckSession::key_count);
+                (1..=count as u16)
+                    .filter(|key| profile.title(*key).is_some())
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        for key in titled {
+            self.repaint_key(key);
+        }
+        cx.notify();
+    }
+
     /// Writes one binding and puts the key in step with it.
     ///
     /// This is the only path a binding takes: the editor and a drop both end
@@ -2450,6 +2522,7 @@ impl Controller {
                     spec,
                     name,
                     title.as_deref(),
+                    self.title_style,
                 );
                 match tile {
                     Ok(jpeg) => Self::paint_over_black(session, index, &jpeg),
