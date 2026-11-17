@@ -303,6 +303,9 @@ enum PickOutcome {
     NoDeck,
     /// The file is in the library under this name, and the key should show it.
     Imported(ss550_engine::AssetName),
+    /// The library already had a file under this name; the key should show that
+    /// one, and the window says nothing was copied.
+    AlreadyHeld(ss550_engine::AssetName),
     /// The library refused the file; the sentence is the engine's own.
     Refused(String),
 }
@@ -327,7 +330,8 @@ fn apply_pick(
         return PickOutcome::NoDeck;
     }
     match pictures::import(library, &path) {
-        Ok(name) => PickOutcome::Imported(name),
+        Ok(pictures::Imported::New(name)) => PickOutcome::Imported(name),
+        Ok(pictures::Imported::AlreadyHeld(name)) => PickOutcome::AlreadyHeld(name),
         Err(sentence) => PickOutcome::Refused(sentence),
     }
 }
@@ -2139,6 +2143,14 @@ impl Controller {
             }
             PickOutcome::Imported(name) => {
                 self.assign_asset(name);
+                true
+            }
+            // The picture was already in the library, which is the normal case
+            // once the folder holds thousands of files: show it and say that
+            // nothing was copied, so the message is not read as a refusal.
+            PickOutcome::AlreadyHeld(name) => {
+                self.assign_asset(name);
+                self.note = "That picture was already in the library; the key now shows it.".into();
                 true
             }
             // The engine's own sentence, unchanged: it names the refusal and the
