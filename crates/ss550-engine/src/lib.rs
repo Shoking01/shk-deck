@@ -15,6 +15,8 @@
 //!   up to the deck's own key count. The engine keeps no upper bound; whether a
 //!   key exists is the geometry's answer.
 //! - [`ActionStore`] — the bindings, saved as JSON and loaded on startup.
+//! - [`Recents`] — the actions used recently on one deck, a convenience the
+//!   window can offer again. The bindings remain the source of truth.
 //! - [`ActionRunner`] — runs actions on a background thread so the UI never
 //!   waits for one.
 //!
@@ -47,16 +49,18 @@ pub mod error;
 pub mod key;
 pub mod keys;
 pub mod profiles;
+pub mod recents;
 pub mod runner;
 pub mod store;
 
 pub use action::{validate_url, Action};
 pub use appearance::Appearance;
 pub use assets::{Asset, AssetError, AssetLibrary, AssetName, ASSETS_DIR};
-pub use config::{bindings_path, bindings_path_for, config_dir};
+pub use config::{bindings_path, bindings_path_for, config_dir, recents_path_for};
 pub use error::{ActionError, KeyComboError};
 pub use key::KeyNumber;
 pub use keys::{BaseKey, KeyCombo, Modifier, NamedKey, MAX_SUMMARY_CHARS};
 pub use profiles::{create_default_profiles, Profile, ProfileStore};
+pub use recents::{Recents, MAX_RECENTS};
 pub use runner::{command_for, run_action, ActionRunner, CommandSpec, KeySender};
 pub use store::{ActionStore, Binding, STORE_VERSION};

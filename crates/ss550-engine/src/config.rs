@@ -29,6 +29,9 @@ const BINDINGS_DIR: &str = "bindings";
 /// The folder each deck's profiles live in.
 const PROFILES_DIR: &str = "profiles";
 
+/// The folder each deck's recently used actions live in.
+const RECENTS_DIR: &str = "recents";
+
 /// The configuration directory for this app.
 pub fn config_dir() -> PathBuf {
     if let Some(dir) = env::var_os(CONFIG_DIR_ENV) {
@@ -91,6 +94,34 @@ pub fn bindings_path_for(deck_key: &str) -> PathBuf {
 /// ```
 pub fn profiles_path_for(deck_key: &str) -> PathBuf {
     profiles_path_in(&config_dir(), deck_key)
+}
+
+/// Where one deck's recently used actions live.
+///
+/// Built like the bindings and the profiles, for the same reason: the deck key
+/// contains characters a file name cannot hold. Keeping the helper here means
+/// the window cannot invent a second spelling of the same key and scatter one
+/// deck's data across two files.
+///
+/// # Example
+///
+/// ```
+/// let first = ss550_engine::config::recents_path_for("deck one");
+/// let second = ss550_engine::config::recents_path_for("deck two");
+/// assert_ne!(first, second);
+/// assert_eq!(
+///     first.parent().and_then(|path| path.file_name()),
+///     Some(std::ffi::OsStr::new("recents"))
+/// );
+/// ```
+pub fn recents_path_for(deck_key: &str) -> PathBuf {
+    recents_path_in(&config_dir(), deck_key)
+}
+
+/// [`recents_path_for`], inside an explicit root.
+pub(crate) fn recents_path_in(root: &Path, deck_key: &str) -> PathBuf {
+    root.join(RECENTS_DIR)
+        .join(format!("{}.json", file_stem(deck_key)))
 }
 
 /// [`profiles_path_for`], inside an explicit root.
