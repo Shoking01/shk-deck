@@ -119,6 +119,28 @@ pub enum ActionError {
     ProfileError(String),
 }
 
+/// Why a key title was refused.
+///
+/// A title is text the user typed, so a refusal is a sentence they can act on:
+/// each variant says what a title must be instead. It is a type of its own
+/// rather than a variant of [`ActionError`] because a title belongs to the
+/// profile, not to an action, and because a text rule is worth comparing: the
+/// tests assert the exact variant, while `ActionError` carries I/O and serde
+/// errors that cannot be compared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum TitleError {
+    /// The title is longer than a key can show.
+    #[error("a title can hold at most {max} characters")]
+    TooLong {
+        /// The cap, in characters.
+        max: usize,
+    },
+
+    /// The title holds a character that is not printable text.
+    #[error("a title cannot contain control characters")]
+    ControlCharacter,
+}
+
 /// Why a keystroke combination was refused.
 ///
 /// Every variant names the part that is wrong, not just that something is:

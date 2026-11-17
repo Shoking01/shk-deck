@@ -18,8 +18,17 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::appearance::Appearance;
-use crate::error::ActionError;
+use crate::error::{ActionError, TitleError};
 use crate::store::ActionStore;
+
+/// The longest title a key accepts, in characters.
+///
+/// A key is about 108 pixels on a side and the window draws a title with a 5x7
+/// bitmap font at roughly six to eight characters per line. Thirty characters
+/// is at most five short lines: it fits the tile at that size without shrinking
+/// the font, and it stays readable at a glance. The cap counts characters, not
+/// bytes, so an accented title is not penalised for its encoding.
+pub const MAX_TITLE_CHARS: usize = 30;
 
 /// A profile with its name, bindings and what each key shows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +42,14 @@ pub struct Profile {
     /// truth for a key's appearance.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub appearance: BTreeMap<u16, Appearance>,
+    /// The short text each key shows, by the key number the UI uses.
+    ///
+    /// Written only through [`Profile::set_title`], which trims and bounds the
+    /// text, so every value here is already valid. The map is skipped when it
+    /// is empty and defaults to empty when it is absent, so a profile file
+    /// written before titles existed loads unchanged.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    titles: BTreeMap<u16, String>,
     /// The flat colour a key shows when [`Profile::appearance`] has no entry
     /// for it.
     ///
@@ -54,6 +71,7 @@ impl Profile {
             name: name.into(),
             bindings: ActionStore::new(),
             appearance: BTreeMap::new(),
+            titles: BTreeMap::new(),
             colors: BTreeMap::new(),
             // A profile with nothing on it is blank, not white: a key the user
             // has not touched should look like a key with nothing on it.
@@ -70,9 +88,53 @@ impl Profile {
                 .iter()
                 .map(|(key, rgb)| (*key, Appearance::solid(*rgb)))
                 .collect(),
+            titles: BTreeMap::new(),
             colors: BTreeMap::new(),
             slot: slot.to_string(),
         }
+    }
+
+    /// The short text this key shows, when the profile gives it one.
+    pub fn title(&self, key: u16) -> Option<&str> {
+        self.titles.get(&key).map(String::as_str)
+    }
+
+    /// Sets the short text this key shows, or removes it.
+    ///
+    /// The title is trimmed before it is stored. An empty or whitespace-only
+    /// title removes the entry instead of storing an empty string, so "no
+    /// title" has exactly one representation. A title longer than
+    /// [`MAX_TITLE_CHARS`] characters, or holding a control character, is
+    /// refused with a [`TitleError`] and leaves the key as it was.
+    ///
+    /// Titles are independent of [`Profile::appearance`] and of the bindings:
+    /// setting one changes neither.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TitleError::TooLong`] when the trimmed title is longer than
+    /// [`MAX_TITLE_CHARS`], and [`TitleError::ControlCharacter`] when it holds
+    /// a character the drawing cannot show.
+    pub fn set_title(&mut self, key: u16, title: Option<&str>) -> Result<(), TitleError> {
+        let Some(title) = title else {
+            self.titles.remove(&key);
+            return Ok(());
+        };
+        let title = title.trim();
+        if title.is_empty() {
+            self.titles.remove(&key);
+            return Ok(());
+        }
+        if title.chars().count() > MAX_TITLE_CHARS {
+            return Err(TitleError::TooLong {
+                max: MAX_TITLE_CHARS,
+            });
+        }
+        if title.chars().any(char::is_control) {
+            return Err(TitleError::ControlCharacter);
+        }
+        self.titles.insert(key, title.to_string());
+        Ok(())
     }
 
     /// The colour for a key that shows one, or `None` when it shows an image or
@@ -229,6 +291,28 @@ impl ProfileStore {
     /// what "no artwork" means. A store with no active profile is an error
     /// rather than a silent no-op: a caller that just assigned a picture needs
     /// to know the file it believes it wrote was not written.
+    /// Sets or removes the title of a key on the active profile.
+    ///
+    /// `None` (or a title that trims to nothing) removes it. The validation is
+    /// [`Profile::set_title`]'s, so the store cannot accept a title the profile
+    /// would refuse.
+    ///
+    /// # Errors
+    ///
+    /// The profile's own [`TitleError`], or a message naming the missing active
+    /// profile.
+    pub fn set_title(&mut self, key: u16, title: Option<&str>) -> Result<(), String> {
+        let name = self
+            .active
+            .clone()
+            .ok_or_else(|| "no active profile".to_string())?;
+        let profile = self
+            .profiles
+            .get_mut(&name)
+            .ok_or_else(|| format!("no such profile: {name}"))?;
+        profile.set_title(key, title).map_err(|error| error.to_string())
+    }
+
     pub fn set_appearance(
         &mut self,
         key: u16,
@@ -522,6 +606,182 @@ mod tests {
                 .appearance_for(1),
             None,
             "removing the artwork leaves the key with no appearance of its own"
+        );
+    }
+
+    #[test]
+    fn a_title_can_be_set_read_and_removed() {
+        let mut profile = Profile::new("stream");
+        assert_eq!(profile.title(1), None, "a new profile titles nothing");
+
+        profile.set_title(1, Some("Mute")).expect("a short title");
+        assert_eq!(profile.title(1), Some("Mute"));
+        assert_eq!(
+            profile.appearance_for(1),
+            None,
+            "a title is not an appearance"
+        );
+
+        profile.set_title(1, None).expect("remove the title");
+        assert_eq!(profile.title(1), None);
+        assert!(
+            profile.titles.is_empty(),
+            "removing the only title leaves the map empty, not holding a hole"
+        );
+    }
+
+    #[test]
+    fn a_title_is_stored_trimmed() {
+        let mut profile = Profile::new("stream");
+        profile
+            .set_title(2, Some("  Live  "))
+            .expect("a padded title");
+        assert_eq!(profile.title(2), Some("Live"));
+    }
+
+    #[test]
+    fn a_whitespace_only_title_removes_the_entry() {
+        let mut profile = Profile::new("stream");
+        profile.set_title(3, Some("Chat")).expect("set a title");
+        profile
+            .set_title(3, Some("   \t "))
+            .expect("whitespace is not a title");
+        assert_eq!(profile.title(3), None);
+        assert!(profile.titles.is_empty());
+    }
+
+    #[test]
+    fn a_title_longer_than_the_cap_is_refused() {
+        let mut profile = Profile::new("stream");
+        let too_long = "a".repeat(MAX_TITLE_CHARS + 1);
+
+        let error = profile
+            .set_title(1, Some(&too_long))
+            .expect_err("over the cap");
+
+        assert_eq!(
+            error,
+            TitleError::TooLong {
+                max: MAX_TITLE_CHARS
+            }
+        );
+        assert_eq!(error.to_string(), "a title can hold at most 30 characters");
+        assert_eq!(
+            profile.title(1),
+            None,
+            "a refused title leaves the key as it was"
+        );
+    }
+
+    #[test]
+    fn a_title_exactly_at_the_cap_is_kept() {
+        let mut profile = Profile::new("stream");
+        let longest = "a".repeat(MAX_TITLE_CHARS);
+        profile
+            .set_title(1, Some(&longest))
+            .expect("exactly the cap fits");
+        assert_eq!(profile.title(1), Some(longest.as_str()));
+    }
+
+    #[test]
+    fn a_title_with_a_control_character_is_refused() {
+        let mut profile = Profile::new("stream");
+
+        let error = profile
+            .set_title(1, Some("live\nnow"))
+            .expect_err("a newline is not printable text");
+
+        assert_eq!(error, TitleError::ControlCharacter);
+        assert_eq!(
+            error.to_string(),
+            "a title cannot contain control characters"
+        );
+        assert_eq!(profile.title(1), None);
+    }
+
+    #[test]
+    fn a_profile_written_before_titles_existed_loads_without_them() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("profiles").join("deck.json");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create");
+        std::fs::write(
+            &path,
+            r#"{
+                "profiles": {
+                    "stream": {
+                        "name": "stream",
+                        "bindings": { "version": 1, "bindings": [] },
+                        "appearance": { "1": { "kind": "solid", "rgb": [255, 0, 0] } },
+                        "slot": "red"
+                    }
+                },
+                "active": "stream"
+            }"#,
+        )
+        .expect("write the old file, which has no titles key");
+
+        let store = ProfileStore::_load_from(&path).expect("load");
+        let stream = store.active().expect("the active profile");
+
+        assert_eq!(
+            stream.title(1),
+            None,
+            "an absent titles map means no key has a title"
+        );
+        assert!(stream.titles.is_empty());
+        assert_eq!(
+            stream.appearance_for(1),
+            Some(&Appearance::solid([255, 0, 0])),
+            "the rest of an old profile still loads"
+        );
+    }
+
+    #[test]
+    fn titles_survive_a_save_and_a_load() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let mut store = ProfileStore::new();
+        store.activate("stream").expect("activate");
+        {
+            let profile = store
+                .profiles
+                .get_mut("stream")
+                .expect("the stream profile");
+            profile.set_title(1, Some("Mute")).expect("set");
+            profile.set_title(7, Some("Cam")).expect("set");
+        }
+        store.save("deck", dir.path()).expect("save");
+
+        let loaded = ProfileStore::load("deck", dir.path()).expect("load");
+        let stream = loaded.active().expect("the active profile");
+
+        assert_eq!(stream.title(1), Some("Mute"));
+        assert_eq!(stream.title(7), Some("Cam"));
+        assert_eq!(
+            stream.title(2),
+            None,
+            "a key without a title stays untitled"
+        );
+    }
+
+    #[test]
+    fn a_profile_with_no_titles_writes_no_titles_key() {
+        let store = ProfileStore::new();
+        let json = serde_json::to_string(&store).expect("serialize");
+        assert!(
+            !json.contains("\"titles\""),
+            "an empty titles map must not be written: {json}"
+        );
+    }
+
+    #[test]
+    fn a_title_is_written_under_its_key_number() {
+        let mut profile = Profile::new("stream");
+        profile.set_title(3, Some("Chat")).expect("set");
+        let json = serde_json::to_string(&profile).expect("serialize");
+        assert!(
+            json.contains(r#""titles":{"3":"Chat"}"#),
+            "titles are a key-to-text object: {json}"
         );
     }
 }
