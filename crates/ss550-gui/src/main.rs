@@ -14,7 +14,7 @@
 //!
 //! The window is a shell of its own: an app bar, a rail of three pages, a
 //! scrolling content area and a status line, all built in [`ui`]. This file owns
-//! the controller â€” the connection, the bindings, the action runner â€” and the
+//! the controller — the connection, the bindings, the action runner — and the
 //! shell draws whatever it says.
 //!
 //! Pressing a key on the deck lights its tile and runs the action bound to it,
@@ -81,8 +81,8 @@ const NO_DECK_TITLE: &str =
 
 /// Counts one click on the version line and says whether the reveal is due.
 ///
-/// Split out from the window so the boundary â€” four clicks do nothing, the
-/// fifth reveals and starts over â€” is testable without starting a viewer.
+/// Split out from the window so the boundary — four clicks do nothing, the
+/// fifth reveals and starts over — is testable without starting a viewer.
 fn advance_clicks(clicks: u8) -> (u8, bool) {
     let next = clicks.saturating_add(1);
     if next < VERSION_CLICKS_TO_REVEAL {
@@ -151,7 +151,7 @@ enum PaintFailure {
 /// of a key and the deck's disagreeing about everything after the one that
 /// failed.
 enum Tile {
-    /// A picture from the asset library, encoded for this deck â€” with the key's
+    /// A picture from the asset library, encoded for this deck — with the key's
     /// title drawn into it when it has one.
     Asset {
         /// The picture the profile names.
@@ -207,7 +207,7 @@ fn plan_tile(
 ///
 /// A key with no title is served from the tile cache: its bytes cannot change,
 /// so the picture is decoded and encoded once. A key with a title is composed
-/// here â€” fitted, drawn on, then encoded through the same path â€” because the
+/// here — fitted, drawn on, then encoded through the same path — because the
 /// words are per key while the picture is per asset. Both happen on the change
 /// that caused them (a bind, a profile switch, a picture, a title), never while
 /// a frame is drawn.
@@ -295,7 +295,7 @@ impl Link {
 ///
 /// The system's dialog pumps a message loop of its own, so opening it from a
 /// click hands GPUI a second, re-entrant dispatch while the app is already
-/// mutably borrowed for that click â€” which is a panic, not a dialog. It is
+/// mutably borrowed for that click — which is a panic, not a dialog. It is
 /// opened on a worker thread instead, and the answer comes back over this
 /// channel and is read on the poll, where a mutable borrow is the normal state
 /// of affairs.
@@ -335,7 +335,7 @@ impl PictureDialog {
     /// Takes the answer, once the dialog has closed.
     ///
     /// `None` while the dialog is still up. `Some(None)` is a dialog that
-    /// answered "cancel" â€” and also a worker that died before answering, which
+    /// answered "cancel" — and also a worker that died before answering, which
     /// leaves the caller exactly the same nothing to do.
     fn take_answer(&mut self) -> Option<Option<PathBuf>> {
         let answer = self.answer.as_ref()?;
@@ -355,8 +355,8 @@ impl PictureDialog {
 
 /// What one answer from the picture dialog amounts to.
 ///
-/// Split out from the window so the two rules that matter â€” a click with no deck
-/// imports nothing, and a cancelled or refused file leaves the key alone â€” are
+/// Split out from the window so the two rules that matter — a click with no deck
+/// imports nothing, and a cancelled or refused file leaves the key alone — are
 /// testable without a screen, a deck or a dialog.
 #[derive(Debug)]
 enum PickOutcome {
@@ -412,7 +412,7 @@ const TICK: Duration = Duration::from_millis(500);
 ///
 /// The first frames are what startup costs, and they are worth a line each.
 /// After that the log would become a frame dump, so only a frame long enough to
-/// be seen gets recorded â€” which is the one a support report needs.
+/// be seen gets recorded — which is the one a support report needs.
 const FRAMES_LOGGED: u32 = 20;
 
 /// A frame long enough to be visible as a hitch, and therefore worth logging.
@@ -430,7 +430,7 @@ fn ms_text(cost: Duration) -> String {
 
 /// Minimum delay between two connection attempts.
 ///
-/// The deck leaves the USB bus for 4â€“8 s while it boots and re-enumerates
+/// The deck leaves the USB bus for 4–8 s while it boots and re-enumerates
 /// itself more than once, so a single attempt can easily miss it. Retrying
 /// forever is what makes "plug the deck in while the app is open" work.
 const RETRY_INTERVAL: Duration = Duration::from_secs(2);
@@ -462,7 +462,7 @@ enum Attempt {
 /// re-enumeration to settle, so it must never run on the UI thread.
 ///
 /// The attempt waits [`LONG_CONNECT_TIMEOUT`] on purpose: the deck's boot is
-/// appear Ã¢â€ â€™ leave Ã¢â€ â€™ brief appearance Ã¢â€ â€™ leave Ã¢â€ â€™ settle, and the settle can be
+/// appear → leave → brief appearance → leave → settle, and the settle can be
 /// ~11 s away. Giving up earlier would mean starting over in a different
 /// phase of the boot, over and over.
 fn connector_worker(commands: Receiver<u64>, results: Sender<Attempt>) {
@@ -589,14 +589,14 @@ struct Controller {
     assets: ss550_engine::AssetLibrary,
     /// The picture dialog, while one is open.
     ///
-    /// The dialog runs on a worker thread â€” see [`PictureDialog`] for why â€” and
+    /// The dialog runs on a worker thread — see [`PictureDialog`] for why — and
     /// this is the only place its answer can arrive. Its presence is also the
     /// one-dialog-at-a-time rule.
     picture: PictureDialog,
     /// The pictures the keys show, already fitted to the deck's tile size and
     /// swapped for the renderer.
     ///
-    /// Built when the deck or the profile changes â€” never while drawing. A tile
+    /// Built when the deck or the profile changes — never while drawing. A tile
     /// that finds its picture here paints it; a tile that does not falls back to
     /// its flat colour, so a picture deleted from the library while a profile
     /// still names it cannot blank a key or panic the window.
@@ -619,7 +619,7 @@ impl Controller {
         let (result_tx, results) = mpsc::channel::<Attempt>();
 
         // A measurement or support run can ask the window not to look for a
-        // deck. Then no device is opened at all â€” not even enumerated â€” which
+        // deck. Then no device is opened at all — not even enumerated — which
         // is the only way to time the window while the deck on the desk is
         // already in use, and the only way to paint nothing by accident.
         let blind = std::env::var_os(ss550_engine::config::NO_DECK_ENV).is_some();
@@ -777,7 +777,7 @@ impl Controller {
             note: match worker_error {
                 Some(err) => err.into(),
                 None if blind => "Started without looking for a deck.".into(),
-                None => "Looking for the deckâ€¦".into(),
+                None => "Looking for the deck…".into(),
             },
             page: Page::Deck,
             paint: Paint::Blank,
@@ -867,7 +867,7 @@ impl Controller {
                             // failure: the app keeps looking for it.
                             self.link = Link::Waiting;
                             self.note = format!(
-                                "{message} â€” the deck is not on the bus. \
+                                "{message} — the deck is not on the bus. \
                                  Retrying in {delay} s (attempt {}).",
                                 self.attempts
                             )
@@ -876,7 +876,7 @@ impl Controller {
                         provider::ConnectError::Other(_) => {
                             self.link = Link::Lost;
                             self.note = format!(
-                                "{message} â€” retrying in {delay} s (attempt {}).",
+                                "{message} — retrying in {delay} s (attempt {}).",
                                 self.attempts
                             )
                             .into();
@@ -890,8 +890,8 @@ impl Controller {
     /// Takes the deck that just answered and loads the bindings that belong to
     /// it.
     ///
-    /// Everything sized by the deck â€” the tile slots, the pressed flags, the
-    /// selected key â€” is built here from the deck's own geometry, once. Nothing
+    /// Everything sized by the deck — the tile slots, the pressed flags, the
+    /// selected key — is built here from the deck's own geometry, once. Nothing
     /// below has a key count of its own.
     fn adopt(&mut self, deck: ss550_driver::Ss550Deck) {
         let session = session::DeckSession::new(Box::new(deck));
@@ -937,7 +937,7 @@ impl Controller {
         // The profile is where this deck's bindings live now, and the per-deck
         // file is where they lived before profiles existed. A profile that has
         // never been saved carries none, so taking it as the truth would hide
-        // every binding the file still holds â€” which is exactly what happened
+        // every binding the file still holds — which is exactly what happened
         // the first time the deck key changed. The file is read once into the
         // active profile, and written back through the normal save path.
         if let Some(profile) = self.profile_store.active_profile() {
@@ -982,7 +982,7 @@ impl Controller {
             self.note = match note {
                 Some(note) => note.into(),
                 None => format!(
-                    "Connected â€” profile '{}' active.",
+                    "Connected — profile '{}' active.",
                     self.profile_store.active_name().unwrap_or("default")
                 )
                 .into(),
@@ -1000,8 +1000,8 @@ impl Controller {
     /// runs on a deck change, a profile switch or an assignment, and never while
     /// a frame is being drawn.
     fn rebuild_previews(&mut self) {
-        // The icons are part of the same promise â€” a tile that draws a program
-        // draws the picture the deck received â€” so they are rebuilt with them.
+        // The icons are part of the same promise — a tile that draws a program
+        // draws the picture the deck received — so they are rebuilt with them.
         self.rebuild_icons();
 
         // Only the pictures the active profile names are kept: one that is no
@@ -1036,8 +1036,8 @@ impl Controller {
 
     /// Builds the fitted preview of every named picture that is not cached yet.
     ///
-    /// A name with no file behind it â€” a picture deleted from the folder while a
-    /// profile still references it â€” is skipped, not reported: the tile falls
+    /// A name with no file behind it — a picture deleted from the folder while a
+    /// profile still references it — is skipped, not reported: the tile falls
     /// back to its flat colour and the note keeps saying what the user last did.
     fn ensure_previews<I>(&mut self, names: I)
     where
@@ -1055,8 +1055,8 @@ impl Controller {
 
     /// Reads the picture of every program the deck can run.
     ///
-    /// One extraction per program path, on the change that made it necessary â€” a
-    /// rebind, a profile switch or a deck change â€” and never while a frame is
+    /// One extraction per program path, on the change that made it necessary — a
+    /// rebind, a profile switch or a deck change — and never while a frame is
     /// being drawn. The cache keeps what it built, so a rebind that touches one
     /// key asks Windows about one program.
     ///
@@ -1086,7 +1086,7 @@ impl Controller {
     ///
     /// Only a key that actually shows what it runs asks for one. A key the user
     /// painted, or gave a picture, has an appearance, and the appearance wins
-    /// over the action's own icon â€” so no request is made for it. That is the
+    /// over the action's own icon — so no request is made for it. That is the
     /// same ordering the tile obeys, stated once in [`ui::deck::face_for`].
     ///
     /// Each host is asked once: the cache answers whether it already holds a
@@ -1170,8 +1170,8 @@ impl Controller {
 
     /// Loads the bindings for one deck.
     ///
-    /// The per-deck file is the one this build writes. The pre-M4 file â€” one
-    /// file for every deck â€” is read once and copied over only when every key
+    /// The per-deck file is the one this build writes. The pre-M4 file — one
+    /// file for every deck — is read once and copied over only when every key
     /// it binds exists on the deck in front of the window: a binding that would
     /// have nowhere to go is not silently repointed at another key, and it is
     /// not thrown away either.
@@ -1283,7 +1283,7 @@ impl Controller {
         self.drop_deck();
         self.link = Link::Connecting;
         self.attempts = 0;
-        self.note = "Reconnectingâ€¦".into();
+        self.note = "Reconnecting…".into();
         self.request_attempt();
     }
 
@@ -1357,7 +1357,7 @@ impl Controller {
         let lost = matches!(error, session::SessionError::Deck(DeckError::Transport(_)));
         if lost {
             self.drop_deck();
-            self.note = format!("Connection lost: {error} â€” reconnecting automatically.").into();
+            self.note = format!("Connection lost: {error} — reconnecting automatically.").into();
         } else {
             self.note = error.to_string().into();
         }
@@ -1426,7 +1426,7 @@ impl Controller {
     /// A key the profile says nothing about shows what it runs: its program's
     /// icon, or the initial of what it runs, encoded once at the deck's image
     /// size. A key with no action gets `default_colour`, and a key the profile
-    /// gives an appearance gets exactly that â€” a flat colour, or a picture read
+    /// gives an appearance gets exactly that — a flat colour, or a picture read
     /// from the library, fitted and encoded within the deck's byte limit.
     ///
     /// Every face is decided before the first write, so a refusal halfway
@@ -1608,13 +1608,13 @@ impl Controller {
             return;
         };
         let Some(action) = self.store.get(number).cloned() else {
-            self.note = format!("Key #{} pressed â€” nothing is bound to it yet.", idx + 1).into();
+            self.note = format!("Key #{} pressed — nothing is bound to it yet.", idx + 1).into();
             return;
         };
 
         let summary = action.summary();
         match self.runner.submit(action) {
-            Ok(()) => self.note = format!("Key #{} pressed â€” {summary}.", idx + 1).into(),
+            Ok(()) => self.note = format!("Key #{} pressed — {summary}.", idx + 1).into(),
             Err(err) => {
                 self.note = format!(
                     "Key #{} pressed, but the action was refused: {err}",
@@ -1908,7 +1908,7 @@ impl Controller {
             return;
         }
         self.app_list = apps::Apps::Scanning;
-        self.note = "Looking through the Start Menu for installed applicationsâ€¦".into();
+        self.note = "Looking through the Start Menu for installed applications…".into();
 
         cx.spawn(async move |this, cx| {
             // The whole point of the background executor: this future runs off
@@ -1918,7 +1918,7 @@ impl Controller {
             let _ = this.update(cx, |this, cx| {
                 this.app_list = apps::Apps::Ready(found);
                 this.note = match count {
-                    0 => "No application was found in the Start Menu â€” a path can still be typed."
+                    0 => "No application was found in the Start Menu — a path can still be typed."
                         .into(),
                     _ => format!(
                         "{count} application{} found. Pick one, or type a path.",
@@ -1936,7 +1936,7 @@ impl Controller {
     ///
     /// The *shortcut* goes in the field, not the target: the runner hands a
     /// `.lnk` to the shell, so the program starts with the working directory and
-    /// arguments the user set up. The icon is read here â€” once, on the click â€”
+    /// arguments the user set up. The icon is read here — once, on the click —
     /// so the key shows the real picture before SAVE BINDING is pressed.
     fn choose_app(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(choice) = self.app_list.list().and_then(|list| list.get(index)) else {
@@ -1965,10 +1965,10 @@ impl Controller {
     /// Acts on a palette entry dropped on a key.
     ///
     /// A template is an intent: it selects the key and aims the editor at that
-    /// kind, in place â€” the drop happens on the `Deck` page, where the key is,
+    /// kind, in place — the drop happens on the `Deck` page, where the key is,
     /// so the window must not move to another page to show a form. The key is
     /// not touched until SAVE BINDING. An action that is already bound has
-    /// nothing left to ask for, so it goes straight to the save path â€” the same
+    /// nothing left to ask for, so it goes straight to the save path — the same
     /// one the editor uses, file and deck included.
     fn drop_palette_entry(
         &mut self,
@@ -1982,7 +1982,7 @@ impl Controller {
                 self.select_key(number, window, cx);
                 self.open_editor(kind, window, cx);
                 self.note = format!(
-                    "Key #{} â€” set it to {} and press SAVE BINDING.",
+                    "Key #{} — set it to {} and press SAVE BINDING.",
                     number.get(),
                     kind.label()
                 )
@@ -2039,8 +2039,8 @@ impl Controller {
 
     /// Writes the selected key's title into the profile and repaints the key.
     ///
-    /// The title is what the key *says*, so it is saved on its own button â€” or
-    /// Enter â€” rather than with SAVE BINDING: a key can be named without being
+    /// The title is what the key *says*, so it is saved on its own button — or
+    /// Enter — rather than with SAVE BINDING: a key can be named without being
     /// rebound, and a key that runs nothing can be named too. The engine is the
     /// only thing that trims, bounds and refuses, and its sentence is what the
     /// note shows; a refusal leaves the profile exactly as it was.
@@ -2065,7 +2065,7 @@ impl Controller {
         }
 
         // The title is part of the picture the deck receives, so the composed
-        // variant is rebuilt before the key is painted â€” never during a frame.
+        // variant is rebuilt before the key is painted — never during a frame.
         self.rebuild_icons();
         if self.repaint_key(key) {
             self.note = match title {
@@ -2083,13 +2083,13 @@ impl Controller {
     ///
     /// This is the only path a binding takes: the editor and a drop both end
     /// here, so a dropped action cannot skip the file or the profile. The order
-    /// matters â€” a deck that refused the repaint keeps its own sentence, which
+    /// matters — a deck that refused the repaint keeps its own sentence, which
     /// names the picture that would not fit, instead of being overwritten by
     /// "saved".
     fn bind_and_repaint(&mut self, number: KeyNumber, action: Action, cx: &mut Context<Self>) {
         // Recording belongs to the moment an action is *added to a key*, not to
-        // the moment it runs. Every successful save below â€” the editor's SAVE
-        // BINDING and a finished action dropped from the palette â€” passes
+        // the moment it runs. Every successful save below — the editor's SAVE
+        // BINDING and a finished action dropped from the palette — passes
         // through here exactly once, so a template drop records only after the
         // editor it opened is saved.
         let recent = action.clone();
@@ -2131,7 +2131,7 @@ impl Controller {
     }
 
     /// Stores, profiles and saves one binding, returning the sentence that says
-    /// so â€” or the one that says why not.
+    /// so — or the one that says why not.
     fn save_action(&mut self, number: KeyNumber, action: Action) -> Result<String, String> {
         let Some(path) = self.store_path.clone() else {
             return Err(
@@ -2159,7 +2159,7 @@ impl Controller {
                     .get(number)
                     .map(Action::summary)
                     .unwrap_or_default();
-                Ok(format!("Key #{} saved â€” {summary}.", number.get()))
+                Ok(format!("Key #{} saved — {summary}.", number.get()))
             }
             Err(error) => Err(format!(
                 "Key #{} was bound, but the file was not saved: {error}",
@@ -2186,7 +2186,7 @@ impl Controller {
             Some(_) => match self.store.save(&path) {
                 Ok(()) => {
                     self.note =
-                        format!("Key #{} cleared â€” it does nothing now.", number.get()).into();
+                        format!("Key #{} cleared — it does nothing now.", number.get()).into();
                     // A key that runs nothing shows the flat colour again, and
                     // the icon it no longer needs leaves the cache with it.
                     self.rebuild_icons();
@@ -2211,12 +2211,12 @@ impl Controller {
     /// The three steps are one click, in this order, and each one decides whether
     /// the next happens:
     ///
-    /// 1. the system's own dialog, filtered to the formats the library accepts â€”
+    /// 1. the system's own dialog, filtered to the formats the library accepts —
     ///    a cancel ends here, with nothing said, because the user just said it;
     /// 2. the file is **imported** into the library, which copies the bytes and
     ///    gives the picture the name the profile will store. An import that fails
-    ///    â€” not an image this build reads, a name the library already holds, a
-    ///    file over the size limit â€” ends here too, and the key keeps what it
+    ///    — not an image this build reads, a name the library already holds, a
+    ///    file over the size limit — ends here too, and the key keeps what it
     ///    had: a profile must never name a picture the library does not hold;
     /// 3. the key is told that name, which is [`Controller::assign_asset`]: the
     ///    profile is saved, the one picture the key now shows is fitted to the
@@ -2245,7 +2245,7 @@ impl Controller {
 
         // The owner handle is the only thing that crosses the thread boundary:
         // no app, no window, no entity. The dialog is still modal to this
-        // window â€” Windows disables it while the dialog is up â€” even though the
+        // window — Windows disables it while the dialog is up — even though the
         // dialog runs on another thread.
         let owner = self.native;
         let spawned = std::thread::Builder::new()
@@ -2275,6 +2275,12 @@ impl Controller {
         let Some(answer) = self.picture.take_answer() else {
             return false;
         };
+
+        // The dialog disabled this window while it was up; Windows enables it
+        // again when the dialog ends, but the dialog ran on another thread, so
+        // the window does it here as well. A disabled window ignores the mouse
+        // and says nothing about it.
+        ss550_tray::dialog::release_owner(self.native);
 
         match apply_pick(self.session.is_some(), &self.assets, answer) {
             // The user said no, or the dialog never opened. Nothing is said
@@ -2393,7 +2399,7 @@ impl Controller {
     /// the strip left over keeps whatever the key showed before. On a photo that
     /// strip reads as a bright frame around the picture, which is what the user
     /// saw, and the colour it held was the key's previous fill. Blacking the key
-    /// first makes the strip the picture's own dark border instead â€” one extra
+    /// first makes the strip the picture's own dark border instead — one extra
     /// solid tile per image key, which is a few kilobytes on a link that already
     /// carries the picture.
     fn paint_over_black(
@@ -2480,7 +2486,7 @@ impl Controller {
     /// Opens the picture folder in the file manager.
     ///
     /// A picture reaches a key through the system's own dialog, which copies it
-    /// in â€” so the folder is where they end up, not where they come from. This
+    /// in — so the folder is where they end up, not where they come from. This
     /// button exists so "the folder" is a place the user can reach without
     /// knowing where the app keeps its configuration: to look at what has been
     /// imported, or to delete one.
@@ -2587,7 +2593,7 @@ fn load_recents_at(path: &std::path::Path) -> (Recents, Option<String>) {
 
 /// Records one action and writes the list, returning the sentence on failure.
 ///
-/// Split from the controller so the round trip â€” record, save, read back â€” is a
+/// Split from the controller so the round trip — record, save, read back — is a
 /// test over a scratch file, with no window and no deck in the loop.
 fn record_recent_at(
     recents: &mut Recents,
@@ -2762,7 +2768,7 @@ mod tests {
     #[test]
     fn a_title_change_repaints_the_keys_payload() {
         // The title is drawn into the picture the deck receives, so the bytes a
-        // key sends change when its words change â€” and the plan for a key with
+        // key sends change when its words change — and the plan for a key with
         // no title is exactly the one it was before titles existed.
         let spec = deck_api::ImageSpec::new(72, 72, 4_096, deck_api::ImageFormat::Jpeg);
         let action = Action::keys("ctrl+m").expect("a valid combination");
@@ -2797,7 +2803,7 @@ mod tests {
         assert_ne!(before, after, "the words are part of the payload");
         assert!(after.len() <= spec.max_bytes(), "{} bytes", after.len());
 
-        // A key that runs nothing is a flat colour â€” and a titled colour has to
+        // A key that runs nothing is a flat colour — and a titled colour has to
         // be an image, because the deck has no text, only a JPEG.
         let solid = ss550_engine::Appearance::solid([0xDC, 0x26, 0x26]);
         assert!(matches!(
@@ -2853,8 +2859,8 @@ mod tests {
 
     #[test]
     fn a_worker_that_dies_frees_the_slot() {
-        // A dialog thread that never answers â€” it panicked, or the dialog could
-        // not open at all â€” must not leave the button dead forever.
+        // A dialog thread that never answers — it panicked, or the dialog could
+        // not open at all — must not leave the button dead forever.
         let mut dialog = PictureDialog::default();
         let worker = dialog.claim().expect("a dialog slot");
         drop(worker);
@@ -2887,7 +2893,7 @@ mod tests {
             "a cancel copies nothing into the library"
         );
 
-        // The same file, named, does import â€” so the check above is about the
+        // The same file, named, does import — so the check above is about the
         // cancel, not about a file the library would have refused anyway.
         assert!(
             matches!(

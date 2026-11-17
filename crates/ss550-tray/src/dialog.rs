@@ -114,6 +114,20 @@ pub fn open_image_owned_by(owner: Option<isize>) -> Option<PathBuf> {
     platform::open_image(owner)
 }
 
+/// Enables the window that owned the dialog, and brings it back to the front.
+///
+/// Windows disables an owner window while a modal dialog is up and enables it
+/// again when the dialog ends. This dialog runs on a thread of its own, so the
+/// window enables itself explicitly once the answer is in hand: if the worker
+/// died between the two, the owner would stay disabled for the life of the
+/// process, and a disabled window ignores the mouse without saying why.
+///
+/// Called with `None` it does nothing, so a build without a window can call it
+/// unconditionally.
+pub fn release_owner(owner: Option<isize>) {
+    platform::release_owner(owner);
+}
+
 /// The file patterns the dialog accepts, as one filter entry spells them.
 ///
 /// Built from the engine's [`ACCEPTED_EXTENSIONS`], so the dialog and the
@@ -229,6 +243,30 @@ mod platform {
         Some(PathBuf::from(OsString::from_wide(&buffer[..length])))
     }
 
+    /// Enables the owner window again, and brings it forward.
+    ///
+    /// `EnableWindow` is the call that undoes the disable Windows performs when
+    /// a modal dialog opens on an owner. Doing it here means the window cannot
+    /// stay disabled because the dialog's thread ended before Windows would
+    /// have re-enabled it.
+    pub(super) fn release_owner(owner: Option<isize>) {
+        use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+        use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+
+        let Some(hwnd) = owner else {
+            return;
+        };
+        // SAFETY: the handle is the one the window passed in; both calls take
+        // it by value and only act on the window it names. A handle that is no
+        // longer valid makes both fail, and the results are ignored on purpose:
+        // there is nothing to repair in that case.
+        unsafe {
+            let hwnd = HWND(hwnd as *mut c_void);
+            let _ = EnableWindow(hwnd, true);
+            let _ = SetForegroundWindow(hwnd);
+        }
+    }
+
     /// Writes the dialog's own error code to stderr, in a build that has one.
     ///
     /// A zero code is the user pressing "cancel", which is not a failure and
@@ -290,6 +328,9 @@ mod platform {
     pub(super) fn open_image(_owner: Option<isize>) -> Option<PathBuf> {
         None
     }
+
+    /// No modal dialog, so no owner was ever disabled.
+    pub(super) fn release_owner(_owner: Option<isize>) {}
 }
 
 #[cfg(test)]
