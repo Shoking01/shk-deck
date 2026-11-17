@@ -96,8 +96,8 @@ pub(crate) struct IconCache {
     /// readable icon, so a rebind does not ask Windows for it again.
     icons: BTreeMap<PathBuf, Option<Art>>,
     /// One entry per site, keyed by host. A `None` remembers a site that has no
-    /// icon to give — offline, or nothing at `/favicon.ico` — so the key draws
-    /// its initial and no second request is made.
+    /// icon to give — offline, or nothing at any of the paths a site publishes
+    /// one on — so the key draws its initial and no second request is made.
     ///
     /// The entry is the **host's**, not the URL's: two bindings to the same site
     /// share one picture, and a rebind to another host leaves this one alone.
@@ -997,8 +997,9 @@ mod tests {
 
     #[test]
     fn a_url_whose_site_has_no_icon_falls_back_to_its_initial() {
-        // The ordinary case on the open web: a site that answers nothing at
-        // `/favicon.ico`. The key is an initial, never a blank tile.
+        // The ordinary case on the open web: a site that answers nothing at any
+        // of the paths an icon is published on. The key is an initial, never a
+        // blank tile.
         let cache = super::IconCache::new();
         let action = Action::OpenUrl {
             url: "https://example.com/".to_string(),

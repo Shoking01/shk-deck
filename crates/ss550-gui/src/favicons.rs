@@ -27,12 +27,20 @@
 //!
 //! ## What a site may answer with
 //!
-//! `/favicon.ico` is a convention, not a format. Most sites answer an ICO, many
-//! answer a PNG, and a few answer an SVG. An ICO is decoded at its largest
-//! entry — the 256-pixel picture, not the 16-pixel one — and a PNG is decoded
-//! as it is. An SVG would need a renderer this window does not carry, so it is
-//! refused here and the key falls back to its initial, which is a picture and
-//! not a hole.
+//! `/favicon.ico` is a convention, not a format, and it is not the only path a
+//! site publishes an icon at. [`ss550_tray::favicon::site_icons`] asks for the
+//! two touch icons first — the picture a phone's home screen draws — and for
+//! `/favicon.ico` last, because that one is the 16- or 32-pixel image a tab
+//! draws and a key is 108 pixels wide. Every body that answered is decoded here
+//! and the one with the largest area wins: `x.com` answers 1024×1024 at
+//! `/apple-touch-icon.png` and 32×32 at `/favicon.ico`, so the answer is 1024.
+//!
+//! The format is read from the bytes, never from the name: an ICO, a PNG and a
+//! JPEG all arrive at these paths and the path says `.png` for all three. An
+//! ICO is decoded at its largest entry — the 256-pixel picture, not the 16-pixel
+//! one — and a PNG is decoded as it is. An SVG would need a renderer this window
+//! does not carry, so it is refused here and the key falls back to its initial,
+//! which is a picture and not a hole.
 
 use std::path::{Path, PathBuf};
 
@@ -40,10 +48,20 @@ use image::{ExtendedColorType, ImageFormat, RgbaImage};
 
 /// The largest side a decoded site icon may have.
 ///
-/// A favicon is 16 to 256 pixels. The ceiling exists for the server that answers
-/// `/favicon.ico` with a wallpaper: a picture that size is not an icon, and
-/// decoding it on the way to a 108-pixel tile would cost memory for nothing.
+/// An icon is 16 to 256 pixels, and the largest source a site is known to serve
+/// is `x.com`'s 1024×1024 touch icon — exactly this. The ceiling exists for the
+/// server that answers with a wallpaper instead: a picture past it is not an
+/// icon, and decoding it on the way to a 108-pixel tile would cost memory for
+/// nothing.
 const MAX_SIDE: u32 = 1024;
+
+/// The largest side a site icon is written to disk at.
+///
+/// A 1024×1024 icon is 4 MiB decoded and is never drawn bigger than a key, so it
+/// is reduced once — here, on the background thread that decoded it, never at
+/// draw time. 256 leaves room for a high-DPI tile and keeps a whole profile's
+/// worth of icons within a few megabytes on disk and in the cache.
+const MAX_STORED_SIDE: u32 = 256;
 
 /// The folder the decoded icons are kept in, inside the configuration folder.
 const ICONS_DIR: &str = "icons";
@@ -94,27 +112,83 @@ pub(crate) fn cached(config: &Path, host: &str) -> Option<RgbaImage> {
 
 /// Fetches, decodes and keeps the icon of `host`.
 ///
-/// Runs on the background executor: the request is a network call and the decode
-/// is a codec, and neither belongs on the thread that draws. The answer is the
-/// picture, already decoded, and the file is written before it is returned so a
-/// later start needs no network at all.
+/// Runs on the background executor: the requests are network calls and the
+/// decodes are a codec, and neither belongs on the thread that draws. The answer
+/// is the picture, already decoded and already at key size, and the file is
+/// written before it is returned so a later start needs no network at all.
 ///
-/// `None` is every ordinary disappointment — no network, no icon at that path,
-/// an HTTP error, a body over the cap, an SVG — and the caller draws the key's
-/// initial instead.
+/// Every candidate the site answered is decoded and the largest one is kept —
+/// that is how a key gets the 1024-pixel mark instead of the 32-pixel tab icon.
+/// The result is then reduced to [`MAX_STORED_SIDE`], so what is cached in
+/// memory and on disk is a picture a key can wear and not a wallpaper.
+///
+/// `None` is every ordinary disappointment — no network, no icon at any
+/// candidate path, an HTTP error, a body over the cap, an SVG — and the caller
+/// draws the key's initial instead.
 pub(crate) fn fetch(host: &str, config: &Path) -> Option<RgbaImage> {
-    let bytes = ss550_tray::favicon::site_icon(host)?;
-    let picture = decode(&bytes)?;
+    let bodies = ss550_tray::favicon::site_icons(host);
+    let picture = store_sized(largest(&bodies)?);
     // Best effort: a configuration folder that cannot be written costs the next
     // start a request, not this session's icon.
     keep(config, host, &picture);
     Some(picture)
 }
 
-/// Decodes what a site served at `/favicon.ico`.
+/// The largest picture among `bodies`, by pixel area.
+///
+/// The answer is not always the first candidate: `x.com` publishes 1024×1024 at
+/// `/apple-touch-icon.png` and a 32×32 PNG at `/favicon.ico`, `github.com`
+/// publishes 120×120, and `twitch.tv` answers its second candidate with an HTML
+/// page. Only a decode tells them apart, so each body is decoded and only the
+/// largest is held — the loop's memory is two frames at a time, not one per
+/// candidate.
+///
+/// A body that does not decode is skipped, which is how a host whose only answer
+/// is a 32×32 ICO still ends up with a picture.
+fn largest(bodies: &[Vec<u8>]) -> Option<RgbaImage> {
+    let mut best: Option<RgbaImage> = None;
+    let mut best_area = 0u64;
+    for body in bodies {
+        let Some(picture) = decode(body) else {
+            continue;
+        };
+        let (width, height) = picture.dimensions();
+        let area = u64::from(width) * u64::from(height);
+        if area > best_area {
+            best_area = area;
+            best = Some(picture);
+        }
+    }
+    best
+}
+
+/// `picture` reduced to at most [`MAX_STORED_SIDE`] on its longer side.
+///
+/// Lanczos3 rather than nearest or triangle: this runs once per host, off the UI
+/// thread, and a 1024-pixel mark shrunk with a box filter loses the thin strokes
+/// that make it recognisable at key size. A picture already small enough is
+/// returned untouched — a 32×32 ICO must not be resampled into a blur.
+fn store_sized(picture: RgbaImage) -> RgbaImage {
+    let (width, height) = picture.dimensions();
+    let longest = width.max(height);
+    if longest <= MAX_STORED_SIDE {
+        return picture;
+    }
+    let scale = f64::from(MAX_STORED_SIDE) / f64::from(longest);
+    let scaled_width = ((f64::from(width) * scale).round() as u32).max(1);
+    let scaled_height = ((f64::from(height) * scale).round() as u32).max(1);
+    image::imageops::resize(
+        &picture,
+        scaled_width,
+        scaled_height,
+        image::imageops::FilterType::Lanczos3,
+    )
+}
+
+/// Decodes what a site served at one of its icon paths.
 ///
 /// The format is read from the bytes, never from the name: an ICO, a PNG and a
-/// JPEG all arrive at the same path and the path says `.ico` for all three. An
+/// JPEG all arrive at these paths and the path says `.png` for all three. An
 /// SVG has no magic number this decoder knows and fails here, which is the
 /// intended answer.
 fn decode(bytes: &[u8]) -> Option<RgbaImage> {
@@ -187,7 +261,8 @@ fn fingerprint(text: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_file, decode, file_name, host_of, MAX_SIDE};
+    use super::MAX_STORED_SIDE;
+    use super::{cache_file, decode, file_name, host_of, largest, store_sized, MAX_SIDE};
     use image::{ExtendedColorType, ImageEncoder, Rgba, RgbaImage};
 
     /// A PNG of one flat colour, as a site could have served it.
@@ -302,10 +377,67 @@ mod tests {
     #[test]
     fn a_picture_larger_than_an_icon_is_not_an_icon() {
         // The cap is stated once, and a picture under it decodes; a server that
-        // answers with a wallpaper is refused by the same comparison.
-        let cap = MAX_SIDE;
-        assert_eq!(cap, 1024);
+        // answers with a wallpaper is refused by the same comparison. The
+        // largest source a site is known to serve — x.com's touch icon — is
+        // exactly at the cap, so the cap cannot be lowered without dropping it.
+        assert_eq!(MAX_SIDE, 1024);
         assert!(decode(&png(2, [1, 2, 3, 0xFF])).is_some());
+    }
+
+    #[test]
+    fn the_biggest_answer_is_the_one_kept() {
+        // X answers 1024×1024 at the touch icon and 32×32 at the tab icon; the
+        // first is the mark, the second is what a key was wearing before.
+        let bodies = vec![
+            png(1024, [0x00, 0x00, 0x00, 0xFF]),
+            png(32, [0xFF, 0xFF, 0xFF, 0xFF]),
+        ];
+        let picture = largest(&bodies).expect("both decode");
+        assert_eq!(picture.dimensions(), (1024, 1024));
+
+        // The answer is the area, not the position: the order candidates answer
+        // in is the tray's business, and a site may put the better picture last.
+        let reversed: Vec<Vec<u8>> = bodies.into_iter().rev().collect();
+        assert_eq!(
+            largest(&reversed).expect("both decode").dimensions(),
+            (1024, 1024)
+        );
+    }
+
+    #[test]
+    fn a_body_that_is_not_a_picture_is_skipped_and_the_rest_still_count() {
+        // Twitch answers `/apple-touch-icon-precomposed.png` with an HTML page
+        // and a 180×180 PNG at `/apple-touch-icon.png`: the page must not stop
+        // the search, and it must not win it either.
+        let bodies = vec![
+            png(180, [1, 2, 3, 0xFF]),
+            b"<html><body>moved</body></html>".to_vec(),
+            png(32, [4, 5, 6, 0xFF]),
+        ];
+        assert_eq!(
+            largest(&bodies).expect("the pngs decode").dimensions(),
+            (180, 180)
+        );
+        // Nothing decodable is no picture at all, and the key keeps its initial.
+        assert!(largest(&[b"<html></html>".to_vec()]).is_none());
+        assert!(largest(&[]).is_none());
+    }
+
+    #[test]
+    fn a_home_screen_icon_is_stored_at_key_size() {
+        assert_eq!(MAX_STORED_SIDE, 256);
+        // 4 MiB decoded, 256 pixels kept: a key never draws it bigger.
+        let stored = store_sized(decode(&png(1024, [0x10, 0x20, 0x30, 0xFF])).expect("decodes"));
+        assert_eq!(stored.dimensions(), (256, 256));
+
+        // A picture that is not square keeps its shape.
+        let wide = RgbaImage::from_pixel(512, 128, Rgba([1, 2, 3, 0xFF]));
+        assert_eq!(store_sized(wide).dimensions(), (256, 64));
+
+        // Already small enough: untouched, so a 32×32 ICO is not blurred by a
+        // resample it does not need.
+        let small = RgbaImage::from_pixel(32, 32, Rgba([1, 2, 3, 0xFF]));
+        assert_eq!(store_sized(small).dimensions(), (32, 32));
     }
 
     /// A one-entry ICO, as `image` writes it: directory, entry, payload.
