@@ -310,7 +310,9 @@ impl ProfileStore {
             .profiles
             .get_mut(&name)
             .ok_or_else(|| format!("no such profile: {name}"))?;
-        profile.set_title(key, title).map_err(|error| error.to_string())
+        profile
+            .set_title(key, title)
+            .map_err(|error| error.to_string())
     }
 
     pub fn set_appearance(

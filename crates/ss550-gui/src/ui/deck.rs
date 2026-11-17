@@ -155,6 +155,8 @@ struct Cell {
     picture: Option<Arc<RenderImage>>,
     /// The initial the tile draws, when there is no picture of it.
     glyph: Option<char>,
+    /// The words the profile gives the key, when it gives any.
+    title: Option<SharedString>,
     pressed: bool,
     selected: bool,
     binding: Option<SharedString>,
@@ -418,6 +420,9 @@ fn grid(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
                         face: resolved_face(appearance, slot, artwork, picture.is_some()),
                         picture,
                         glyph: action.map(glyph_letter),
+                        title: profile
+                            .and_then(|profile| profile.title(key))
+                            .map(SharedString::from),
                         pressed: controller.pressed.get(index).copied().unwrap_or(false),
                         selected: number == Some(controller.selected_key),
                         binding,
@@ -520,7 +525,7 @@ fn tile(
                         ),
                 )
                 .child(badge(format!("#{}", index + 1)))
-                .child(scrim(binding));
+                .child(scrim(cell.title.clone(), binding));
         }
         Face::Glyph => {
             // No icon to draw: the initial of what the key runs, on the accent
@@ -570,7 +575,7 @@ fn tile(
                         .child(letter),
                 })
                 .child(badge(format!("#{}", index + 1)))
-                .child(scrim(binding));
+                .child(scrim(cell.title.clone(), binding));
         }
         Face::Swatch(slot) => {
             let (_, ink) = slot_colours(slot, tokens);
@@ -603,16 +608,31 @@ fn tile(
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(ink.opacity(0.7))
                         .child(appearance_label(slot)),
-                )
-                .child(
+                );
+            // The title is a line of its own between the colour and what the
+            // key runs; a key with no title keeps exactly the three lines it
+            // had.
+            if let Some(title) = cell.title.clone() {
+                tile = tile.child(
                     div()
                         .w_full()
                         .min_w(px(0.))
                         .truncate()
                         .text_size(px(FONT_MICRO))
-                        .text_color(ink.opacity(0.75))
-                        .child(binding),
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(ink)
+                        .child(title),
                 );
+            }
+            tile = tile.child(
+                div()
+                    .w_full()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_size(px(FONT_MICRO))
+                    .text_color(ink.opacity(0.75))
+                    .child(binding),
+            );
         }
     }
 
@@ -662,17 +682,33 @@ fn badge(text: String) -> Div {
         .child(text)
 }
 
-/// The band along the bottom of a picture tile: what the key runs.
-fn scrim(binding: SharedString) -> Div {
-    div()
+/// The band along the bottom of a picture tile: what the key says and runs.
+///
+/// The title goes above the action, in the same band: the two are one caption
+/// on the picture, and a key with no title keeps exactly the one line it had.
+fn scrim(title: Option<SharedString>, binding: SharedString) -> Div {
+    let band = div()
         .absolute()
         .bottom(px(0.))
         .left(px(0.))
         .w_full()
         .px(px(8.))
         .py(px(4.))
-        .bg(color(0x000000).opacity(0.55))
-        .child(one_line(binding, FONT_MICRO, color(0xffffff)))
+        .bg(color(0x000000).opacity(0.55));
+
+    match title {
+        Some(title) => band
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(
+                // Micro-label weight, like every other label in the window:
+                // the title is chrome over the picture, not part of it.
+                one_line(title, FONT_MICRO, color(0xffffff)).font_weight(FontWeight::SEMIBOLD),
+            )
+            .child(one_line(binding, FONT_MICRO, color(0xffffff))),
+        None => band.child(one_line(binding, FONT_MICRO, color(0xffffff))),
+    }
 }
 
 /// The buttons that act on the whole deck, below the grid.

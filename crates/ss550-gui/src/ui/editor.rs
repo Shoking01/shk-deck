@@ -214,6 +214,57 @@ pub(crate) fn key_editor(
         }
     };
 
+    // The title sits under the action and above the colour row the caller adds:
+    // it is what the key *says*, which is a property of the key and not of what
+    // it runs. It saves on its own, because naming a key is not rebinding it.
+    let title_row = div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .w_full()
+        .child(
+            Field::new()
+                .label("TITLE · the words this key shows, drawn on its tile")
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .child(Input::new(&controller.title_input)),
+                        )
+                        .child(
+                            Button::new("save-title")
+                                .ghost()
+                                .label("SAVE TITLE")
+                                .disabled(!has_deck)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.save_title(cx);
+                                    cx.notify();
+                                })),
+                        ),
+                ),
+        )
+        .child(match has_deck {
+            // The cap is the engine's, not a second copy of the rule: the field
+            // says what will be accepted, and the engine is what refuses.
+            true => one_line(
+                format!(
+                    "Up to {} characters. Leave it empty to take the title off the key.",
+                    ss550_engine::MAX_TITLE_CHARS
+                ),
+                FONT_CAPTION,
+                tokens.soft,
+            ),
+            // The same sentence the refusal uses, so the caption and the note
+            // cannot disagree about why the button does nothing.
+            false => one_line(crate::NO_DECK_TITLE, FONT_CAPTION, tokens.soft),
+        });
+
     div()
         .flex()
         .flex_col()
@@ -223,6 +274,7 @@ pub(crate) fn key_editor(
         .child(fields)
         .child(save_row)
         .child(one_line(saved_to, FONT_CAPTION, tokens.soft))
+        .child(title_row)
 }
 
 /// The heading the editor is introduced with, so both callers say it the same.

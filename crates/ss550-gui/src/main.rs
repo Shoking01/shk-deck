@@ -34,7 +34,7 @@ use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use deck_api::{ButtonState, DeckError, KeyId};
+use deck_api::{ButtonState, DeckError, ImageSpec, KeyId};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{
@@ -71,6 +71,13 @@ const VERSION_CLICKS_TO_REVEAL: u8 = 5;
 /// writes and the caption under the picture controls are the same sentence.
 const NO_DECK_PICTURE: &str =
     "Connect a deck to put a picture on a key: the tile size comes from it.";
+
+/// Why a title cannot be put on a key with no deck in front of the window.
+///
+/// A title is drawn into the deck's JPEG and saved in that deck's profile, so
+/// without one there is nothing to draw it into and nowhere to keep it.
+const NO_DECK_TITLE: &str =
+    "Connect a deck to give a key a title: it is drawn into that deck's tile.";
 
 /// Counts one click on the version line and says whether the reveal is due.
 ///
@@ -144,13 +151,24 @@ enum PaintFailure {
 /// of a key and the deck's disagreeing about everything after the one that
 /// failed.
 enum Tile {
-    /// A picture from the asset library, encoded for this deck.
-    Asset(ss550_engine::AssetName),
+    /// A picture from the asset library, encoded for this deck — with the key's
+    /// title drawn into it when it has one.
+    Asset {
+        /// The picture the profile names.
+        name: ss550_engine::AssetName,
+        /// The words the key says, when it says any.
+        title: Option<String>,
+    },
     /// The encoded picture of what the key runs: the program's own icon, or the
-    /// initial of what it runs.
+    /// initial of what it runs, with the title already in the pixels.
     Art(Vec<u8>),
     /// One flat colour.
     Colour([u8; 3]),
+    /// A flat colour with a title drawn into it, encoded as an image.
+    ///
+    /// A deck only ever receives a JPEG, so a key that says something has to
+    /// send one: the words are pixels, not a property of the colour.
+    TitledColour(Vec<u8>),
 }
 
 /// Decides one key's face, before anything is sent.
@@ -158,21 +176,66 @@ enum Tile {
 /// The order is the whole of the rule: the profile's appearance first, because
 /// that is what the user chose; then what the key runs, which is the icon or the
 /// initial; then the flat colour, for a key that runs nothing or whose picture
-/// this build could not build.
+/// this build could not build. The title is drawn on top of whichever wins.
 fn plan_tile(
     appearance: Option<&ss550_engine::Appearance>,
     action: Option<&Action>,
+    title: Option<&str>,
     default_colour: [u8; 3],
     icons: &icons::IconCache,
 ) -> Tile {
     match appearance {
-        Some(ss550_engine::Appearance::Image { asset }) => Tile::Asset(asset.clone()),
-        Some(ss550_engine::Appearance::Solid { rgb }) => Tile::Colour(*rgb),
-        None => match action.and_then(|action| icons.tile(action)) {
+        Some(ss550_engine::Appearance::Image { asset }) => Tile::Asset {
+            name: asset.clone(),
+            title: title.map(str::to_string),
+        },
+        Some(ss550_engine::Appearance::Solid { rgb }) => match icons.titled_colour(*rgb, title) {
+            Some(jpeg) => Tile::TitledColour(jpeg),
+            None => Tile::Colour(*rgb),
+        },
+        None => match action.and_then(|action| icons.tile(action, title)) {
             Some(picture) => Tile::Art(picture.to_vec()),
-            None => Tile::Colour(default_colour),
+            None => match icons.titled_colour(default_colour, title) {
+                Some(jpeg) => Tile::TitledColour(jpeg),
+                None => Tile::Colour(default_colour),
+            },
         },
     }
+}
+
+/// The JPEG one key's picture becomes, with the key's title drawn into it.
+///
+/// A key with no title is served from the tile cache: its bytes cannot change,
+/// so the picture is decoded and encoded once. A key with a title is composed
+/// here — fitted, drawn on, then encoded through the same path — because the
+/// words are per key while the picture is per asset. Both happen on the change
+/// that caused them (a bind, a profile switch, a picture, a title), never while
+/// a frame is drawn.
+fn asset_tile(
+    assets: &ss550_engine::AssetLibrary,
+    tiles: Option<&mut render::TileCache>,
+    spec: Option<ImageSpec>,
+    name: &ss550_engine::AssetName,
+    title: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let source = assets.read(name).map_err(|error| error.to_string())?;
+
+    let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) else {
+        return match tiles {
+            Some(cache) => cache
+                .get(name, &source)
+                .map(<[u8]>::to_vec)
+                .map_err(|error| error.to_string()),
+            None => Err("the deck has not stated an image size yet".to_string()),
+        };
+    };
+
+    let Some(spec) = spec else {
+        return Err("the deck has not stated an image size yet".to_string());
+    };
+    let fitted = render::fitted_tile(spec, name, &source).map_err(|error| error.to_string())?;
+    let composed = icons::compose_title(&fitted, title, icons::Placement::Band);
+    render::render_rgba(spec, &name.to_string(), &composed).map_err(|error| error.to_string())
 }
 
 /// Which kind of action the bindings panel is editing.
@@ -487,6 +550,14 @@ struct Controller {
     /// the field, and the engine's refusal is what the note shows until it
     /// parses.
     keys_input: Entity<InputState>,
+    /// The words the selected key shows, as the user typed them.
+    ///
+    /// The profile is the authority, and the engine trims and bounds what it
+    /// stores; this field only holds the draft, so a refusal leaves the text
+    /// where the user can fix it.
+    title_input: Entity<InputState>,
+    /// Kept alive so Enter in the title field saves it.
+    _title_enter: Subscription,
     /// The notification-area icon, when the platform has one.
     tray: Option<TrayHost>,
     /// Why the notification-area icon is not there, when it is missing.
@@ -582,6 +653,19 @@ impl Controller {
         // The placeholder is a combination the engine accepts, so the shape of
         // the vocabulary is visible before the first keystroke.
         let keys_input = cx.new(|cx| InputState::new(window, cx).placeholder("ctrl+shift+m"));
+        // The title is a word or two, not a path: the placeholder says what the
+        // field is for, and the engine's cap is stated under it.
+        let title_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("A word for this key"));
+        // Enter is the keyboard's way to save the title, the same way the button
+        // is the mouse's. Both end in `save_title`, so the two cannot disagree
+        // about what "save" means.
+        let title_enter = cx.subscribe(&title_input, |this, _input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.save_title(cx);
+                cx.notify();
+            }
+        });
         // The picker's filter. Its placeholder is a program name, not a path:
         // this field searches the list, it does not hold the answer.
         let app_query = cx.new(|cx| InputState::new(window, cx).placeholder("Search applications"));
@@ -722,6 +806,8 @@ impl Controller {
             draft_program: None,
             _app_query_changes: app_query_changes,
             keys_input,
+            title_input,
+            _title_enter: title_enter,
             tray,
             tray_error,
             native,
@@ -978,14 +1064,22 @@ impl Controller {
     /// yet, but the key it is about to become will show exactly this picture.
     fn rebuild_icons(&mut self) {
         let spec = self.session.as_ref().map(session::DeckSession::image_spec);
-        let actions: Vec<Action> = self
+        // The title is per key and the icon is per program, so the cache is
+        // told both: a key that says something gets a picture with the words in
+        // it. A key with no binding has no action to wear a title, and its
+        // titled colour is composed on demand instead.
+        let profile = self.profile_store.active();
+        let faces: Vec<icons::KeyArt<'_>> = self
             .store
             .bindings()
             .iter()
-            .map(|binding| binding.action.clone())
+            .map(|binding| icons::KeyArt {
+                action: &binding.action,
+                title: profile.and_then(|profile| profile.title(u16::from(binding.key.get()))),
+            })
             .collect();
         self.icons
-            .prepare(spec, &actions, self.draft_program.as_deref());
+            .prepare(spec, &faces, self.draft_program.as_deref());
     }
 
     /// Fetches the icon of every site a bound URL points at, off the UI thread.
@@ -1350,12 +1444,17 @@ impl Controller {
             return;
         }
 
+        let spec = self.session.as_ref().map(session::DeckSession::image_spec);
+        // The title is drawn on top of whichever face wins, so it is read from
+        // the profile once, before the plans are made.
+        let profile = self.profile_store.active();
         let plans: Vec<Tile> = (0..key_count)
             .map(|index| {
                 let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
                 plan_tile(
                     appearances.get(&key),
                     self.action_for(key),
+                    profile.and_then(|profile| profile.title(key)),
                     default_colour,
                     &self.icons,
                 )
@@ -1370,18 +1469,14 @@ impl Controller {
         let mut painted = vec![slot; key_count];
         for (index, plan) in plans.iter().enumerate() {
             let result = match plan {
-                Tile::Asset(asset) => {
-                    let tile = self
-                        .assets
-                        .read(asset)
-                        .map_err(|error| error.to_string())
-                        .and_then(|source| match self.tiles.as_mut() {
-                            Some(cache) => cache
-                                .get(asset, &source)
-                                .map(<[u8]>::to_vec)
-                                .map_err(|error| error.to_string()),
-                            None => Err("the deck has not stated an image size yet".to_string()),
-                        });
+                Tile::Asset { name, title } => {
+                    let tile = asset_tile(
+                        &self.assets,
+                        self.tiles.as_mut(),
+                        spec,
+                        name,
+                        title.as_deref(),
+                    );
                     match tile {
                         Ok(jpeg) => session
                             .paint_encoded(index, &jpeg)
@@ -1392,6 +1487,9 @@ impl Controller {
                 Tile::Art(picture) => session
                     .paint_encoded(index, picture)
                     .map_err(PaintFailure::Session),
+                Tile::TitledColour(picture) => session
+                    .paint_encoded(index, picture)
+                    .map_err(PaintFailure::Session),
                 Tile::Colour(rgb) => session.paint(index, *rgb).map_err(PaintFailure::Session),
             };
 
@@ -1400,7 +1498,7 @@ impl Controller {
                 break;
             }
             painted[index] = match plan {
-                Tile::Asset(_) | Tile::Art(_) => Slot::Image,
+                Tile::Asset { .. } | Tile::Art(_) | Tile::TitledColour(_) => Slot::Image,
                 Tile::Colour(_) => slot,
             };
         }
@@ -1748,6 +1846,15 @@ impl Controller {
             true => None,
             false => Some(PathBuf::from(program.trim())),
         };
+        // The title is the profile's, not the binding's: a key can say something
+        // without running anything, and the field is written on every load so a
+        // title never follows the selection to the next key.
+        let title = self
+            .profile_store
+            .active()
+            .and_then(|profile| profile.title(u16::from(number.get())))
+            .unwrap_or_default()
+            .to_string();
         self.program_input
             .update(cx, |state, cx| state.set_value(program, window, cx));
         self.args_input
@@ -1756,6 +1863,8 @@ impl Controller {
             .update(cx, |state, cx| state.set_value(url, window, cx));
         self.keys_input
             .update(cx, |state, cx| state.set_value(keys, window, cx));
+        self.title_input
+            .update(cx, |state, cx| state.set_value(title, window, cx));
 
         // The picture is read here, on the change that made it the draft, and
         // never while the editor is being drawn.
@@ -1932,6 +2041,48 @@ impl Controller {
         };
 
         self.bind_and_repaint(self.selected_key, action, cx);
+    }
+
+    /// Writes the selected key's title into the profile and repaints the key.
+    ///
+    /// The title is what the key *says*, so it is saved on its own button — or
+    /// Enter — rather than with SAVE BINDING: a key can be named without being
+    /// rebound, and a key that runs nothing can be named too. The engine is the
+    /// only thing that trims, bounds and refuses, and its sentence is what the
+    /// note shows; a refusal leaves the profile exactly as it was.
+    fn save_title(&mut self, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            self.note = NO_DECK_TITLE.into();
+            return;
+        }
+
+        let key = u16::from(self.selected_key.get());
+        let text = self.title_input.read(cx).value().trim().to_string();
+        let title = match text.is_empty() {
+            // An emptied field is how a title is taken off a key: the engine
+            // stores "no title" one way, and this is the way the user asks for
+            // it.
+            true => None,
+            false => Some(text.as_str()),
+        };
+        if let Err(sentence) = self.profile_store.set_title(key, title) {
+            self.note = sentence.into();
+            return;
+        }
+
+        // The title is part of the picture the deck receives, so the composed
+        // variant is rebuilt before the key is painted — never during a frame.
+        self.rebuild_icons();
+        if self.repaint_key(key) {
+            self.note = match title {
+                Some(title) => format!("Key #{key} now says \"{title}\".").into(),
+                None => format!("Key #{key} has no title now.").into(),
+            };
+        }
+        // Last, so a profile that could not be written is the sentence that
+        // survives: the title is gone at the next start, and that matters more
+        // than the paint that already happened.
+        self.save_profile();
     }
 
     /// Writes one binding and puts the key in step with it.
@@ -2248,34 +2399,36 @@ impl Controller {
             .active()
             .and_then(|profile| profile.appearance_for(key))
             .cloned();
+        let title = self
+            .profile_store
+            .active()
+            .and_then(|profile| profile.title(key));
         // The plan is resolved from the profile, the binding and the icon cache
         // before the session is borrowed: nothing here reads the wire, and
         // nothing here can fail after the first byte.
         let plan = plan_tile(
             appearance.as_ref(),
             self.action_for(key),
+            title,
             self.paint.rgb(),
             &self.icons,
         );
         let index = usize::from(key.saturating_sub(1));
+        let spec = self.session.as_ref().map(session::DeckSession::image_spec);
 
         let Some(session) = self.session.as_mut() else {
             return true;
         };
 
         let result = match &plan {
-            Tile::Asset(asset) => {
-                let tile = self
-                    .assets
-                    .read(asset)
-                    .map_err(|error| error.to_string())
-                    .and_then(|source| match self.tiles.as_mut() {
-                        Some(cache) => cache
-                            .get(asset, &source)
-                            .map(<[u8]>::to_vec)
-                            .map_err(|error| error.to_string()),
-                        None => Err("the deck has not stated an image size yet".to_string()),
-                    });
+            Tile::Asset { name, title } => {
+                let tile = asset_tile(
+                    &self.assets,
+                    self.tiles.as_mut(),
+                    spec,
+                    name,
+                    title.as_deref(),
+                );
                 match tile {
                     Ok(jpeg) => session
                         .paint_encoded(index, &jpeg)
@@ -2286,13 +2439,16 @@ impl Controller {
             Tile::Art(picture) => session
                 .paint_encoded(index, picture)
                 .map_err(PaintFailure::Session),
+            Tile::TitledColour(picture) => session
+                .paint_encoded(index, picture)
+                .map_err(PaintFailure::Session),
             Tile::Colour(rgb) => session.paint(index, *rgb).map_err(PaintFailure::Session),
         };
 
         match result {
             Ok(()) => {
                 let slot = match &plan {
-                    Tile::Asset(_) | Tile::Art(_) => Slot::Image,
+                    Tile::Asset { .. } | Tile::Art(_) | Tile::TitledColour(_) => Slot::Image,
                     Tile::Colour(rgb) => slot_for(*rgb),
                 };
                 if let Some(entry) = self.slots.get_mut(index) {
@@ -2587,11 +2743,69 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_clicks, apply_pick, join_notes, load_recents_at, record_recent_at, slot_for,
-        PickOutcome, PictureDialog, Slot,
+        advance_clicks, apply_pick, join_notes, load_recents_at, plan_tile, record_recent_at,
+        slot_for, PickOutcome, PictureDialog, Slot, Tile,
     };
     use ss550_engine::{Action, AssetLibrary, Recents};
     use std::path::PathBuf;
+
+    #[test]
+    fn a_title_change_repaints_the_keys_payload() {
+        // The title is drawn into the picture the deck receives, so the bytes a
+        // key sends change when its words change — and the plan for a key with
+        // no title is exactly the one it was before titles existed.
+        let spec = deck_api::ImageSpec::new(72, 72, 4_096, deck_api::ImageFormat::Jpeg);
+        let action = Action::keys("ctrl+m").expect("a valid combination");
+        let mut icons = crate::icons::IconCache::new();
+
+        icons.prepare(
+            Some(spec),
+            &[crate::icons::KeyArt {
+                action: &action,
+                title: None,
+            }],
+            None,
+        );
+        let before = match plan_tile(None, Some(&action), None, [0, 0, 0], &icons) {
+            Tile::Art(picture) => picture,
+            _ => panic!("an initial is a picture"),
+        };
+
+        icons.prepare(
+            Some(spec),
+            &[crate::icons::KeyArt {
+                action: &action,
+                title: Some("mute"),
+            }],
+            None,
+        );
+        let after = match plan_tile(None, Some(&action), Some("mute"), [0, 0, 0], &icons) {
+            Tile::Art(picture) => picture,
+            _ => panic!("a titled initial is still a picture"),
+        };
+
+        assert_ne!(before, after, "the words are part of the payload");
+        assert!(after.len() <= spec.max_bytes(), "{} bytes", after.len());
+
+        // A key that runs nothing is a flat colour — and a titled colour has to
+        // be an image, because the deck has no text, only a JPEG.
+        let solid = ss550_engine::Appearance::solid([0xDC, 0x26, 0x26]);
+        assert!(matches!(
+            plan_tile(Some(&solid), None, None, [0, 0, 0], &icons),
+            Tile::Colour([0xDC, 0x26, 0x26])
+        ));
+        assert!(matches!(
+            plan_tile(Some(&solid), None, Some("mute"), [0, 0, 0], &icons),
+            Tile::TitledColour(_)
+        ));
+        assert!(
+            matches!(
+                plan_tile(None, None, None, [0, 0, 0], &icons),
+                Tile::Colour([0, 0, 0])
+            ),
+            "a key with nothing on it and no title keeps its colour"
+        );
+    }
 
     #[test]
     fn the_version_line_reveals_on_the_fifth_click() {
