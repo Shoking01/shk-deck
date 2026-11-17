@@ -7,6 +7,24 @@
 //! [`crate::favicon`]'s caller's job, because the window already links an image
 //! decoder and this crate does not.
 //!
+//! ## Which paths are asked
+//!
+//! `/favicon.ico` is what a browser falls back to, and here it is the **last**
+//! thing asked. It is almost always the 16- or 32-pixel picture the tab bar
+//! draws, and a key is 108 pixels wide: the same file scaled up is a mosaic of
+//! squares, not the site's mark. Modern sites also publish the picture they hand
+//! a phone's home screen, at `/apple-touch-icon.png`, and that one is drawn for
+//! a real tile — `x.com` answers 1024×1024 there and a 32×32 PNG at
+//! `/favicon.ico`. So the candidates are asked best first:
+//! `/apple-touch-icon.png`, `/apple-touch-icon-precomposed.png`, `/favicon.ico`.
+//!
+//! A pixel size cannot be read from these bytes without decoding, and this crate
+//! has no decoder, so **every body that answered** is returned and the caller
+//! keeps the largest. Asking still stops early: a first candidate of
+//! [`LARGE_BODY`] bytes or more is a real icon and not a 32×32, and two more
+//! requests to learn nothing would cost the background thread seconds it does
+//! not have to spend.
+//!
 //! ## Why WinINet and not a socket
 //!
 //! `https://<host>/favicon.ico` is an HTTPS request, and an HTTPS client is a
@@ -24,17 +42,19 @@
 //!
 //! ## What is a failure
 //!
-//! Only a missing icon. A host that does not resolve, a site with no
-//! `favicon.ico`, an HTTP error, an empty body and a body over the cap all
-//! answer `None`, and the window draws the key's initial instead. A site with no
-//! icon is the normal case on the open web, not an error to report.
+//! Only a missing icon. A host that does not resolve, a site with no icon at any
+//! of the candidate paths, an HTTP error, an empty body and a body over the cap
+//! all answer an empty list, and the window draws the key's initial instead. A
+//! site with no icon is the normal case on the open web, not an error to report.
 //!
 //! # Example
 //!
 //! ```no_run
-//! // The bytes as served, or `None` when the site has no icon to give.
-//! if let Some(ico) = ss550_tray::favicon::site_icon("example.com") {
-//!     assert!(ico.len() <= ss550_tray::favicon::MAX_BYTES);
+//! // Every body that answered, best candidate first; empty when the site has
+//! // no icon to give.
+//! let bodies = ss550_tray::favicon::site_icons("example.com");
+//! if let Some(icon) = bodies.first() {
+//!     assert!(icon.len() <= ss550_tray::favicon::MAX_BYTES);
 //! }
 //! ```
 
@@ -67,34 +87,77 @@ const READ_TIMEOUT: u32 = 3_000;
 /// into four seconds of nothing. One attempt is enough: the icon is optional.
 const CONNECT_ATTEMPTS: u32 = 1;
 
-/// The icon the site at `host` publishes, or `None` when it has none.
+/// The paths a site may publish its icon at, best first.
 ///
-/// `host` is a bare authority — `example.com`, `localhost:8080` — and the path
-/// is always `/favicon.ico`, which is where the convention puts it. Redirects
-/// are followed, so a site that answers with a `301` to its real icon works.
+/// The touch icons come before the tab icon because a key is 108 pixels and a
+/// `favicon.ico` is a 16- or 32-pixel picture meant for a 16-pixel tab: the same
+/// file on a key is blocks of colour. A site that publishes nothing but
+/// `/favicon.ico` still works, which is why it is still asked.
+const CANDIDATES: [&str; 3] = [
+    "/apple-touch-icon.png",
+    "/apple-touch-icon-precomposed.png",
+    "/favicon.ico",
+];
+
+/// A body this large is already a real icon, so the rest are not asked for.
 ///
-/// The answer is the body **as served**: an ICO, a PNG, or anything else the
-/// server chose to put at that path. Deciding whether it is a picture is the
-/// caller's job, and a caller that cannot decode it falls back to the key's
+/// A pixel size is not readable from these bytes without decoding them, but a
+/// 32×32 ICO is a few hundred bytes and an apple-touch-icon is a picture for a
+/// home screen. Four kilobytes is far above the first and far below the second,
+/// and being wrong costs one more request — `twitch.tv` answers a 524-byte
+/// 180×180 PNG, so its next candidate is asked for even though the first was
+/// already good.
+const LARGE_BODY: usize = 4 * 1024;
+
+/// Every icon body the site at `host` publishes, best candidate first.
+///
+/// `host` is a bare authority — `example.com`, `localhost:8080` — and the paths
+/// asked are [`CANDIDATES`], in that order. Redirects are followed, so a site
+/// that answers with a `301` to its real icon works.
+///
+/// The bodies are **as served**: an ICO, a PNG, or anything else the server
+/// chose to put at that path — `twitch.tv` answers an HTML page at
+/// `/apple-touch-icon-precomposed.png`. Deciding which of them is a picture, and
+/// which is the biggest, is the caller's job, because the caller is the one with
+/// a decoder. A caller that cannot decode any of them falls back to the key's
 /// initial.
+///
+/// The list is empty when nothing answered: no DNS, no icon at any of the paths,
+/// an HTTP error, an empty body, a body over [`MAX_BYTES`].
 ///
 /// A host that cannot be a host — empty, with a slash in it, with a space in it
 /// — is refused before any request is made.
-pub fn site_icon(host: &str) -> Option<Vec<u8>> {
-    let url = url_for(host)?;
-    platform::fetch(&url)
+pub fn site_icons(host: &str) -> Vec<Vec<u8>> {
+    let mut bodies = Vec::new();
+    for url in urls_for(host) {
+        let Some(body) = platform::fetch(&url) else {
+            // A path the site does not publish is the ordinary case: the next
+            // candidate is the one that might answer.
+            continue;
+        };
+        let large = body.len() >= LARGE_BODY;
+        bodies.push(body);
+        if large {
+            break;
+        }
+    }
+    bodies
 }
 
-/// The URL an icon is fetched from, or `None` when `host` is not a host.
+/// The URLs an icon is fetched from, best candidate first, or none when `host`
+/// is not a host.
 ///
 /// Split out from the request so the rule is testable without a network: the
 /// only thing that reaches WinINet is a string this function built.
-fn url_for(host: &str) -> Option<String> {
+fn urls_for(host: &str) -> Vec<String> {
     let host = host.trim();
     if !is_host(host) {
-        return None;
+        return Vec::new();
     }
-    Some(format!("https://{host}/favicon.ico"))
+    CANDIDATES
+        .iter()
+        .map(|path| format!("https://{host}{path}"))
+        .collect()
 }
 
 /// Whether `text` can be the authority of an HTTPS URL.
@@ -147,7 +210,8 @@ mod platform {
     /// from "no icon here".
     const AGENT: &str = "Mozilla/5.0 (compatible; StreamCraft/0.1)";
 
-    /// The body of `url`, or `None` for every answer that is not a picture.
+    /// The body of `url`, or `None` for every answer that is not a body: a
+    /// failed connection, an HTTP error, an empty body, a body over the cap.
     ///
     /// Every handle opened here is closed before the function returns, on every
     /// path: [`Handle`] closes on drop, and the request is declared after the
@@ -319,23 +383,33 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_host, site_icon, url_for, MAX_BYTES};
+    use super::{is_host, site_icons, urls_for, LARGE_BODY, MAX_BYTES};
 
     #[test]
-    fn a_host_is_turned_into_the_path_the_convention_names() {
+    fn a_host_is_turned_into_the_candidates_the_convention_names() {
+        // The touch icons are the mark a phone's home screen draws, and the tab
+        // icon is what a 16-pixel tab draws: the order is the whole point.
         assert_eq!(
-            url_for("example.com").as_deref(),
-            Some("https://example.com/favicon.ico")
+            urls_for("example.com"),
+            [
+                "https://example.com/apple-touch-icon.png",
+                "https://example.com/apple-touch-icon-precomposed.png",
+                "https://example.com/favicon.ico",
+            ]
         );
         // A port is part of the host: `localhost:8080` is not `localhost`.
         assert_eq!(
-            url_for("localhost:8080").as_deref(),
-            Some("https://localhost:8080/favicon.ico")
+            urls_for("localhost:8080"),
+            [
+                "https://localhost:8080/apple-touch-icon.png",
+                "https://localhost:8080/apple-touch-icon-precomposed.png",
+                "https://localhost:8080/favicon.ico",
+            ]
         );
         // A pasted value often carries the space that came with it.
         assert_eq!(
-            url_for("  example.com  ").as_deref(),
-            Some("https://example.com/favicon.ico")
+            urls_for("  example.com  ").first().map(String::as_str),
+            Some("https://example.com/apple-touch-icon.png")
         );
     }
 
@@ -353,10 +427,10 @@ mod tests {
             "?q=1",
             "a:b:c",
         ] {
-            assert_eq!(url_for(text), None, "{text:?} is not a host");
+            assert!(urls_for(text).is_empty(), "{text:?} is not a host");
             assert!(!is_host(text), "{text:?} is not a host");
         }
-        assert!(site_icon("").is_none(), "nothing is fetched for nothing");
+        assert!(site_icons("").is_empty(), "nothing is fetched for nothing");
     }
 
     #[test]
@@ -368,5 +442,21 @@ mod tests {
         assert_eq!(cap, 262_144);
         assert!(cap > 65_536, "a multi-resolution icon must fit");
         assert!(cap < 1_048_576, "an icon is not a download");
+    }
+
+    #[test]
+    fn the_early_stop_sits_above_a_tab_icon_and_below_a_home_screen_mark() {
+        // Measured answers: `/favicon.ico` at x.com is 549 bytes of 32×32 PNG,
+        // GitHub's is 6518 bytes of ICO whose largest entry is 32×32, and the
+        // apple-touch-icon at x.com is 13160 bytes of 1024×1024. The threshold
+        // must sit between the tab icons and the touch icons, or the first
+        // candidate would be abandoned for a worse one.
+        assert_eq!(LARGE_BODY, 4096);
+        // Bound through a cast, the way the cap test does, so the comparison is
+        // a value clippy does not fold into a constant assertion.
+        let stop = LARGE_BODY as u64;
+        assert!(stop > 549, "a 32×32 tab icon is smaller than this");
+        assert!(stop < 13_160, "a 1024×1024 touch icon is larger than this");
+        assert!(stop < MAX_BYTES as u64, "the stop is not the cap");
     }
 }
