@@ -76,6 +76,38 @@ pub(crate) fn enter_apartment() -> Option<()> {
     platform::enter()
 }
 
+/// Writes a shortcut at `link` that starts `target`.
+///
+/// The icon the entry shows is the program's own, so an installed copy and the
+/// entry in the Start Menu are the same picture. A working directory is written
+/// too: a program started from a launcher otherwise inherits one, and anything
+/// it resolves relative to the working directory would land somewhere else.
+///
+/// # Errors
+///
+/// The shell's own sentence when the link cannot be written — no COM on this
+/// thread, no permission in the folder, or a path the shell refuses.
+#[cfg(windows)]
+pub(crate) fn create(
+    link: &Path,
+    target: &Path,
+    working_dir: &Path,
+    description: &str,
+) -> Result<(), String> {
+    platform::create(link, target, working_dir, description)
+}
+
+/// Everywhere but Windows there is no shell to ask.
+#[cfg(not(windows))]
+pub(crate) fn create(
+    _link: &Path,
+    _target: &Path,
+    _working_dir: &Path,
+    _description: &str,
+) -> Result<(), String> {
+    Err("shortcuts are a Windows feature".to_string())
+}
+
 /// [`icon_source`] with the resolution handed in, so the walk is testable.
 ///
 /// The only thing this does that needs the machine is `Path::exists`: a target
@@ -191,6 +223,53 @@ mod platform {
         }
         Some(PathBuf::from(String::from_utf16_lossy(&buffer[..end])))
     }
+
+    /// Writes a new link that starts `target`.
+    ///
+    /// The wide buffers live in this frame and outlive every call that is handed
+    /// their pointers, which is the whole safety argument here.
+    pub(super) fn create(
+        link: &Path,
+        target: &Path,
+        working_dir: &Path,
+        description: &str,
+    ) -> Result<(), String> {
+        // The apartment outlives this call, as it does for `resolve`.
+        enter().ok_or_else(|| "COM could not be entered on this thread".to_string())?;
+
+        let wide = |text: &std::ffi::OsStr| -> Vec<u16> {
+            text.encode_wide().chain(std::iter::once(0)).collect()
+        };
+        let target_wide = wide(target.as_os_str());
+        let dir_wide = wide(working_dir.as_os_str());
+        let description_wide = wide(std::ffi::OsStr::new(description));
+        let link_wide = wide(link.as_os_str());
+
+        // SAFETY: every pointer passed below comes from a live wide buffer in
+        // this frame, and the shell writes the file it is told to write. Both
+        // interfaces are released when the function returns.
+        unsafe {
+            let shell: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+                .map_err(|error| error.to_string())?;
+            shell
+                .SetPath(PCWSTR(target_wide.as_ptr()))
+                .map_err(|error| error.to_string())?;
+            shell
+                .SetWorkingDirectory(PCWSTR(dir_wide.as_ptr()))
+                .map_err(|error| error.to_string())?;
+            shell
+                .SetDescription(PCWSTR(description_wide.as_ptr()))
+                .map_err(|error| error.to_string())?;
+            // The entry wears the program's own icon.
+            shell
+                .SetIconLocation(PCWSTR(target_wide.as_ptr()), 0)
+                .map_err(|error| error.to_string())?;
+            let file: IPersistFile = shell.cast().map_err(|error| error.to_string())?;
+            file.Save(PCWSTR(link_wide.as_ptr()), true)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
 }
 
 /// Everywhere but Windows there are no shortcuts to follow.
@@ -264,6 +343,31 @@ mod tests {
 
     use super::{icon_source_with, is_shortcut, MAX_HOPS};
     use crate::scratch::ScratchDir;
+
+    /// The writer and the reader agree: a link this build writes starts the
+    /// program it was given.
+    ///
+    /// This is the one part of "install it as an application" that can be
+    /// proven without touching the user's Start Menu: the same COM call, into a
+    /// scratch folder, read back by the resolver the icon code already uses.
+    #[cfg(windows)]
+    #[test]
+    fn a_written_shortcut_starts_the_program_it_names() {
+        let scratch = ScratchDir::new("written-link");
+        let target = scratch.path().join("Deck Controller.exe");
+        std::fs::write(&target, b"a path is all this test needs").expect("the target");
+        let link = scratch.path().join("Deck Controller.lnk");
+
+        super::create(&link, &target, scratch.path(), "a test entry")
+            .expect("the shell writes the link");
+
+        assert!(link.exists(), "the entry is on disk");
+        assert_eq!(
+            super::resolve(&link),
+            Some(target),
+            "and it starts the program it was given"
+        );
+    }
 
     #[test]
     fn only_a_link_extension_is_a_shortcut() {

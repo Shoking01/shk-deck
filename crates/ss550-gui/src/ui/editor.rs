@@ -30,8 +30,8 @@ use gpui_kit::{
 
 use super::panels::{placeholder, thumbnail};
 use super::{
-    activate, micro_label, muted, one_line, path_line, segment, Tokens, FONT_CAPTION, FONT_SUB,
-    RADIUS_SM,
+    activate, micro_label, muted, one_line, path_line, segment, titlecontrols, Tokens,
+    FONT_CAPTION, FONT_SUB, RADIUS_SM,
 };
 use crate::apps;
 use crate::{Controller, DraftKind, NO_DECK_PICTURE};
@@ -200,8 +200,8 @@ pub(crate) fn key_editor(
                 .ghost()
                 .label("CLEAR KEY")
                 .disabled(!has_deck)
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.clear_binding();
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.clear_binding(window, cx);
                     cx.notify();
                 })),
         );
@@ -265,7 +265,36 @@ pub(crate) fn key_editor(
             false => one_line(crate::NO_DECK_TITLE, FONT_CAPTION, tokens.soft),
         });
 
-    div()
+    // The key's own style, under the words it draws. Offered only when the key
+    // says something: a style with no words has nothing to draw, and the engine
+    // clears both together anyway.
+    let key = u16::from(controller.selected_key.get());
+    let has_title = controller
+        .current_keys()
+        .and_then(|keys| keys.title(key))
+        .is_some();
+    let style_block = match has_title {
+        true => {
+            let target = crate::FontTarget::Key(key);
+            let mut block = div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .w_full()
+                .child(micro_label("THIS KEY'S STYLE", tokens))
+                .child(titlecontrols::rows(controller, target, tokens, cx));
+            if let Some(reset) = titlecontrols::reset(controller, target, tokens, cx) {
+                block = block.child(reset);
+            }
+            Some(block.child(muted(
+                "Keys without a style of their own follow TITLE DEFAULTS on the Settings page.",
+                tokens,
+            )))
+        }
+        false => None,
+    };
+
+    let mut form = div()
         .flex()
         .flex_col()
         .gap(px(16.))
@@ -274,7 +303,11 @@ pub(crate) fn key_editor(
         .child(fields)
         .child(save_row)
         .child(one_line(saved_to, FONT_CAPTION, tokens.soft))
-        .child(title_row)
+        .child(title_row);
+    if let Some(block) = style_block {
+        form = form.child(block);
+    }
+    form
 }
 
 /// The heading the editor is introduced with, so both callers say it the same.
@@ -287,6 +320,7 @@ pub(crate) fn editor_heading(number: ss550_engine::KeyNumber, tokens: Tokens) ->
         .child(micro_label("WHAT THIS KEY RUNS", tokens))
         .child(micro_label(format!("#{}", number.get()), tokens))
 }
+
 
 /// The picture the key would wear for the program in the field.
 ///
@@ -496,9 +530,8 @@ pub(crate) fn picture_block(
     let has_deck = controller.session.is_some();
     let key = u16::from(controller.selected_key.get());
     let in_use = controller
-        .profile_store
-        .active()
-        .and_then(|profile| profile.appearance_for(key))
+        .current_keys()
+        .and_then(|keys| keys.appearance_for(key))
         .and_then(|appearance| appearance.asset())
         .cloned();
     let folder = controller.assets.root().display().to_string();

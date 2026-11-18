@@ -80,7 +80,7 @@ fn app_bar(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Control
                             div()
                                 .text_size(px(FONT_APP))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child("Deck Controller"),
+                                .child("Sh-Deck"),
                         )
                         .child(one_line(subtitle, FONT_CAPTION, tokens.soft)),
                 ),

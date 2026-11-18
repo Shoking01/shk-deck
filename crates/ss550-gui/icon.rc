@@ -1,0 +1,6 @@
+// The application icon, as the Windows resource compiler reads it.
+//
+// One line, one icon: the .ico already holds every size Windows asks for
+// (256, 128, 64, 48, 32, 24 and 16), so the shell picks the right one for the
+// taskbar, the Start Menu entry and the file properties page.
+1 ICON "assets/app-icon.ico"

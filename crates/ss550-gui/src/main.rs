@@ -42,10 +42,11 @@ use gpui_kit::{
     Subscription, Window, WindowBounds, WindowOptions,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use ss550_driver::{is_deck_present, LONG_CONNECT_TIMEOUT};
+use ss550_driver::LONG_CONNECT_TIMEOUT;
 use ss550_engine::{Action, ActionRunner, ActionStore, KeyNumber, Recents};
 use ss550_tray::{autostart, install, TrayCommand, TrayHost};
 
+use titlestyle::TitleLook as _;
 use ui::Page;
 
 mod apps;
@@ -57,6 +58,7 @@ mod provider;
 mod render;
 mod session;
 mod titlestyle;
+mod titletext;
 mod ui;
 
 /// Clicks on the version line that open the diagnostic log.
@@ -159,6 +161,8 @@ enum Tile {
         name: ss550_engine::AssetName,
         /// The words the key says, when it says any.
         title: Option<String>,
+        /// How those words are drawn: the key's own style, or the default.
+        style: titlestyle::TitleStyle,
     },
     /// The encoded picture of what the key runs: the program's own icon, or the
     /// initial of what it runs, with the title already in the pixels.
@@ -182,21 +186,28 @@ fn plan_tile(
     appearance: Option<&ss550_engine::Appearance>,
     action: Option<&Action>,
     title: Option<&str>,
+    style: &titlestyle::TitleStyle,
     default_colour: [u8; 3],
-    icons: &icons::IconCache,
+    icons: &mut icons::IconCache,
+    text: &mut Option<titletext::TextEngine>,
 ) -> Tile {
     match appearance {
         Some(ss550_engine::Appearance::Image { asset }) => Tile::Asset {
             name: asset.clone(),
             title: title.map(str::to_string),
+            style: style.clone(),
         },
-        Some(ss550_engine::Appearance::Solid { rgb }) => match icons.titled_colour(*rgb, title) {
-            Some(jpeg) => Tile::TitledColour(jpeg),
-            None => Tile::Colour(*rgb),
-        },
-        None => match action.and_then(|action| icons.tile(action, title)) {
+        Some(ss550_engine::Appearance::Solid { rgb }) => {
+            match icons.titled_colour(*rgb, title, style, text) {
+                Some(jpeg) => Tile::TitledColour(jpeg),
+                None => Tile::Colour(*rgb),
+            }
+        }
+        None => match action.and_then(|action| icons.tile(action, title, style)) {
+            // A picture the cache already composed is served as it is; the
+            // encoder ran on the change, not now.
             Some(picture) => Tile::Art(picture.to_vec()),
-            None => match icons.titled_colour(default_colour, title) {
+            None => match icons.titled_colour(default_colour, title, style, text) {
                 Some(jpeg) => Tile::TitledColour(jpeg),
                 None => Tile::Colour(default_colour),
             },
@@ -218,7 +229,8 @@ fn asset_tile(
     spec: Option<ImageSpec>,
     name: &ss550_engine::AssetName,
     title: Option<&str>,
-    style: titlestyle::TitleStyle,
+    style: &titlestyle::TitleStyle,
+    text: &mut Option<titletext::TextEngine>,
 ) -> Result<Vec<u8>, String> {
     let source = assets.read(name).map_err(|error| error.to_string())?;
 
@@ -236,7 +248,14 @@ fn asset_tile(
         return Err("the deck has not stated an image size yet".to_string());
     };
     let fitted = render::fitted_tile(spec, name, &source).map_err(|error| error.to_string())?;
-    let composed = icons::compose_title(&fitted, title, style);
+    // The font is read here and not one line earlier. While the scan is still
+    // running the key keeps exactly the picture it would have with no title, and
+    // the repaint that follows the scan draws the words.
+    let Some(text) = titletext::ready(text) else {
+        return render::render_rgba(spec, &name.to_string(), &fitted)
+            .map_err(|error| error.to_string());
+    };
+    let composed = icons::compose_title(&fitted, title, style, text);
     render::render_rgba(spec, &name.to_string(), &composed).map_err(|error| error.to_string())
 }
 
@@ -263,6 +282,97 @@ impl DraftKind {
             DraftKind::Keys => "send a keystroke",
         }
     }
+}
+
+/// Whether composing this deck's payloads needs the font database.
+///
+/// Any key with words counts, **bound or not**: a key that runs nothing still
+/// shows its title on a flat colour, and those words are pixels like any other.
+/// Reading the profile here rather than a list of bindings is what makes that
+/// true — an earlier version asked only the bound keys and left a named-but-
+/// unbound key with words the deck could never draw.
+///
+/// A deck that has stated no image size needs no font at all: there is no
+/// payload to draw them into, which is why the scan is not requested before one
+/// connects.
+fn needs_fonts(
+    spec: Option<ImageSpec>,
+    keys: Option<&ss550_engine::profiles::PageKeys>,
+    key_count: usize,
+) -> bool {
+    if spec.is_none() {
+        return false;
+    }
+    let Some(keys) = keys else {
+        return false;
+    };
+    (1..=key_count as u16).any(|key| keys.title(key).is_some())
+}
+
+/// The style one key wears: its own when the page gives it one, the app's
+/// default otherwise.
+///
+/// Split out of [`Controller::style_for`] because it is the whole of the
+/// fallback rule and needs no window to answer: the page, the default, and the
+/// key are all it reads.
+fn resolve_style(
+    keys: Option<&ss550_engine::profiles::PageKeys>,
+    default: &titlestyle::TitleStyle,
+    key: u16,
+) -> titlestyle::TitleStyle {
+    keys.and_then(|keys| keys.title_style(key))
+        .cloned()
+        .unwrap_or_else(|| default.clone())
+}
+
+/// What a navigation action did to the page stack.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NavOutcome {
+    /// A folder was entered; the stack grew by one.
+    Entered,
+    /// A step back was taken; the stack lost its last entry.
+    WentBack,
+    /// The folder named is not in this profile; nothing moved.
+    UnknownPage,
+    /// The deck is on the root already; nothing moved.
+    AtRoot,
+    /// Not a navigation action: the caller hands it to the runner.
+    NotNavigation,
+}
+
+/// Applies one action to the page stack, without touching the deck.
+///
+/// Split out of [`Controller::apply_navigation`] because it is the whole of S3 —
+/// enter, leave, and what happens at the edges — and needs no window to answer:
+/// a stack and a way to ask whether a page exists are all it reads.
+fn navigate(
+    stack: &mut Vec<String>,
+    action: &Action,
+    page_exists: impl Fn(&str) -> bool,
+) -> NavOutcome {
+    match action {
+        Action::Folder { page } => {
+            if !page_exists(page) {
+                return NavOutcome::UnknownPage;
+            }
+            stack.push(page.clone());
+            NavOutcome::Entered
+        }
+        Action::Back => match stack.pop() {
+            Some(_) => NavOutcome::WentBack,
+            None => NavOutcome::AtRoot,
+        },
+        _ => NavOutcome::NotNavigation,
+    }
+}
+
+/// Which title style a control edits: the app's default, or one key's own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum FontTarget {
+    /// The style every key without one of its own follows.
+    Defaults,
+    /// One key's own style, kept in its profile.
+    Key(u16),
 }
 
 /// Connection state shown in the header pill.
@@ -450,12 +560,59 @@ enum Attempt {
     Connected {
         generation: u64,
         deck: ss550_driver::Ss550Deck,
+        /// Where it was found, so the next start can open it without a walk.
+        path: Option<String>,
     },
     /// The attempt failed; the error is shown to the user.
     Failed {
         generation: u64,
         error: provider::ConnectError,
     },
+}
+
+/// Where the deck was found last time, so the next start can go straight to it.
+///
+/// One line in the app's own configuration folder. It is a hint, not a fact: a
+/// path that no longer opens is forgotten and the deck is discovered again, and
+/// an unreadable file simply means "nothing remembered".
+fn deck_path_file() -> std::path::PathBuf {
+    ss550_engine::config_dir().join("deck-path.txt")
+}
+
+/// Reads the remembered device path, if there is one.
+fn load_deck_path() -> Option<String> {
+    read_deck_path_at(&deck_path_file())
+}
+
+/// [`load_deck_path`] for a file the caller names, so the rule can be tested.
+fn read_deck_path_at(file: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(file)
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|path| !path.is_empty())
+}
+
+/// Records where the deck was found, or forgets the path when there is none.
+///
+/// A write that fails is not worth a sentence: the only cost is one walk on the
+/// next start, which is what the app does anyway when it has never seen a deck.
+fn save_deck_path(path: Option<&str>) {
+    write_deck_path_at(&deck_path_file(), path);
+}
+
+/// [`save_deck_path`] for a file the caller names.
+fn write_deck_path_at(file: &std::path::Path, path: Option<&str>) {
+    match path.filter(|path| !path.trim().is_empty()) {
+        Some(path) => {
+            if let Some(parent) = file.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(file, path);
+        }
+        None => {
+            let _ = std::fs::remove_file(file);
+        }
+    }
 }
 
 /// Runs connection attempts on a dedicated thread.
@@ -467,11 +624,31 @@ enum Attempt {
 /// appear → leave → brief appearance → leave → settle, and the settle can be
 /// ~11 s away. Giving up earlier would mean starting over in a different
 /// phase of the boot, over and over.
-fn connector_worker(commands: Receiver<u64>, results: Sender<Attempt>) {
+///
+/// `remembered` is where the deck was found on a previous run. It is passed to
+/// the one [`ss550_driver::Locator`] this thread builds, which is what turns a
+/// reconnect into a single `CreateFile` instead of a walk of every HID device on
+/// the machine.
+fn connector_worker(commands: Receiver<u64>, results: Sender<Attempt>, remembered: Option<String>) {
+    let mut locator: Option<Result<ss550_driver::Locator, ss550_driver::Ss550Error>> = None;
     while let Ok(generation) = commands.recv() {
-        let attempt = match provider::connect(LONG_CONNECT_TIMEOUT) {
-            Ok(deck) => Attempt::Connected { generation, deck },
-            Err(error) => Attempt::Failed { generation, error },
+        // The locator owns this process's one `HidApi`, and with it the one walk
+        // of the machine's HID devices. Every later attempt asks for the
+        // remembered path instead — see `ss550_driver::Locator`.
+        let locator = locator.get_or_insert_with(|| ss550_driver::Locator::new(remembered.clone()));
+        let attempt = match locator {
+            Err(error) => Attempt::Failed {
+                generation,
+                error: provider::ConnectError::Other(error.to_string()),
+            },
+            Ok(locator) => match provider::connect(locator, LONG_CONNECT_TIMEOUT) {
+                Ok(deck) => Attempt::Connected {
+                    generation,
+                    deck,
+                    path: locator.path().map(str::to_string),
+                },
+                Err(error) => Attempt::Failed { generation, error },
+            },
         };
 
         if results.send(attempt).is_err() {
@@ -613,12 +790,54 @@ struct Controller {
     /// Tiles already rendered for this deck's image size, so switching profile
     /// back and forth does not re-decode every picture.
     tiles: Option<render::TileCache>,
+    /// The window's height in pixels, as the last frame saw it.
+    ///
+    /// The side column is bounded by it, so the menu scrolls inside itself and the
+    /// deck's grid stays on screen while a key is being edited. It is read during
+    /// a frame and never written by one.
+    pub(crate) viewport_h: f32,
+    /// The folders the deck has entered, outermost first. Empty is the root.
+    ///
+    /// A stack, not a name: VOLVER goes back where the deck came from, which is
+    /// the last entry. It is runtime state and is not saved: activating a profile
+    /// starts at its root, so a page that no longer exists can never strand the
+    /// deck on an empty screen.
+    page_path: Vec<String>,
     /// How every title looks, in the window and in the deck's picture.
     ///
     /// Loaded once at start and changed only from the settings page, where the
     /// change repaints every titled key through the same path a title edit uses.
     /// The icon cache is told the same style, so the two cannot disagree.
     title_style: titlestyle::TitleStyle,
+    /// The fonts a title is drawn with.
+    ///
+    /// `None` until the background scan answers: reading the system's fonts is
+    /// the one slow step in composing a title, and a start whose profile has no
+    /// titles never asks for it at all.
+    text: Option<titletext::TextEngine>,
+    /// Whether that scan is already in flight, so one is asked for, not five.
+    text_scan: bool,
+    /// Set by a rebuild that found titled keys and no engine yet.
+    fonts_wanted: bool,
+    /// The families the settings page offers, read once from the engine.
+    font_families: Vec<String>,
+    /// Which style the family list is open for, when it is open at all.
+    font_picker: Option<FontTarget>,
+    /// The family list's filter field.
+    font_query: Entity<InputState>,
+    /// The name a new page takes, and a page's new name.
+    page_input: Entity<InputState>,
+    /// What the active profile would be renamed to.
+    profile_input: Entity<InputState>,
+    /// Redraws the list while it is being filtered, so the rows follow the field.
+    _font_query_changes: Subscription,
+    /// The claim that this process is the controller for this desktop.
+    ///
+    /// `None` only when the claim could not be taken at all; the app still runs,
+    /// it just cannot promise a second start will not open a second window.
+    /// Polled every tick: a start that found this one asks for the window by
+    /// ringing the event this holds.
+    singleton: Option<ss550_tray::instance::SingleInstance>,
 }
 
 impl Controller {
@@ -637,7 +856,7 @@ impl Controller {
         } else {
             match std::thread::Builder::new()
                 .name("deck-connector".to_string())
-                .spawn(move || connector_worker(command_rx, result_tx))
+                .spawn(move || connector_worker(command_rx, result_tx, load_deck_path()))
             {
                 Ok(_) => None,
                 Err(err) => Some(format!("Could not start the connection worker: {err}")),
@@ -686,6 +905,22 @@ impl Controller {
                     cx.notify();
                 }
             });
+        // The family list's own filter, and the same arrangement: the field
+        // redraws the rows around it without touching the style.
+        let font_query = cx.new(|cx| InputState::new(window, cx).placeholder("Search fonts"));
+        // The name a new page takes. Nothing else is needed to make one: a page
+        // is a name and an empty set of keys.
+        let page_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("A name for the page"));
+        // What the active profile would be called after RENAME ACTIVE.
+        let profile_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("A new name for the profile"));
+        let font_query_changes =
+            cx.subscribe(&font_query, |_this, _input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            });
 
         // The runner delivers keystrokes through the platform sender. It is
         // built here, before the runner, because the runner owns the only
@@ -695,7 +930,7 @@ impl Controller {
 
         // The tray icon is what keeps the controller alive with no window on
         // screen. Without it the app still runs, but only as a window.
-        let (tray, tray_error) = match TrayHost::spawn("Deck Controller") {
+        let (tray, tray_error) = match TrayHost::spawn("Sh-Deck") {
             Ok(host) => (Some(host), None),
             Err(error) => (None, Some(format!("Tray icon not available: {error}"))),
         };
@@ -750,6 +985,9 @@ impl Controller {
             cx.background_executor().timer(POLL).await;
             let alive = this.update(cx, |this, cx| {
                 let mut changed = this.poll_deck();
+                // A rebuild that finds titled keys and no font asks for the scan
+                // here, where there is a context to spawn it with.
+                this.pump_fonts(cx);
                 if this.last_tick.elapsed() >= TICK {
                     this.last_tick = Instant::now();
                     this.maintain();
@@ -762,6 +1000,12 @@ impl Controller {
                 // line, never while the dialog runs.
                 changed |= this.collect_picture_pick();
                 changed |= this.handle_tray(cx);
+                // A second start asked for the window; showing it is the whole
+                // answer, and it must not be lost while the window is hidden.
+                if this.singleton.as_ref().is_some_and(|claim| claim.asked()) {
+                    this.show_window(cx);
+                    changed = true;
+                }
                 // A site's icon is a request, so it is started here and its
                 // answer arrives as state: the frame never waits for a host.
                 this.fetch_site_icons(cx);
@@ -840,13 +1084,20 @@ impl Controller {
             previews: BTreeMap::new(),
             icons: icons::IconCache::new(),
             tiles: None,
-            title_style,
+            title_style: title_style.clone(),
+            page_path: Vec::new(),
+            viewport_h: 880.,
+            text: None,
+            text_scan: false,
+            fonts_wanted: false,
+            font_families: Vec::new(),
+            font_picker: None,
+            font_query,
+            page_input,
+            profile_input,
+            _font_query_changes: font_query_changes,
+            singleton: None,
         };
-
-        // The cache composes the deck's titled variants, so it is told the style
-        // before the first key is planned — never after, or the first paint of a
-        // titled key would use the default.
-        controller.icons.set_style(title_style);
 
         // Look for the deck right away: its settle window starts the moment
         // it appears, so every second counts.
@@ -859,7 +1110,11 @@ impl Controller {
         let attempts: Vec<Attempt> = self.results.try_iter().collect();
         for attempt in attempts {
             match attempt {
-                Attempt::Connected { generation, deck } => {
+                Attempt::Connected {
+                    generation,
+                    deck,
+                    path,
+                } => {
                     if generation != self.generation {
                         // A newer request replaced this one; its result wins.
                         continue;
@@ -868,6 +1123,9 @@ impl Controller {
                     self.attempts = 0;
                     // Reset backoff on successful connection
                     self.reconnect_at = Instant::now();
+                    // Remember where it was found: the next start opens that
+                    // path instead of walking the machine's HID devices.
+                    save_deck_path(path.as_deref());
                     self.adopt(deck);
                 }
                 Attempt::Failed { generation, error } => {
@@ -881,6 +1139,13 @@ impl Controller {
                     // unplugged is polled once a minute, not twice a second.
                     self.schedule_retry();
                     let delay = self.retry_delay().as_secs();
+                    // The sentence on screen is replaced by the next attempt;
+                    // this line is what a start that never connected leaves
+                    // behind.
+                    diagnostics::record(&format!(
+                        "connect failed: {message} — retrying in {delay} s (attempt {})",
+                        self.attempts
+                    ));
 
                     match error {
                         provider::ConnectError::NotFound(_) => {
@@ -917,6 +1182,9 @@ impl Controller {
     fn adopt(&mut self, deck: ss550_driver::Ss550Deck) {
         let session = session::DeckSession::new(Box::new(deck));
         let key_count = session.key_count();
+        // What the app found, and what shape it is: the one line a start that
+        // "does not connect" needs in order to say why.
+        diagnostics::record(&format!("connected: {}", session.label()));
 
         let path = ss550_engine::bindings_path_for(session.key());
         let (store, mut note) = self.load_store(&path, &session);
@@ -962,10 +1230,11 @@ impl Controller {
         // the first time the deck key changed. The file is read once into the
         // active profile, and written back through the normal save path.
         if let Some(profile) = self.profile_store.active_profile() {
-            if profile.bindings.is_empty() && !self.store.is_empty() {
+            if profile.root.bindings.is_empty() && !self.store.is_empty() {
                 let bindings = self.store.clone();
                 if let Err(error) = self.profile_store.update_bindings(
                     &bindings,
+                    None,
                     &deck_key,
                     &ss550_engine::config_dir(),
                 ) {
@@ -984,7 +1253,7 @@ impl Controller {
 
         // Apply the active profile on connect
         if let Some(profile) = self.profile_store.active_profile() {
-            self.store = profile.bindings.clone();
+            self.store = profile.root.bindings.clone();
             // Every key's face is decided from what it runs, so the icons of
             // those programs have to be read before the keys are painted. This
             // is the deck change, and it is the only reason the cache is
@@ -992,7 +1261,7 @@ impl Controller {
             self.rebuild_icons();
             let slot = self.paint_from_profile(&profile, key_count);
             let default_colour = self.paint.rgb();
-            self.apply_all_appearances(slot, &profile.appearance, default_colour, key_count);
+            self.apply_all_appearances(slot, &profile.root.appearance, default_colour, key_count);
         } else {
             self.rebuild_icons();
             let slot = self.paint.slot();
@@ -1029,8 +1298,8 @@ impl Controller {
         // longer on any key is dropped, and one that still is is never decoded a
         // second time. An assignment therefore decodes the picture it added and
         // nothing else.
-        let names: BTreeSet<ss550_engine::AssetName> = match self.profile_store.active() {
-            Some(profile) => profile
+        let names: BTreeSet<ss550_engine::AssetName> = match self.current_keys() {
+            Some(keys) => keys
                 .appearance
                 .values()
                 .filter_map(|appearance| appearance.asset().cloned())
@@ -1085,26 +1354,146 @@ impl Controller {
     /// yet, but the key it is about to become will show exactly this picture.
     fn rebuild_icons(&mut self) {
         let spec = self.session.as_ref().map(session::DeckSession::image_spec);
-        // The style is the cache's, not a parameter of every call: a variant
-        // composed under another size or anchor is dropped here, before the
-        // rebuild, so no key can be served words from the old style.
-        self.icons.set_style(self.title_style);
         // The title is per key and the icon is per program, so the cache is
         // told both: a key that says something gets a picture with the words in
         // it. A key with no binding has no action to wear a title, and its
         // titled colour is composed on demand instead.
-        let profile = self.profile_store.active();
+        // The words and the styles of the page the deck is showing, taken as
+        // owned values first: the cache and the font need `self` mutably, and a
+        // borrow of the page cannot outlive that.
+        let words: Vec<(Option<String>, titlestyle::TitleStyle)> = {
+            let keys = self.current_keys();
+            let default = &self.title_style;
+            self.store
+                .bindings()
+                .iter()
+                .map(|binding| {
+                    let key = u16::from(binding.key.get());
+                    let title = keys.and_then(|keys| keys.title(key)).map(str::to_string);
+                    let style = keys
+                        .and_then(|keys| keys.title_style(key))
+                        .cloned()
+                        .unwrap_or_else(|| default.clone());
+                    (title, style)
+                })
+                .collect()
+        };
         let faces: Vec<icons::KeyArt<'_>> = self
             .store
             .bindings()
             .iter()
-            .map(|binding| icons::KeyArt {
+            .zip(&words)
+            .map(|(binding, (title, style))| icons::KeyArt {
                 action: &binding.action,
-                title: profile.and_then(|profile| profile.title(u16::from(binding.key.get()))),
+                title: title.as_deref(),
+                style: style.clone(),
             })
             .collect();
+        // Words need a font, and a font needs a deck: with no image size there is
+        // no payload to draw them into, so the scan would be spent for nothing.
+        // The scan itself is started by [`Controller::pump_fonts`], from the one
+        // loop that runs on the UI thread and has the context to spawn with: a
+        // rebuild is called from paths that have no context of their own.
+        let key_count = self
+            .session
+            .as_ref()
+            .map_or(0, session::DeckSession::key_count);
+        let wants_words = needs_fonts(spec, self.current_keys(), key_count);
+        if wants_words && self.text.is_none() && !self.text_scan {
+            self.fonts_wanted = true;
+        }
+        let text = match wants_words {
+            true => self.text.as_mut(),
+            false => None,
+        };
         self.icons
-            .prepare(spec, &faces, self.draft_program.as_deref());
+            .prepare(spec, &faces, self.draft_program.as_deref(), text);
+    }
+
+    /// Starts the font scan if a rebuild asked for one.
+    ///
+    /// Called from the window's own loop, which is the one place that both runs
+    /// on the UI thread and has a context to spawn with; the rebuild path runs
+    /// from places that have neither.
+    fn pump_fonts(&mut self, cx: &mut Context<Self>) {
+        if self.fonts_wanted {
+            self.fonts_wanted = false;
+            self.request_fonts(cx);
+        }
+    }
+
+    /// How one key's title is drawn: its own style, or the app's default.
+    ///
+    /// One place resolves the fallback, so a key, a paint and a preview cannot
+    /// disagree about which font it wears.
+    fn style_for(&self, key: u16) -> titlestyle::TitleStyle {
+        resolve_style(self.current_keys(), &self.title_style, key)
+    }
+
+    /// Asks the background executor for the system's fonts, once.
+    ///
+    /// Reading them is the one slow step in drawing a title — `cosmic-text`
+    /// documents it as up to a second on a release build — so it never runs on
+    /// the UI thread. Until it answers, a titled key shows its picture without
+    /// words: a key a moment behind is better than a window that stops
+    /// answering, and it is the same rule the site icons already follow.
+    fn request_fonts(&mut self, cx: &mut Context<Self>) {
+        if self.text.is_some() || self.text_scan {
+            return;
+        }
+        self.text_scan = true;
+        cx.spawn(async move |this, cx| {
+            let engine = cx
+                .background_spawn(async { titletext::TextEngine::new() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.text = Some(engine);
+                this.text_scan = false;
+                // The list the settings page offers is read from the same
+                // database, so opening it later is a lookup.
+                this.font_families = this
+                    .text
+                    .as_mut()
+                    .map(titletext::TextEngine::families)
+                    .unwrap_or_default();
+                // The words can be drawn now, so the keys that were painted
+                // without them are recomposed and repainted — once.
+                this.rebuild_icons();
+                for key in this.titled_keys() {
+                    this.repaint_key(key);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The keys whose profile gives them words.
+    fn titled_keys(&self) -> Vec<u16> {
+        let count = self
+            .session
+            .as_ref()
+            .map_or(0, session::DeckSession::key_count);
+        match self.current_keys() {
+            Some(keys) => (1..=count as u16)
+                .filter(|key| keys.title(*key).is_some())
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The titled keys that follow the app's default style.
+    ///
+    /// The others say so themselves, in their profile, and a change of the
+    /// default must not repaint them.
+    fn inherited_title_keys(&self) -> Vec<u16> {
+        let Some(keys) = self.current_keys() else {
+            return Vec::new();
+        };
+        self.titled_keys()
+            .into_iter()
+            .filter(|key| keys.title_style(*key).is_none())
+            .collect()
     }
 
     /// Fetches the icon of every site a bound URL points at, off the UI thread.
@@ -1139,9 +1528,8 @@ impl Controller {
             // so the site's icon is neither needed nor requested.
             let key = u16::from(binding.key.get());
             let chosen = self
-                .profile_store
-                .active()
-                .and_then(|profile| profile.appearance_for(key));
+                .current_keys()
+                .and_then(|keys| keys.appearance_for(key));
             if chosen.is_some() {
                 continue;
             }
@@ -1171,6 +1559,12 @@ impl Controller {
                 let _ = this.update(cx, |this, cx| {
                     this.icons.finish_site(&host, picture.as_ref());
                     if found {
+                        // The picture arrived after the last rebuild, so the
+                        // titled variant composed from it does not exist yet:
+                        // recomposing here is what keeps the words on a key
+                        // whose icon was fetched. Without it the key loses its
+                        // title until the next profile or style change.
+                        this.rebuild_icons();
                         // Every key on this site now wears its mark, and the
                         // deck receives the same picture on its next paint.
                         for number in &keys {
@@ -1288,6 +1682,14 @@ impl Controller {
         self.generation = generation;
         self.pending = true;
         self.link = Link::Connecting;
+        // The start of the cadence, in the same log the failures land in: a
+        // boot that reads "connecting" every few seconds and never "connected"
+        // is a different bug from one that never logs a second line.
+        diagnostics::record(&format!(
+            "connecting (attempt {}, waiting up to {} s)",
+            self.attempts.saturating_add(1),
+            LONG_CONNECT_TIMEOUT.as_secs()
+        ));
     }
 
     /// Moves the window to a page.
@@ -1325,6 +1727,9 @@ impl Controller {
 
     /// Switches to a new profile and applies it to the deck.
     fn switch_profile(&mut self, name: &str) {
+        // A profile starts at its root: a folder of the profile we came from is
+        // not a place in this one.
+        self.page_path.clear();
         if let Err(e) = self.profile_store.activate(name) {
             self.note = format!("Failed to switch profile: {e}").into();
             return;
@@ -1337,7 +1742,7 @@ impl Controller {
 
             if let Some(profile) = profile_data {
                 // Apply bindings
-                self.store = profile.bindings.clone();
+                self.store = profile.root.bindings.clone();
 
                 // The keys of this profile run different programs, so their
                 // icons are read before anything is painted.
@@ -1346,7 +1751,12 @@ impl Controller {
                 // Paint all keys according to profile colors or slot
                 let slot = self.paint_from_profile(&profile, key_count);
                 let default_colour = self.paint.rgb();
-                self.apply_all_appearances(slot, &profile.appearance, default_colour, key_count);
+                self.apply_all_appearances(
+                    slot,
+                    &profile.root.appearance,
+                    default_colour,
+                    key_count,
+                );
 
                 self.note = format!("Switched to profile: {name}").into();
             }
@@ -1366,7 +1776,7 @@ impl Controller {
     /// the old fallback was white, which is how every untouched key ended up
     /// glowing on a desk where nothing was bound to it.
     fn paint_from_profile(&self, profile: &ss550_engine::Profile, _key_count: usize) -> Slot {
-        match profile.slot_name() {
+        match profile.root.slot_name() {
             "white" => Slot::White,
             "red" => Slot::Red,
             _ => Slot::Off,
@@ -1379,10 +1789,20 @@ impl Controller {
     /// must not claim it lost a deck that just told it exactly what it cannot
     /// do. Transport failure is the only thing that means the link is gone.
     fn report(&mut self, error: session::SessionError) {
-        let lost = matches!(error, session::SessionError::Deck(DeckError::Transport(_)));
+        // Both of these mean the deck is no longer there to talk to: a transport
+        // failure on a read or a write, and the device not being enumerable at
+        // all. Anything else — a refusal, a wrong size — leaves the session
+        // alone and is only a sentence.
+        let lost = matches!(
+            error,
+            session::SessionError::Deck(DeckError::Transport(_) | DeckError::DeviceNotFound)
+        );
         if lost {
-            self.drop_deck();
-            self.note = format!("Connection lost: {error} — reconnecting automatically.").into();
+            // One path for a deck that went away, whichever call noticed it: the
+            // poll, a paint or the heartbeat. The reason is kept in the sentence
+            // because the retry alone does not say what failed.
+            let reason = error.to_string();
+            self.handle_disconnect(Some(&reason));
         } else {
             self.note = error.to_string().into();
         }
@@ -1471,20 +1891,43 @@ impl Controller {
 
         let spec = self.session.as_ref().map(session::DeckSession::image_spec);
         // The title is drawn on top of whichever face wins, so it is read from
-        // the profile once, before the plans are made.
-        let profile = self.profile_store.active();
-        let plans: Vec<Tile> = (0..key_count)
+        // the profile once, before the plans are made — as an owned value, since
+        // the plan needs the cache and the font mutably.
+        let titles: Vec<Option<String>> = (0..key_count)
             .map(|index| {
                 let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
-                plan_tile(
-                    appearances.get(&key),
-                    self.action_for(key),
-                    profile.and_then(|profile| profile.title(key)),
-                    default_colour,
-                    &self.icons,
-                )
+                self.current_keys()
+                    .and_then(|keys| keys.title(key))
+                    .map(str::to_string)
             })
             .collect();
+        let actions: Vec<Option<Action>> = (0..key_count)
+            .map(|index| {
+                let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
+                self.action_for(key).cloned()
+            })
+            .collect();
+        // The style each key wears: its own when the profile gives one, the
+        // app's default otherwise.
+        let styles: Vec<titlestyle::TitleStyle> = (0..key_count)
+            .map(|index| {
+                let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
+                self.style_for(key)
+            })
+            .collect();
+        let mut plans: Vec<Tile> = Vec::with_capacity(key_count);
+        for index in 0..key_count {
+            let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
+            plans.push(plan_tile(
+                appearances.get(&key),
+                actions[index].as_ref(),
+                titles[index].as_deref(),
+                &styles[index],
+                default_colour,
+                &mut self.icons,
+                &mut self.text,
+            ));
+        }
 
         let Some(session) = self.session.as_mut() else {
             return;
@@ -1494,23 +1937,24 @@ impl Controller {
         let mut painted = vec![slot; key_count];
         for (index, plan) in plans.iter().enumerate() {
             let result = match plan {
-                Tile::Asset { name, title } => {
-                    let tile = asset_tile(
-                        &self.assets,
-                        self.tiles.as_mut(),
-                        spec,
-                        name,
-                        title.as_deref(),
-                        self.title_style,
-                    );
-                    match tile {
-                        Ok(jpeg) => Self::paint_over_black(session, index, &jpeg),
-                        Err(message) => Err(PaintFailure::Picture(message)),
+                    Tile::Asset { name, title, style } => {
+                        let tile = asset_tile(
+                            &self.assets,
+                            self.tiles.as_mut(),
+                            spec,
+                            name,
+                            title.as_deref(),
+                            style,
+                            &mut self.text,
+                        );
+                        match tile {
+                            Ok(jpeg) => Self::paint_over_black(session, index, &jpeg),
+                            Err(message) => Err(PaintFailure::Picture(message)),
+                        }
                     }
-                }
-                Tile::Art(picture) => Self::paint_over_black(session, index, picture),
-                Tile::TitledColour(picture) => Self::paint_over_black(session, index, picture),
-                Tile::Colour(rgb) => session.paint(index, *rgb).map_err(PaintFailure::Session),
+                    Tile::Art(picture) => Self::paint_over_black(session, index, picture),
+                    Tile::TitledColour(picture) => Self::paint_over_black(session, index, picture),
+                    Tile::Colour(rgb) => session.paint(index, *rgb).map_err(PaintFailure::Session),
             };
 
             if let Err(error) = result {
@@ -1634,13 +2078,20 @@ impl Controller {
             return;
         };
         let Some(action) = self.store.get(number).cloned() else {
-            self.note = format!("Key #{} pressed — nothing is bound to it yet.", idx + 1).into();
+            self.note = format!("Key #{} pressed - nothing is bound to it yet.", idx + 1).into();
             return;
         };
 
+        // Navigation changes what the deck is showing, so it is applied here,
+        // where the pages and the keys drawn from them live. The runner never
+        // sees it: a worker with no window cannot swap a page.
+        if self.apply_navigation(&action, idx) {
+            return;
+        }
+
         let summary = action.summary();
         match self.runner.submit(action) {
-            Ok(()) => self.note = format!("Key #{} pressed — {summary}.", idx + 1).into(),
+            Ok(()) => self.note = format!("Key #{} pressed - {summary}.", idx + 1).into(),
             Err(err) => {
                 self.note = format!(
                     "Key #{} pressed, but the action was refused: {err}",
@@ -1649,6 +2100,276 @@ impl Controller {
                 .into();
             }
         }
+    }
+
+    /// The page the deck is showing, or `None` for the root.
+    fn current_page(&self) -> Option<&str> {
+        self.page_path.last().map(String::as_str)
+    }
+
+    /// The keys the deck is showing: the page it is on, or the root.
+    fn current_keys(&self) -> Option<&ss550_engine::profiles::PageKeys> {
+        self.profile_store.active()?.page(self.current_page())
+    }
+
+    /// Applies a navigation action, answering whether it was one.
+    ///
+    /// A folder that is no longer there, and a step back from the root, are
+    /// facts worth a sentence: silently doing nothing reads as a broken key.
+    fn apply_navigation(&mut self, action: &Action, idx: usize) -> bool {
+        let exists = |page: &str| {
+            self.profile_store
+                .active()
+                .and_then(|profile| profile.page(Some(page)))
+                .is_some()
+        };
+        let outcome = navigate(&mut self.page_path, action, exists);
+        match outcome {
+            NavOutcome::Entered | NavOutcome::WentBack => {
+                self.show_current_page();
+                true
+            }
+            NavOutcome::UnknownPage => {
+                let page = match action {
+                    Action::Folder { page } => page.as_str(),
+                    _ => "",
+                };
+                self.note = format!(
+                    "Key #{} opens \"{page}\", which this profile no longer has.",
+                    idx + 1
+                )
+                .into();
+                true
+            }
+            NavOutcome::AtRoot => {
+                self.note = "This is the top page: there is nothing to go back to.".into();
+                true
+            }
+            NavOutcome::NotNavigation => match action {
+                // A profile switch is navigation the stack does not hold: it
+                // replaces the whole context, so it starts that profile at its
+                // root instead of entering it.
+                Action::Profile { name } => {
+                    let name = name.clone();
+                    self.switch_profile(&name);
+                    true
+                }
+                _ => false,
+            },
+        }
+    }
+
+    /// Shows one page of the active profile, so its keys can be edited.
+    ///
+    /// Opening a page here is the same act as pressing a key that opens it: the
+    /// stack grows, and the deck follows. `None` returns to the top page.
+    fn show_deck_page(&mut self, page: Option<&str>, cx: &mut Context<Self>) {
+        match page {
+            Some(page) => self.page_path.push(page.to_string()),
+            None => self.page_path.clear(),
+        }
+        self.show_current_page();
+        cx.notify();
+    }
+
+    /// Creates a page in the active profile, named by the field on the card.
+    fn add_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.page_input.read(cx).value().trim().to_string();
+        if name.is_empty() {
+            self.note = "A page needs a name.".into();
+            return;
+        }
+        let added = self
+            .profile_store
+            .active_mut()
+            .is_some_and(|profile| profile.add_page(&name));
+        if !added {
+            self.note = format!(
+                "\"{name}\" is already a page here, or not a name a page can have (up to {} \
+                 characters, no control characters).",
+                ss550_engine::MAX_PAGE_NAME_CHARS
+            )
+            .into();
+            return;
+        }
+        self.page_input
+            .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        self.save_profile();
+        self.note = format!("Page \"{name}\" created. BIND puts the selected key on it.").into();
+    }
+
+    /// Renames the active profile to whatever the card's field says.
+    ///
+    /// A profile is addressed by its name — it is what a `profile` binding holds
+    /// and what the store remembers as active — so the engine moves both, and
+    /// the deck is painted again because the keys that switch profiles now say a
+    /// different name.
+    fn rename_active_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(from) = self.profile_store.active_name().map(str::to_string) else {
+            self.note = "There is no active profile to rename.".into();
+            return;
+        };
+        let to = self.profile_input.read(cx).value().trim().to_string();
+        if to.is_empty() || to == from {
+            self.note =
+                format!("Write the new name for \"{from}\" in the field, then RENAME ACTIVE.")
+                    .into();
+            return;
+        }
+        let Some(deck_key) = self
+            .session
+            .as_ref()
+            .map(|session| session.key().to_string())
+        else {
+            self.note = "Connect a deck to rename a profile: it is saved per deck.".into();
+            return;
+        };
+        if let Err(error) =
+            self.profile_store
+                .rename_profile(&from, &to, &deck_key, &ss550_engine::config_dir())
+        {
+            self.note = error.into();
+            return;
+        }
+        self.profile_input
+            .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        // The store the deck runs is a copy of the page's bindings: the rename
+        // rewrote the profile, so the copy is read again before the keys are
+        // painted, or a key would keep saying the old profile's name.
+        self.show_current_page();
+        self.note = format!("Profile \"{from}\" is now \"{to}\".").into();
+        cx.notify();
+    }
+
+    /// Renames a page to whatever the card's field says.
+    ///
+    /// A page is addressed by its name, so the keys that open it move with it —
+    /// the profile does that, on every page. The stack is renamed as well: an
+    /// entry still holding the old name would silently show the top page instead
+    /// of where the deck was.
+    fn rename_page(&mut self, from: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.page_input.read(cx).value().trim().to_string();
+        if name.is_empty() {
+            self.note =
+                format!("Write the new name for \"{from}\" in the field, then RENAME.").into();
+            return;
+        }
+        let renamed = self
+            .profile_store
+            .active_mut()
+            .is_some_and(|profile| profile.rename_page(from, &name));
+        if !renamed {
+            self.note = format!(
+                "\"{name}\" is already a page here, or not a name a page can have (up to {} \
+                 characters, no control characters).",
+                ss550_engine::MAX_PAGE_NAME_CHARS
+            )
+            .into();
+            return;
+        }
+        for open in self.page_path.iter_mut() {
+            if open == from {
+                *open = name.clone();
+            }
+        }
+        self.page_input
+            .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        self.save_profile();
+        // The words on the keys that open the page just changed, so the page the
+        // deck is showing is painted again from its own keys.
+        self.show_current_page();
+        self.note = format!("Page \"{from}\" is now \"{name}\".").into();
+    }
+
+    /// Removes a page, and every key on it.
+    ///
+    /// A deck left on a page that is gone would show keys nobody can reach
+    /// again, so the stack goes back to the top.
+    fn remove_page(&mut self, name: &str, _cx: &mut Context<Self>) {
+        let removed = self
+            .profile_store
+            .active_mut()
+            .is_some_and(|profile| profile.remove_page(name));
+        if !removed {
+            self.note = format!("\"{name}\" is not a page of this profile.").into();
+            return;
+        }
+        if self.page_path.iter().any(|open| open == name) {
+            self.page_path.clear();
+            self.show_current_page();
+        }
+        self.save_profile();
+        self.note = format!("Page \"{name}\" removed, with its keys.").into();
+    }
+
+    /// Binds the selected key to open a page.
+    fn bind_selected_to_page(&mut self, page: &str, cx: &mut Context<Self>) {
+        self.bind_and_repaint(
+            self.selected_key,
+            Action::Folder {
+                page: page.to_string(),
+            },
+            cx,
+        );
+    }
+
+    /// Binds the selected key to step back out of a page.
+    fn bind_selected_back(&mut self, cx: &mut Context<Self>) {
+        self.bind_and_repaint(self.selected_key, Action::Back, cx);
+    }
+
+    /// Binds the selected key to activate another profile.
+    fn bind_selected_profile(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.bind_and_repaint(
+            self.selected_key,
+            Action::Profile {
+                name: name.to_string(),
+            },
+            cx,
+        );
+    }
+
+    /// Puts the deck and the window on the page the stack says.
+    ///
+    /// The store the deck runs is replaced by the page's own, the icons are read
+    /// again because a page binds different programs, and every key is repainted:
+    /// a page switch changes all of them by definition.
+    fn show_current_page(&mut self) {
+        let page = self.current_page().map(str::to_string);
+        let keys = match self.current_keys() {
+            Some(keys) => keys.clone(),
+            None => {
+                // The page vanished under the stack: fall back to the root
+                // rather than run a set of keys nobody can see.
+                self.page_path.clear();
+                match self.profile_store.active() {
+                    Some(profile) => profile.root.clone(),
+                    None => return,
+                }
+            }
+        };
+        self.store = keys.bindings.clone();
+        self.selected_key = KeyNumber::default();
+        // Selection is per page: the key that was selected may run something
+        // else here, and the editor is about to show it.
+        let _ = page;
+
+        self.rebuild_icons();
+        let key_count = self
+            .session
+            .as_ref()
+            .map_or(0, session::DeckSession::key_count);
+        let slot = match keys.slot_name() {
+            "white" => Slot::White,
+            "red" => Slot::Red,
+            _ => Slot::Off,
+        };
+        let default_colour = self.paint.rgb();
+        self.apply_all_appearances(slot, &keys.appearance, default_colour, key_count);
+        self.note = match self.current_page() {
+            Some(page) => format!("Showing \"{page}\".").into(),
+            None => "Showing the top page.".into(),
+        };
     }
 
     /// Surfaces any failure the action worker reported.
@@ -1665,11 +2386,6 @@ impl Controller {
     fn maintain(&mut self) {
         self.collect_attempts();
 
-        // Hotplug detection: check if deck was unexpectedly disconnected
-        if self.session.is_some() && !is_deck_present() {
-            self.handle_disconnect();
-        }
-
         // Try to reconnect if disconnected and backoff allows
         if self.session.is_none() && !self.pending && Instant::now() >= self.reconnect_at {
             self.request_attempt();
@@ -1679,16 +2395,57 @@ impl Controller {
     }
 
     /// Handles an unexpected disconnect with exponential backoff.
-    fn handle_disconnect(&mut self) {
+    ///
+    /// The only way in is [`Controller::report`], from a read or a write that
+    /// failed on the session the app already holds — the deck going away is a
+    /// transport error, not a fact to be discovered by looking. This loop used
+    /// to ask Windows for the whole HID inventory instead, twice a second, on
+    /// the UI thread: `HidApi::new()` plus a full `refresh_devices()`, which
+    /// walks and opens every HID device on the machine. That is the one thing
+    /// the app did that touched the pointer's own hardware, and a device that
+    /// stalls on that walk takes the rest of the bus down with it.
+    fn handle_disconnect(&mut self, reason: Option<&str>) {
         self.drop_deck();
         self.schedule_retry();
 
         self.note = format!(
-            "Connection lost: deck disconnected. Retrying in {}s (attempt {}).",
+            "Connection lost: {}. Retrying in {}s (attempt {}).",
+            reason.unwrap_or("the deck is no longer answering"),
             self.retry_delay().as_secs(),
             self.attempts
         )
         .into();
+        diagnostics::record(&format!(
+            "disconnected: {} — retrying in {} s (attempt {})",
+            reason.unwrap_or("no reason given"),
+            self.retry_delay().as_secs(),
+            self.attempts
+        ));
+    }
+
+    /// Installs the controller where this user can find and start it.
+    ///
+    /// Two steps and no installer: the running binary is copied into the
+    /// folder the logon entry already names, and a Start Menu entry is written
+    /// that starts that copy. Both are per-user; nothing needs administrator
+    /// rights and nothing is registered anywhere.
+    fn install_app(&mut self) {
+        let running = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(error) => {
+                self.note = format!("The running program could not name itself: {error}").into();
+                return;
+            }
+        };
+        self.note = match ss550_tray::install::install(&running) {
+            Ok(entry) => format!(
+                "Installed. \"Sh-Deck\" is now in the Start Menu and in your launcher; \
+                 the entry is {}.",
+                entry.display()
+            )
+            .into(),
+            Err(error) => format!("The controller could not be installed: {error}").into(),
+        };
     }
 
     /// Does what the user asked for in the tray menu.
@@ -1849,6 +2606,17 @@ impl Controller {
                 keys.to_string(),
                 DraftKind::Keys,
             ),
+            // A navigation key has no field in this editor yet: it is selected
+            // like any other, and the editor shows nothing to fill. Its own
+            // controls come with the pages card, which is where a folder is
+            // chosen.
+            Some(Action::Folder { .. }) | Some(Action::Back) | Some(Action::Profile { .. }) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                self.draft,
+            ),
             None => (
                 String::new(),
                 String::new(),
@@ -1870,9 +2638,8 @@ impl Controller {
         // without running anything, and the field is written on every load so a
         // title never follows the selection to the next key.
         let title = self
-            .profile_store
-            .active()
-            .and_then(|profile| profile.title(u16::from(number.get())))
+            .current_keys()
+            .and_then(|keys| keys.title(u16::from(number.get())))
             .unwrap_or_default()
             .to_string();
         self.program_input
@@ -2026,6 +2793,22 @@ impl Controller {
 
     /// Binds the selected key to what the panel holds, and saves it.
     fn save_binding(&mut self, cx: &mut Context<Self>) {
+        // A key that navigates is not edited by this form: its fields are empty
+        // because they do not apply, and saving an empty program over it would
+        // destroy the page it opens. It is rebound from the pages card, which is
+        // the only place that knows the pages this profile has.
+        if let Some(action) = self.store.get(self.selected_key) {
+            if action.is_navigation() {
+                self.note = format!(
+                    "Key #{} is {}: change what it opens from the pages card, not here.",
+                    self.selected_key.get(),
+                    action.summary()
+                )
+                .into();
+                return;
+            }
+        }
+
         let action = match self.draft {
             DraftKind::Launch => {
                 let program = self.program_input.read(cx).value().trim().to_string();
@@ -2085,7 +2868,8 @@ impl Controller {
             true => None,
             false => Some(text.as_str()),
         };
-        if let Err(sentence) = self.profile_store.set_title(key, title) {
+        let page = self.current_page().map(str::to_string);
+        if let Err(sentence) = self.profile_store.set_title(key, title, page.as_deref()) {
             self.note = sentence.into();
             return;
         }
@@ -2105,19 +2889,16 @@ impl Controller {
         self.save_profile();
     }
 
-    /// Applies a title style to every titled key, and keeps it for the next start.
+    /// Applies the default title style, and repaints the keys that follow it.
     ///
-    /// This is the one path a style change takes. It repaints through the same
-    /// steps a title edit does — the icon cache drops the variants it composed
-    /// under the old style, `rebuild_icons` recomposes them, and each titled key
-    /// is repainted — so nothing here runs inside a frame and the window and the
-    /// deck are redrawn from one style. A key with no title is not touched: its
-    /// payload cannot change.
+    /// A key with its own style is left alone: it does not follow the default,
+    /// which is the whole point of giving it one. A key with no title is not
+    /// touched either — its payload cannot change.
     fn set_title_style(&mut self, style: titlestyle::TitleStyle, cx: &mut Context<Self>) {
         if self.title_style == style {
             return;
         }
-        self.title_style = style;
+        self.title_style = style.clone();
 
         // The file is written first, so the sentence the status line carries is
         // about the save and not about the paint. A write that failed leaves the
@@ -2131,22 +2912,114 @@ impl Controller {
             }
         };
 
-        // Recompose every titled variant, then repaint the keys that carry one.
+        // Recompose every variant whose style came from the default, then
+        // repaint those keys.
         self.rebuild_icons();
-        let titled: Vec<u16> = match self.profile_store.active() {
-            Some(profile) => {
-                let count = self
-                    .session
-                    .as_ref()
-                    .map_or(0, session::DeckSession::key_count);
-                (1..=count as u16)
-                    .filter(|key| profile.title(*key).is_some())
-                    .collect()
-            }
-            None => Vec::new(),
-        };
-        for key in titled {
+        for key in self.inherited_title_keys() {
             self.repaint_key(key);
+        }
+        cx.notify();
+    }
+
+    /// Gives one key its own title style, or puts it back on the default.
+    ///
+    /// The style lives in the profile, beside the words, so switching profile
+    /// switches the look as well. `None` removes the override and leaves the
+    /// words alone: a key that goes back to the default still says what it said.
+    fn set_key_title_style(
+        &mut self,
+        key: u16,
+        style: Option<&titlestyle::TitleStyle>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(deck_key) = self
+            .session
+            .as_ref()
+            .map(|session| session.key().to_string())
+        else {
+            self.note = "Connect a deck to give a key its own title style.".into();
+            return;
+        };
+        let page = self.current_page().map(str::to_string);
+        if let Err(error) = self.profile_store.set_title_style(
+            key,
+            style.cloned(),
+            page.as_deref(),
+            &deck_key,
+            &ss550_engine::config_dir(),
+        ) {
+            self.note = error.into();
+            return;
+        }
+
+        self.note = match style {
+            Some(style) => format!("Key #{key}'s title is {}.", style.summary()).into(),
+            None => format!("Key #{key}'s title follows the default now.").into(),
+        };
+        self.rebuild_icons();
+        self.repaint_key(key);
+        cx.notify();
+    }
+
+    /// The style one target edits: the app's default, or a key's own.
+    fn title_style_of(&self, target: FontTarget) -> titlestyle::TitleStyle {
+        match target {
+            FontTarget::Defaults => self.title_style.clone(),
+            FontTarget::Key(key) => self.style_for(key),
+        }
+    }
+
+    /// Writes a style for `target` and repaints what it changed.
+    fn set_title_style_at(
+        &mut self,
+        target: FontTarget,
+        style: titlestyle::TitleStyle,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            FontTarget::Defaults => self.set_title_style(style, cx),
+            FontTarget::Key(key) => self.set_key_title_style(key, Some(&style), cx),
+        }
+    }
+
+    /// A title size in pixels, from whichever stepper was clicked.
+    ///
+    /// The clamp is [`ss550_engine::TitleStyle::with_size`]'s, not a second copy
+    /// of the rule, so a typed number and a clicked one land on the same range.
+    fn set_title_size(&mut self, target: FontTarget, px: u16, cx: &mut Context<Self>) {
+        let style = self.title_style_of(target).with_size(px);
+        self.set_title_style_at(target, style, cx);
+    }
+
+    /// Chooses the family the open list was asking about.
+    ///
+    /// An empty family is the system's own sans, which is what a machine that
+    /// has no font of the chosen name falls back to as well.
+    fn choose_font(&mut self, family: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.font_picker.take() else {
+            return;
+        };
+        let style = self.title_style_of(target).with_family(family);
+        // The search was for the font that was just picked; the next open starts
+        // whole, exactly like the application picker.
+        self.font_query
+            .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        self.set_title_style_at(target, style, cx);
+    }
+
+    /// Opens or closes the family list, on the style that asked for it.
+    ///
+    /// One list serves both places, so a click on a key's FONT chip and a click
+    /// on the default's cannot disagree about which style they are editing.
+    /// The scan is the one slow step in drawing a title, so it runs on the
+    /// background executor: the list fills itself when it answers.
+    fn toggle_font_picker(&mut self, target: FontTarget, cx: &mut Context<Self>) {
+        self.font_picker = match self.font_picker {
+            Some(open) if open == target => None,
+            _ => Some(target),
+        };
+        if self.font_picker.is_some() {
+            self.request_fonts(cx);
         }
         cx.notify();
     }
@@ -2167,7 +3040,12 @@ impl Controller {
         let recent = action.clone();
         match self.save_action(number, action) {
             Ok(saved) => {
-                let recents_error = self.record_recent(&recent);
+                // A page is not something that runs, so opening one is not a recent
+                // action: the list would fill with places instead of programs.
+                let recents_error = match recent.is_navigation() {
+                    true => None,
+                    false => self.record_recent(&recent),
+                };
                 // The key's face comes from what it now runs, so the icon of the
                 // new program is read before the repaint and never during it.
                 self.rebuild_icons();
@@ -2219,9 +3097,13 @@ impl Controller {
         if let Some(session) = self.session.as_ref() {
             let deck_key = session.key().to_string();
             let config_dir = ss550_engine::config_dir();
-            let _ = self
-                .profile_store
-                .update_bindings(&self.store, &deck_key, &config_dir);
+            let page = self.current_page().map(str::to_string);
+            let _ = self.profile_store.update_bindings(
+                &self.store,
+                page.as_deref(),
+                &deck_key,
+                &config_dir,
+            );
         }
 
         match self.store.save(&path) {
@@ -2241,41 +3123,94 @@ impl Controller {
     }
 
     /// Removes the selected key's binding and saves the file.
-    fn clear_binding(&mut self) {
-        self.remove_binding(self.selected_key);
+    fn clear_binding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.remove_binding(self.selected_key, window, cx);
     }
 
     /// Removes one key's binding and saves the file.
     ///
     /// Takes the key as an argument so the bound list can unbind a row without
     /// moving the selection away from the key the editor is showing.
-    fn remove_binding(&mut self, number: KeyNumber) {
+    ///
+    /// What the key *said* goes with what it did: a title names the action, and a
+    /// title left behind would sit on an empty key promising something that no
+    /// longer happens. The style is cleared in the same call — the engine keeps
+    /// "no title" as one representation.
+    fn remove_binding(&mut self, number: KeyNumber, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.store_path.clone() else {
             self.note = "No deck is connected, so there is no binding file to clear.".into();
             return;
         };
-        match self.store.remove(number) {
-            Some(_) => match self.store.save(&path) {
-                Ok(()) => {
-                    self.note =
-                        format!("Key #{} cleared — it does nothing now.", number.get()).into();
-                    // A key that runs nothing shows the flat colour again, and
-                    // the icon it no longer needs leaves the cache with it.
-                    self.rebuild_icons();
-                    self.repaint_key(u16::from(number.get()));
-                }
-                Err(err) => {
-                    self.note = format!(
-                        "Key #{} was cleared, but the file was not saved: {err}",
-                        number.get()
-                    )
-                    .into();
-                }
-            },
-            None => {
-                self.note = format!("Key #{} had no action to clear.", number.get()).into();
+        let key = u16::from(number.get());
+        let had_action = self.store.remove(number).is_some();
+        if had_action {
+            if let Err(error) = self.store.save(&path) {
+                self.note = format!(
+                    "Key #{} was cleared, but the file was not saved: {error}",
+                    number.get()
+                )
+                .into();
+                return;
+            }
+            // The profile holds the same bindings, and *it* is what the deck is
+            // handed on the next start — a key removed from one file and left in
+            // the other comes back when the app restarts. Binding already writes
+            // both; clearing has to as well.
+            if let Some(session) = self.session.as_ref() {
+                let deck_key = session.key().to_string();
+                let page = self.current_page().map(str::to_string);
+                let _ = self.profile_store.update_bindings(
+                    &self.store,
+                    page.as_deref(),
+                    &deck_key,
+                    &ss550_engine::config_dir(),
+                );
             }
         }
+
+        // The words go too, even when the action was already gone: CLEAR KEY is
+        // about the key, and a title left behind would sit on an empty key
+        // promising something that no longer happens. The style is cleared in the
+        // same call — the engine keeps "no title" as one representation.
+        let had_title = self
+            .current_keys()
+            .and_then(|keys| keys.title(key))
+            .is_some();
+        let page = self.current_page().map(str::to_string);
+        let title = self.profile_store.set_title(key, None, page.as_deref());
+        let saved = match title {
+            Ok(()) => self.save_profile_result(),
+            Err(error) => Err(format!("its title could not be cleared: {error}")),
+        };
+
+        // A key that runs nothing shows the flat colour again, and the icon it no
+        // longer needs leaves the cache with it.
+        self.rebuild_icons();
+        self.repaint_key(key);
+        // The form is the key too: with no title left in the profile, the field
+        // would otherwise keep the words that were just removed and save them
+        // back on the next SAVE TITLE.
+        if number == self.selected_key {
+            self.load_draft(number, window, cx);
+        }
+
+        self.note = match (saved, had_action, had_title) {
+            (Err(error), _, _) => format!("Key #{} was cleared, but {error}", number.get()).into(),
+            (Ok(()), true, true) => format!(
+                "Key #{} cleared — it does nothing now, and its title is gone.",
+                number.get()
+            )
+            .into(),
+            (Ok(()), true, false) => {
+                format!("Key #{} cleared — it does nothing now.", number.get()).into()
+            }
+            (Ok(()), false, true) => format!(
+                "Key #{} says nothing now — its title is gone.",
+                number.get()
+            )
+            .into(),
+            (Ok(()), false, false) => format!("Key #{} had nothing to clear.", number.get()).into(),
+        };
     }
 
     /// Asks the user for a picture and puts it on the selected key.
@@ -2400,10 +3335,11 @@ impl Controller {
         }
 
         let key = u16::from(self.selected_key.get());
-        if let Err(error) = self
-            .profile_store
-            .set_appearance(key, Some(ss550_engine::Appearance::image(name.clone())))
-        {
+        if let Err(error) = self.profile_store.set_appearance(
+            key,
+            Some(ss550_engine::Appearance::image(name.clone())),
+            self.current_page().map(str::to_string).as_deref(),
+        ) {
             self.note = format!("Key #{key} was not changed: {error}").into();
             return;
         }
@@ -2427,7 +3363,11 @@ impl Controller {
         }
 
         let key = u16::from(self.selected_key.get());
-        if let Err(error) = self.profile_store.set_appearance(key, None) {
+        let page = self.current_page().map(str::to_string);
+        if let Err(error) = self
+            .profile_store
+            .set_appearance(key, None, page.as_deref())
+        {
             self.note = format!("Key #{key} was not changed: {error}").into();
             return;
         }
@@ -2444,27 +3384,27 @@ impl Controller {
     /// The file is what makes an assignment real; the deck showing the picture
     /// until the app closes is not the same thing.
     fn save_profile(&mut self) {
-        let Some(deck_key) = self
-            .session
-            .as_ref()
-            .map(|session| session.key().to_string())
-        else {
-            self.note = "Connect a deck to save a profile.".into();
-            return;
-        };
-        if let Err(error) = self
-            .profile_store
-            .save(&deck_key, &ss550_engine::config_dir())
-        {
-            self.note = format!("The profile changed but was not saved: {error}").into();
+        if let Err(error) = self.save_profile_result() {
+            self.note = error.into();
         }
     }
 
-    /// Repaints one key from what the profile says it shows now.
+    /// Writes the profile file and hands the failure back instead of reporting it.
     ///
-    /// Returns `false` when the picture path failed; the note already says why.
-    /// A colour or a removal cannot fail this way, so the caller's own message
-    /// survives.
+    /// The caller that has something more specific to say about the same click — a
+    /// key cleared, a title removed with it — composes its own sentence and needs
+    /// to know whether the file was written.
+    fn save_profile_result(&mut self) -> Result<(), String> {
+        let deck_key = self
+            .session
+            .as_ref()
+            .map(|session| session.key().to_string())
+            .ok_or_else(|| "Connect a deck to save a profile.".to_string())?;
+        self.profile_store
+            .save(&deck_key, &ss550_engine::config_dir())
+            .map_err(|error| format!("The profile changed but was not saved: {error}"))
+    }
+
     /// Paints a key black, then the image, and answers the failure either way.
     ///
     /// The deck's panel is a little larger than the area it fills with an image:
@@ -2487,25 +3427,41 @@ impl Controller {
             .map_err(PaintFailure::Session)
     }
 
+    /// Repaints one key from what the profile says it shows now.
+    ///
+    /// Returns `false` when the picture path failed; the note already says why.
+    /// A colour or a removal cannot fail this way, so the caller's own message
+    /// survives.
     fn repaint_key(&mut self, key: u16) -> bool {
         let appearance = self
-            .profile_store
-            .active()
-            .and_then(|profile| profile.appearance_for(key))
+            .current_keys()
+            .and_then(|keys| keys.appearance_for(key))
             .cloned();
+        // The title and the action are taken as owned values: the plan needs the
+        // cache and the font mutably, and a borrow of the store cannot outlive
+        // that.
         let title = self
-            .profile_store
-            .active()
-            .and_then(|profile| profile.title(key));
+            .current_keys()
+            .and_then(|keys| keys.title(key))
+            .map(str::to_string);
+        let action = self.action_for(key).cloned();
+        // The title and the action are taken as owned values: the plan needs the
+        // cache and the font mutably, and a borrow of the store cannot outlive
+        // that.
+        // The key's own style, or the app's default: one resolution, used by the
+        // plan and by the picture the deck receives.
+        let style = self.style_for(key);
         // The plan is resolved from the profile, the binding and the icon cache
         // before the session is borrowed: nothing here reads the wire, and
         // nothing here can fail after the first byte.
         let plan = plan_tile(
             appearance.as_ref(),
-            self.action_for(key),
-            title,
+            action.as_ref(),
+            title.as_deref(),
+            &style,
             self.paint.rgb(),
-            &self.icons,
+            &mut self.icons,
+            &mut self.text,
         );
         let index = usize::from(key.saturating_sub(1));
         let spec = self.session.as_ref().map(session::DeckSession::image_spec);
@@ -2515,14 +3471,15 @@ impl Controller {
         };
 
         let result = match &plan {
-            Tile::Asset { name, title } => {
+            Tile::Asset { name, title, style } => {
                 let tile = asset_tile(
                     &self.assets,
                     self.tiles.as_mut(),
                     spec,
                     name,
                     title.as_deref(),
-                    self.title_style,
+                    style,
+                    &mut self.text,
                 );
                 match tile {
                     Ok(jpeg) => Self::paint_over_black(session, index, &jpeg),
@@ -2691,7 +3648,11 @@ fn join_notes(first: Option<String>, second: Option<String>) -> Option<String> {
 }
 
 impl Render for Controller {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The height the side column is bounded by, read before the tree is
+        // built: the layout needs a number, and the window is the only place one
+        // exists.
+        self.viewport_h = f32::from(window.viewport_size().height);
         // Measured from here to the finished tree: that is what the window
         // spends to put a frame on screen, and what startup is made of.
         let frame_started = Instant::now();
@@ -2789,6 +3750,25 @@ fn main() {
 
     // Started by Windows: the controller lives in the tray with no window.
     let hidden = std::env::args().any(|argument| argument == autostart::HIDDEN_FLAG);
+
+    // One controller per desktop. A second start — a double click on the Start
+    // Menu entry while this one lives in the tray — asks the running window to
+    // show itself and leaves, instead of opening a second controller that
+    // would fight for the deck, the tray icon and the tiles.
+    let mut singleton = match ss550_tray::instance::acquire() {
+        Ok(ss550_tray::instance::Launch::AlreadyRunning) => {
+            diagnostics::record("another controller is running: asked it to show");
+            return;
+        }
+        Ok(ss550_tray::instance::Launch::First(guard)) => Some(guard),
+        Err(error) => {
+            // Without the claim the app still runs; it just cannot be the only
+            // one. Losing that is worth a line, not a refusal to start.
+            diagnostics::record(&format!("single instance unavailable: {error}"));
+            None
+        }
+    };
+
     diagnostics::record(&format!(
         "started v{} (hidden={hidden})",
         env!("CARGO_PKG_VERSION")
@@ -2821,9 +3801,14 @@ fn main() {
                 } else {
                     window.activate_window();
                 }
-                window.set_window_title("Deck Controller");
+                window.set_window_title("Sh-Deck");
                 Theme::change(ThemeMode::Dark, Some(window), cx);
-                cx.new(|cx| Controller::new(window, cx))
+                let singleton = singleton.take();
+                cx.new(move |cx| {
+                    let mut controller = Controller::new(window, cx);
+                    controller.singleton = singleton;
+                    controller
+                })
             })
             .expect("failed to open the controller window");
         });
@@ -2832,11 +3817,189 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_clicks, apply_pick, join_notes, load_recents_at, plan_tile, record_recent_at,
-        slot_for, PickOutcome, PictureDialog, Slot, Tile,
+        advance_clicks, apply_pick, join_notes, load_recents_at, navigate, needs_fonts, plan_tile,
+        read_deck_path_at, record_recent_at, resolve_style, slot_for, write_deck_path_at,
+        NavOutcome, PickOutcome, PictureDialog, Slot, Tile,
     };
     use ss550_engine::{Action, AssetLibrary, Recents};
     use std::path::PathBuf;
+
+    #[test]
+    fn a_title_on_a_key_that_runs_nothing_still_asks_for_a_font() {
+        // The regression this pins: the scan used to be demanded only by the
+        // *bound* keys, so naming a key that runs nothing wrote words the deck
+        // could never draw. The profile below has a title and **no binding at
+        // all**, which is the case that used to be invisible.
+        let spec = deck_api::ImageSpec::new(72, 72, 4_096, deck_api::ImageFormat::Jpeg);
+        let mut profile = ss550_engine::Profile::new("default");
+        profile
+            .root
+            .set_title(4, Some("Music"))
+            .expect("set the title");
+
+        assert!(
+            needs_fonts(Some(spec), Some(&profile.root), 6),
+            "an unbound key with words still needs a font"
+        );
+        assert!(
+            !needs_fonts(
+                Some(spec),
+                Some(&ss550_engine::Profile::new("empty").root),
+                6
+            ),
+            "a profile with no titles has nothing to set in a font"
+        );
+        assert!(
+            !needs_fonts(None, Some(&profile.root), 6),
+            "with no deck there is no payload to draw into"
+        );
+        assert!(
+            !needs_fonts(Some(spec), None, 6),
+            "with no profile there is nothing to read"
+        );
+        assert!(
+            !needs_fonts(Some(spec), Some(&profile.root), 3),
+            "a title on a key the deck does not have is not drawn anywhere"
+        );
+    }
+
+    #[test]
+    fn the_deck_path_survives_a_restart_and_forgets_when_there_is_none() {
+        // What the next start reads to open the deck without walking the bus:
+        // a hint on disk, which has to come back exactly, and to disappear when
+        // the deck is not there any more.
+        let dir = std::env::temp_dir().join(format!("ss550-path-{}", std::process::id()));
+        let file = dir.join("deck-path.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(read_deck_path_at(&file), None, "nothing remembered yet");
+
+        let path =
+            r"\\?\hid#vid_1b80&pid_a139#9&2f7c1f3e&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        write_deck_path_at(&file, Some(path));
+        assert_eq!(read_deck_path_at(&file), Some(path.to_string()));
+
+        // A trailing newline from an editor is not part of the path.
+        std::fs::write(&file, format!("{path}\r\n")).expect("write");
+        assert_eq!(read_deck_path_at(&file), Some(path.to_string()));
+
+        write_deck_path_at(&file, Some("   "));
+        assert_eq!(
+            read_deck_path_at(&file),
+            None,
+            "a blank path is no path at all"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_page_stack_enters_leaves_and_stops_at_the_root() {
+        // S3, without a deck: entering grows the stack, VOLVER takes the last
+        // entry, and on the root there is nothing to take.
+        let mut stack: Vec<String> = Vec::new();
+        let known = |page: &str| page == "Media" || page == "Live";
+
+        assert_eq!(
+            navigate(&mut stack, &Action::Back, known),
+            NavOutcome::AtRoot,
+            "the root has nowhere to go back to"
+        );
+        assert!(stack.is_empty(), "a refused step back changes nothing");
+
+        assert_eq!(
+            navigate(
+                &mut stack,
+                &Action::Folder {
+                    page: "Media".to_string()
+                },
+                known
+            ),
+            NavOutcome::Entered
+        );
+        assert_eq!(
+            navigate(
+                &mut stack,
+                &Action::Folder {
+                    page: "Live".to_string()
+                },
+                known
+            ),
+            NavOutcome::Entered
+        );
+        assert_eq!(stack, vec!["Media".to_string(), "Live".to_string()]);
+
+        assert_eq!(
+            navigate(
+                &mut stack,
+                &Action::Folder {
+                    page: "Gone".to_string()
+                },
+                known
+            ),
+            NavOutcome::UnknownPage,
+            "a folder this profile no longer has is refused"
+        );
+        assert_eq!(stack.len(), 2, "and it does not grow the stack");
+
+        assert_eq!(
+            navigate(&mut stack, &Action::Back, known),
+            NavOutcome::WentBack
+        );
+        assert_eq!(
+            stack,
+            vec!["Media".to_string()],
+            "back to where we came from"
+        );
+        assert_eq!(
+            navigate(&mut stack, &Action::Back, known),
+            NavOutcome::WentBack
+        );
+        assert!(stack.is_empty(), "and then to the root");
+
+        assert_eq!(
+            navigate(
+                &mut stack,
+                &Action::Profile {
+                    name: "stream".to_string()
+                },
+                known
+            ),
+            NavOutcome::NotNavigation,
+            "a profile switch is the window's, not the stack's"
+        );
+    }
+
+    #[test]
+    fn a_key_wears_its_own_title_style_and_the_others_follow_the_default() {
+        // The fallback in one sentence: an override wins, an absent one does not
+        // borrow the neighbour's.
+        let default = crate::titlestyle::TitleStyle::default().with_size(14);
+        let own = crate::titlestyle::TitleStyle {
+            family: "Georgia".to_string(),
+            size_px: 26,
+            position: crate::titlestyle::TitlePosition::Top,
+            uppercase: true,
+        };
+        let mut profile = ss550_engine::Profile::new("stream");
+        profile
+            .root
+            .set_title(2, Some("Cam"))
+            .expect("set the title");
+        profile.root.set_title_style(2, Some(own.clone()));
+
+        assert_eq!(resolve_style(Some(&profile.root), &default, 2), own);
+        assert_eq!(
+            resolve_style(Some(&profile.root), &default, 3),
+            default,
+            "a key with no style of its own follows the default"
+        );
+        assert_eq!(
+            resolve_style(None, &default, 2),
+            default,
+            "with no page there is nothing but the default"
+        );
+    }
 
     #[test]
     fn a_title_change_repaints_the_keys_payload() {
@@ -2846,16 +4009,28 @@ mod tests {
         let spec = deck_api::ImageSpec::new(72, 72, 4_096, deck_api::ImageFormat::Jpeg);
         let action = Action::keys("ctrl+m").expect("a valid combination");
         let mut icons = crate::icons::IconCache::new();
+        let mut text = Some(crate::titletext::TextEngine::new());
+        let style = crate::titlestyle::TitleStyle::default();
 
         icons.prepare(
             Some(spec),
             &[crate::icons::KeyArt {
                 action: &action,
                 title: None,
+                style: style.clone(),
             }],
             None,
+            text.as_mut(),
         );
-        let before = match plan_tile(None, Some(&action), None, [0, 0, 0], &icons) {
+        let before = match plan_tile(
+            None,
+            Some(&action),
+            None,
+            &style,
+            [0, 0, 0],
+            &mut icons,
+            &mut text,
+        ) {
             Tile::Art(picture) => picture,
             _ => panic!("an initial is a picture"),
         };
@@ -2865,10 +4040,20 @@ mod tests {
             &[crate::icons::KeyArt {
                 action: &action,
                 title: Some("mute"),
+                style: style.clone(),
             }],
             None,
+            text.as_mut(),
         );
-        let after = match plan_tile(None, Some(&action), Some("mute"), [0, 0, 0], &icons) {
+        let after = match plan_tile(
+            None,
+            Some(&action),
+            Some("mute"),
+            &style,
+            [0, 0, 0],
+            &mut icons,
+            &mut text,
+        ) {
             Tile::Art(picture) => picture,
             _ => panic!("a titled initial is still a picture"),
         };
@@ -2880,16 +4065,32 @@ mod tests {
         // be an image, because the deck has no text, only a JPEG.
         let solid = ss550_engine::Appearance::solid([0xDC, 0x26, 0x26]);
         assert!(matches!(
-            plan_tile(Some(&solid), None, None, [0, 0, 0], &icons),
+            plan_tile(
+                Some(&solid),
+                None,
+                None,
+                &style,
+                [0, 0, 0],
+                &mut icons,
+                &mut text
+            ),
             Tile::Colour([0xDC, 0x26, 0x26])
         ));
         assert!(matches!(
-            plan_tile(Some(&solid), None, Some("mute"), [0, 0, 0], &icons),
+            plan_tile(
+                Some(&solid),
+                None,
+                Some("mute"),
+                &style,
+                [0, 0, 0],
+                &mut icons,
+                &mut text
+            ),
             Tile::TitledColour(_)
         ));
         assert!(
             matches!(
-                plan_tile(None, None, None, [0, 0, 0], &icons),
+                plan_tile(None, None, None, &style, [0, 0, 0], &mut icons, &mut text),
                 Tile::Colour([0, 0, 0])
             ),
             "a key with nothing on it and no title keeps its colour"

@@ -1,312 +1,107 @@
-//! How every title looks: its type size, where it sits, and which bitmap face
-//! draws it.
+//! How a title looks when its key does not say otherwise: the default style.
 //!
 //! A title is drawn twice — into the deck's JPEG and over the window's tile — so
-//! the choice has to live somewhere both sides read. It is app-wide, one style
-//! for every deck and every key, kept as JSON in
-//! `config_dir()/title-style.json`, and applied by repainting the keys that
-//! carry a title through the same path a title change uses. Nothing here
-//! measures or draws text: the layout runs when a payload is composed, never
-//! while a frame is being painted.
+//! the style has to live somewhere both sides read. Each key may carry its own
+//! style in its profile ([`ss550_engine::TitleStyle`], written through
+//! [`ss550_engine::Profile::set_title_style`]); this module keeps the **default**
+//! that every key without one follows, as JSON in
+//! `config_dir()/title-style.json`.
+//!
+//! Nothing here measures or draws text: the layout runs when a payload is
+//! composed, never while a frame is being painted.
 //!
 //! ## Why the file is read by hand
 //!
 //! The engine keeps its JSON behind `ss550_engine::config::read_json`, which is
-//! crate-private, and it has no reader for a file of three words. The window
-//! therefore writes and reads this one file itself: a BOM strip and three
-//! quoted values, no parser dependency, and a missing or unreadable file falls
-//! back to the default instead of failing the start.
+//! crate-private, and it has no reader for a handful of fields. The window
+//! therefore writes and reads this one file itself: a BOM strip, three quoted
+//! words and a number, no parser dependency, and a missing or unreadable file
+//! falls back to the default instead of failing the start. Every field falls
+//! back on its own, so a file that lost one line keeps the rest — which a
+//! whole-file parse would not do.
+//!
+//! ## Version 1 files still load
+//!
+//! Version 1 called the size a word (`small`, `medium`, `large`) because it was
+//! a cap on a bitmap's dot scale, and chose a bitmap `face`. Both are gone: the
+//! size is a number of pixels now, and there is one renderer. A version 1 file is
+//! read for its `size` word, mapped to the pixels that word stood for, and its
+//! `face` is ignored.
 
 use std::path::PathBuf;
 
-/// The file the style lives in, inside the app's configuration folder.
+pub(crate) use ss550_engine::{TitlePosition, TitleStyle, MAX_SIZE_PX, MIN_SIZE_PX};
+
+/// The file the default style lives in, inside the app's configuration folder.
 pub(crate) const TITLE_STYLE_FILE: &str = "title-style.json";
 
-/// The window's own label size, in pixels.
+/// What a style with no family of its own is described as.
+const SYSTEM_FAMILY: &str = "system default";
+
+/// The words, sizes and font names a [`TitleStyle`] is described with.
 ///
-/// A title in the window is a micro-label, the same step every other caption
-/// uses; the style scales it. The `ui` test pins this to `FONT_MICRO`, so the
-/// two cannot drift apart.
-pub(crate) const WINDOW_BASE: f32 = 11.0;
+/// The type itself lives in the engine, because a profile stores it; these are
+/// the window's half — strings to print and the scaling between the deck's tile
+/// and the window's — so they stay here, as an extension trait rather than a
+/// second copy of the type.
+pub(crate) trait TitleLook {
+    /// The family as the settings page prints it.
+    fn family_label(&self) -> &str;
 
-/// How large a title's type may be drawn.
-///
-/// The size is a cap on the whole-pixel scale of the bitmap, not a font: the
-/// layout still steps down until the words fit the tile, so a size can only
-/// make type smaller than the automatic fit, never larger than the tile allows.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(crate) enum TitleSize {
-    /// At most two dots a pixel: a long title fits with room to spare.
-    Small,
-    /// The automatic fit — the largest whole scale the tile holds.
-    #[default]
-    Medium,
-    /// One step more than the fit, by letting the words use more of the tile.
-    Large,
-}
-
-impl TitleSize {
-    /// Every size, in the order the settings page shows them.
-    pub(crate) const ALL: [TitleSize; 3] = [TitleSize::Small, TitleSize::Medium, TitleSize::Large];
-
-    /// The word this size is written as, in the file and in the URL of a
-    /// setting.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            TitleSize::Small => "small",
-            TitleSize::Medium => "medium",
-            TitleSize::Large => "large",
-        }
-    }
-
-    /// The word the settings page prints.
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            TitleSize::Small => "SMALL",
-            TitleSize::Medium => "MEDIUM",
-            TitleSize::Large => "LARGE",
-        }
-    }
-
-    /// Reads the word back, case-insensitively.
-    pub(crate) fn parse(text: &str) -> Option<Self> {
-        match text.trim().to_ascii_lowercase().as_str() {
-            "small" => Some(TitleSize::Small),
-            "medium" => Some(TitleSize::Medium),
-            "large" => Some(TitleSize::Large),
-            _ => None,
-        }
-    }
-
-    /// The most dots one dot of the bitmap may be drawn at.
-    ///
-    /// `u32::MAX` is "no cap": the fit decides. Small's cap is the size a long
-    /// title already lands on, so it never has to drop a word to get smaller.
-    pub(crate) fn scale_cap(self) -> u32 {
-        match self {
-            TitleSize::Small => 2,
-            TitleSize::Medium | TitleSize::Large => u32::MAX,
-        }
-    }
-
-    /// How much of the tile the words may use, given the position's own share.
-    ///
-    /// Small shares the box with Medium: three lines at one dot a pixel already
-    /// fill a band, so a shorter box would cut words instead of shrinking them.
-    /// Large is the one size that takes more of the tile, which is what gives
-    /// the fit headroom to step up.
-    pub(crate) fn box_percent(self, base: u32) -> u32 {
-        match self {
-            TitleSize::Small | TitleSize::Medium => base,
-            TitleSize::Large => (base * 3 / 2).min(92),
-        }
-    }
-}
-
-/// Where on the tile a title sits.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(crate) enum TitlePosition {
-    /// A band along the top edge, over a picture.
-    Top,
-    /// A block in the middle, on the words themselves.
-    Middle,
-    /// A band along the bottom edge — the caption a picture usually carries.
-    #[default]
-    Bottom,
-}
-
-impl TitlePosition {
-    /// Every position, in the order the settings page shows them.
-    pub(crate) const ALL: [TitlePosition; 3] = [
-        TitlePosition::Top,
-        TitlePosition::Middle,
-        TitlePosition::Bottom,
-    ];
-
-    /// The word this position is written as, in the file and in a setting id.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            TitlePosition::Top => "top",
-            TitlePosition::Middle => "middle",
-            TitlePosition::Bottom => "bottom",
-        }
-    }
-
-    /// The word the settings page prints.
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            TitlePosition::Top => "TOP",
-            TitlePosition::Middle => "MIDDLE",
-            TitlePosition::Bottom => "BOTTOM",
-        }
-    }
-
-    /// Reads the word back, case-insensitively.
-    pub(crate) fn parse(text: &str) -> Option<Self> {
-        match text.trim().to_ascii_lowercase().as_str() {
-            "top" => Some(TitlePosition::Top),
-            "middle" => Some(TitlePosition::Middle),
-            "bottom" => Some(TitlePosition::Bottom),
-            _ => None,
-        }
-    }
-}
-
-/// Which bitmap face draws a title.
-///
-/// A face is a table plus its dot dimensions, not a second renderer: both go
-/// through the same layout and the same drawing loop. Compact is three dots
-/// wide and five tall, so the same words take less of the tile and more of them
-/// fit on a line.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(crate) enum TitleFace {
-    /// Five dots wide, seven tall: the face the initial of a key already uses.
-    #[default]
-    Standard,
-    /// Three dots wide, five tall: a smaller face that fits more characters.
-    Compact,
-}
-
-impl TitleFace {
-    /// Every face, in the order the settings page shows them.
-    pub(crate) const ALL: [TitleFace; 2] = [TitleFace::Standard, TitleFace::Compact];
-
-    /// The word this face is written as, in the file and in a setting id.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            TitleFace::Standard => "standard",
-            TitleFace::Compact => "compact",
-        }
-    }
-
-    /// The word the settings page prints.
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            TitleFace::Standard => "STANDARD",
-            TitleFace::Compact => "COMPACT",
-        }
-    }
-
-    /// Reads the word back, case-insensitively.
-    pub(crate) fn parse(text: &str) -> Option<Self> {
-        match text.trim().to_ascii_lowercase().as_str() {
-            "standard" => Some(TitleFace::Standard),
-            "compact" => Some(TitleFace::Compact),
-            _ => None,
-        }
-    }
-
-    /// The dots one character of this face occupies, `(width, height)`.
-    ///
-    /// This is the whole of the difference between the two faces as far as the
-    /// layout is concerned: one advance and one line height follow from it.
-    pub(crate) fn dots(self) -> (u32, u32) {
-        match self {
-            TitleFace::Standard => (5, 7),
-            TitleFace::Compact => (3, 5),
-        }
-    }
-}
-
-/// One title style, applied to every titled key.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(crate) struct TitleStyle {
-    /// How large the type may be drawn.
-    pub size: TitleSize,
-    /// Where on the tile the words sit.
-    pub position: TitlePosition,
-    /// Which bitmap face draws them.
-    pub face: TitleFace,
-}
-
-impl TitleStyle {
     /// The style as the settings page and the status line describe it.
-    pub(crate) fn summary(self) -> String {
+    fn summary(&self) -> String;
+
+    /// The type size the window draws a title at, on a tile `side` px tall.
+    fn window_font(&self, side: f32, device_side: f32) -> f32;
+}
+
+impl TitleLook for TitleStyle {
+    fn family_label(&self) -> &str {
+        match self.family.is_empty() {
+            true => SYSTEM_FAMILY,
+            false => self.family.as_str(),
+        }
+    }
+
+    fn summary(&self) -> String {
         let place = match self.position {
             TitlePosition::Top => "at the top",
             TitlePosition::Middle => "in the middle",
             TitlePosition::Bottom => "at the bottom",
         };
+        let case = match self.uppercase {
+            true => "upper-cased",
+            false => "as typed",
+        };
         format!(
-            "{} type, {place}, {} face",
-            self.size.as_str(),
-            self.face.as_str()
+            "drawn at {} px, {place}, in the {} font, {case}",
+            self.size_px,
+            self.family_label()
         )
     }
 
-    /// The type size the window draws a title at, on a tile `side` px tall.
-    ///
-    /// A pure function of the style and the tile, so no frame measures a string:
-    /// the window's label is the same step as every other caption, scaled by the
-    /// style and clamped to the tile it sits on. The deck's bitmap is fitted to
-    /// its own box separately; the two agree about the style, not about a font.
-    pub(crate) fn window_font(self, side: f32) -> f32 {
-        let size = match self.size {
-            TitleSize::Small => 0.85,
-            TitleSize::Medium => 1.0,
-            TitleSize::Large => 1.2,
+    /// A pure function of the style and the two tiles, so no frame measures a
+    /// string: the deck's tile is `device_side` pixels and the window's is
+    /// `side`, so the label scales with the window while the number the user
+    /// chose keeps meaning pixels on the key. With no deck, the window's own
+    /// tile is the only reference there is.
+    fn window_font(&self, side: f32, device_side: f32) -> f32 {
+        let device = match device_side > 0.0 {
+            true => device_side,
+            false => side.max(1.0),
         };
-        // The compact face is smaller by design; its window label steps down
-        // with it, so the two faces do not read as the same size.
-        let face = match self.face {
-            TitleFace::Standard => 1.0,
-            TitleFace::Compact => 0.85,
-        };
-        (WINDOW_BASE * size * face).clamp(7.0, (side * 0.28).max(7.0))
-    }
-
-    /// The style as the bytes of the file.
-    fn to_json(self) -> String {
-        format!(
-            "{{\n  \"version\": 1,\n  \"size\": \"{}\",\n  \"position\": \"{}\",\n  \"face\": \"{}\"\n}}\n",
-            self.size.as_str(),
-            self.position.as_str(),
-            self.face.as_str()
-        )
-    }
-
-    /// Reads a style out of `text`, and says whether any field was understood.
-    ///
-    /// Every field falls back on its own, so a file that lost one line keeps the
-    /// other two. The flag is what tells [`load`] the difference between a file
-    /// this build wrote and something that is not a title style at all.
-    fn from_json(text: &str) -> (Self, bool) {
-        // A BOM is legal UTF-8 and every editor that offers "UTF-8" in older
-        // Windows tooling writes one. The engine's reader is crate-private, so
-        // the one comparison is repeated here rather than widening its API.
-        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-        let mut style = TitleStyle::default();
-        let mut understood = false;
-
-        if let Some(value) = quoted_field(text, "size") {
-            if let Some(size) = TitleSize::parse(value) {
-                style.size = size;
-                understood = true;
-            }
-        }
-        if let Some(value) = quoted_field(text, "position") {
-            if let Some(position) = TitlePosition::parse(value) {
-                style.position = position;
-                understood = true;
-            }
-        }
-        if let Some(value) = quoted_field(text, "face") {
-            if let Some(face) = TitleFace::parse(value) {
-                style.face = face;
-                understood = true;
-            }
-        }
-
-        (style, understood)
+        let px = f32::from(self.size_px) * (side / device);
+        px.clamp(7.0, (side * 0.42).max(7.0))
     }
 }
 
-/// Where the style is kept.
+/// Where the default style is kept.
 pub(crate) fn path() -> PathBuf {
     ss550_engine::config_dir().join(TITLE_STYLE_FILE)
 }
 
-/// Reads the saved style, or the default when there is nothing usable.
+/// Reads the saved default style, or the built-in one when there is nothing
+/// usable.
 ///
 /// The second half is a sentence for the status line. A file that was never
 /// written is a first run, not a fault — the default is the answer and there is
@@ -316,7 +111,7 @@ pub(crate) fn load() -> (TitleStyle, Option<String>) {
     let path = path();
     match std::fs::read_to_string(&path) {
         Ok(text) => {
-            let (style, understood) = TitleStyle::from_json(&text);
+            let (style, understood) = from_json(&text);
             let note = (!understood).then(|| {
                 format!(
                     "The title style in {} is not readable: using the default.",
@@ -335,112 +130,217 @@ pub(crate) fn load() -> (TitleStyle, Option<String>) {
     }
 }
 
-/// Writes the style where the next start reads it.
+/// Writes the default style where the next start reads it.
 pub(crate) fn save(style: &TitleStyle) -> Result<(), String> {
     let path = path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
     }
-    std::fs::write(&path, style.to_json())
+    std::fs::write(&path, to_json(style))
         .map_err(|error| format!("could not write {}: {error}", path.display()))
+}
+
+/// The style as the bytes of the file.
+///
+/// The writer cannot represent a quote or a backslash inside a string, and no
+/// installed family uses one: a name that did is written as the system's own
+/// font, so the file stays readable instead of losing the fields after it.
+fn to_json(style: &TitleStyle) -> String {
+    let family = match style.family.contains(['"', '\\']) {
+        true => "",
+        false => style.family.as_str(),
+    };
+    format!(
+        "{{\n  \"version\": 2,\n  \"font\": \"{family}\",\n  \"size_px\": {},\n  \
+         \"position\": \"{}\",\n  \"uppercase\": {}\n}}\n",
+        style.size_px,
+        position_word(style.position),
+        style.uppercase
+    )
+}
+
+/// Reads a style out of `text`, and says whether any field was understood.
+///
+/// Every field falls back on its own, so a file that lost one line keeps the
+/// others. The flag is what tells [`load`] the difference between a file this
+/// build wrote and something that is not a title style at all.
+fn from_json(text: &str) -> (TitleStyle, bool) {
+    // A BOM is legal UTF-8 and every editor that offers "UTF-8" in older
+    // Windows tooling writes one. The engine's reader is crate-private, so the
+    // one comparison is repeated here rather than widening its API.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut style = TitleStyle::default();
+    let mut understood = false;
+
+    // The number first: a version 1 file has no `size_px`, and its `size` word is
+    // the only thing left that says how large the words were.
+    if let Some(px) = number_field(text, "size_px") {
+        style.size_px = px.clamp(MIN_SIZE_PX, MAX_SIZE_PX);
+        understood = true;
+    } else if let Some(px) = quoted_field(text, "size").and_then(legacy_size_px) {
+        style.size_px = px;
+        understood = true;
+    }
+    if let Some(family) = quoted_field(text, "font") {
+        style.family = family.to_string();
+        understood = true;
+    }
+    if let Some(value) = quoted_field(text, "position") {
+        if let Some(position) = position_from_word(value) {
+            style.position = position;
+            understood = true;
+        }
+    }
+    if let Some(value) = flag_field(text, "uppercase") {
+        style.uppercase = value;
+        understood = true;
+    }
+
+    (style, understood)
+}
+
+/// The word a position is printed as on the settings page.
+pub(crate) fn position_label(position: TitlePosition) -> &'static str {
+    match position {
+        TitlePosition::Top => "TOP",
+        TitlePosition::Middle => "MIDDLE",
+        TitlePosition::Bottom => "BOTTOM",
+    }
+}
+
+/// The word a position is written as, and used in a setting's id.
+pub(crate) fn position_word(position: TitlePosition) -> &'static str {
+    match position {
+        TitlePosition::Top => "top",
+        TitlePosition::Middle => "middle",
+        TitlePosition::Bottom => "bottom",
+    }
+}
+
+/// Reads the word back, case-insensitively.
+fn position_from_word(text: &str) -> Option<TitlePosition> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "top" => Some(TitlePosition::Top),
+        "middle" => Some(TitlePosition::Middle),
+        "bottom" => Some(TitlePosition::Bottom),
+        _ => None,
+    }
+}
+
+/// The pixels a version 1 size word stood for.
+///
+/// Version 1's `small` capped a bitmap at two dots a pixel, `medium` left it to
+/// the fit, and `large` gave it more of the tile. On the deck's own tile those
+/// three landed near ten, fourteen and eighteen pixels of type, which is what a
+/// file written by an older build keeps. A word this build does not know is not
+/// a size at all, and the field falls back on its own.
+fn legacy_size_px(word: &str) -> Option<u16> {
+    match word.trim().to_ascii_lowercase().as_str() {
+        "small" => Some(10),
+        "medium" => Some(ss550_engine::DEFAULT_SIZE_PX),
+        "large" => Some(18),
+        _ => None,
+    }
 }
 
 /// The string value of `key` in a flat JSON object, if it is there.
 ///
-/// Deliberately not a parser: the file has three quoted words this build wrote,
+/// Deliberately not a parser: the file has a handful of fields this build wrote,
 /// and anything else is a reason to fall back to the default, not to fail. It
 /// cannot panic — every step is an `Option`.
 fn quoted_field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
-    let needle = format!("\"{key}\"");
-    let after_key = text.find(&needle)? + needle.len();
-    let rest = text[after_key..].trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    let rest = rest.strip_prefix('"')?;
+    let after_key = key_end(text, key)?;
+    let rest = text[after_key..].strip_prefix('"')?;
     let end = rest.find('"')?;
     Some(&rest[..end])
 }
 
+/// The whole number after `key`, if there is one.
+///
+/// A number, not a quoted word: `size_px` is written bare, and a value with a
+/// decimal point or an exponent in it is not one this build wrote.
+fn number_field(text: &str, key: &str) -> Option<u16> {
+    let after_key = key_end(text, key)?;
+    let digits: String = text[after_key..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// The `true` or `false` after `key`, if there is one.
+fn flag_field(text: &str, key: &str) -> Option<bool> {
+    let after_key = key_end(text, key)?;
+    let rest = text[after_key..].trim_start();
+    if rest.starts_with("true") {
+        Some(true)
+    } else if rest.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Where the value of `key` starts: past the quoted name and its colon.
+fn key_end(text: &str, key: &str) -> Option<usize> {
+    let needle = format!("\"{key}\"");
+    let after_key = text.find(&needle)? + needle.len();
+    let rest = text[after_key..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    Some(text.len() - rest.len())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TitleFace, TitlePosition, TitleSize, TitleStyle, TITLE_STYLE_FILE};
+    use super::{from_json, legacy_size_px, path, to_json, TitleLook, TITLE_STYLE_FILE};
+    use ss550_engine::{TitlePosition, TitleStyle, DEFAULT_SIZE_PX, MAX_SIZE_PX, MIN_SIZE_PX};
 
     #[test]
-    fn the_default_is_the_look_the_window_already_had() {
+    fn the_built_in_default_is_a_readable_caption_with_no_font_of_its_own() {
         let style = TitleStyle::default();
-        assert_eq!(style.size, TitleSize::Medium);
+        assert_eq!(style.size_px, DEFAULT_SIZE_PX);
+        assert!(style.family.is_empty(), "the system's sans, not a name");
+        assert_eq!(style.family_label(), "system default");
         assert_eq!(style.position, TitlePosition::Bottom);
-        assert_eq!(style.face, TitleFace::Standard);
-    }
-
-    #[test]
-    fn every_size_reads_back_from_its_own_word() {
-        for size in TitleSize::ALL {
-            assert_eq!(TitleSize::parse(size.as_str()), Some(size));
-            // The file is written by hand sometimes: case must not matter.
-            assert_eq!(TitleSize::parse(&size.as_str().to_uppercase()), Some(size));
-        }
-        assert_eq!(TitleSize::parse("huge"), None);
-        assert_eq!(TitleSize::parse(""), None);
-    }
-
-    #[test]
-    fn every_position_reads_back_from_its_own_word() {
-        for position in TitlePosition::ALL {
-            assert_eq!(TitlePosition::parse(position.as_str()), Some(position));
-            assert_eq!(
-                TitlePosition::parse(&position.as_str().to_uppercase()),
-                Some(position)
-            );
-        }
-        assert_eq!(TitlePosition::parse("centre"), None);
-    }
-
-    #[test]
-    fn every_face_reads_back_from_its_own_word() {
-        for face in TitleFace::ALL {
-            assert_eq!(TitleFace::parse(face.as_str()), Some(face));
-            assert_eq!(TitleFace::parse(&face.as_str().to_uppercase()), Some(face));
-        }
-        assert_eq!(TitleFace::parse("bold"), None);
-    }
-
-    #[test]
-    fn the_two_faces_are_a_table_and_its_dimensions() {
-        assert_eq!(TitleFace::Standard.dots(), (5, 7));
-        assert_eq!(TitleFace::Compact.dots(), (3, 5));
+        assert!(!style.uppercase);
     }
 
     #[test]
     fn a_written_style_reads_back_field_for_field() {
         let style = TitleStyle {
-            size: TitleSize::Large,
+            family: "Segoe UI".to_string(),
+            size_px: 22,
             position: TitlePosition::Top,
-            face: TitleFace::Compact,
+            uppercase: true,
         };
-        let (read, understood) = TitleStyle::from_json(&style.to_json());
+        let (read, understood) = from_json(&to_json(&style));
         assert!(understood);
         assert_eq!(read, style);
     }
 
     #[test]
     fn a_bom_and_unknown_fields_do_not_hide_the_style() {
-        let text = "\u{feff}{ \"version\": 1, \"face\": \"compact\", \"size\": \"small\", \
+        let text = "\u{feff}{ \"version\": 2, \"font\": \"Georgia\", \"size_px\": 9, \
                     \"position\": \"top\", \"extra\": \"ignored\" }";
-        let (style, understood) = TitleStyle::from_json(text);
+        let (style, understood) = from_json(text);
         assert!(understood);
-        assert_eq!(style.size, TitleSize::Small);
+        assert_eq!(style.family, "Georgia");
+        assert_eq!(style.size_px, 9);
         assert_eq!(style.position, TitlePosition::Top);
-        assert_eq!(style.face, TitleFace::Compact);
     }
 
     #[test]
-    fn one_lost_field_keeps_the_other_two() {
-        let text = r#"{ "size": "large", "face": "compact" }"#;
-        let (style, understood) = TitleStyle::from_json(text);
+    fn one_lost_field_keeps_the_other_three() {
+        let text = r#"{ "font": "Georgia", "size_px": 20, "uppercase": true }"#;
+        let (style, understood) = from_json(text);
         assert!(understood);
-        assert_eq!(style.size, TitleSize::Large);
-        assert_eq!(style.face, TitleFace::Compact);
+        assert_eq!(style.family, "Georgia");
+        assert_eq!(style.size_px, 20);
+        assert!(style.uppercase);
         assert_eq!(
             style.position,
             TitlePosition::Bottom,
@@ -451,15 +351,73 @@ mod tests {
     #[test]
     fn a_file_that_is_not_a_title_style_is_the_default_and_nothing_understood() {
         for text in ["", "not json", "{}", "{\"size\": \"enormous\"}"] {
-            let (style, understood) = TitleStyle::from_json(text);
+            let (style, understood) = from_json(text);
             assert!(!understood, "{text:?} should not read as a style");
             assert_eq!(style, TitleStyle::default(), "{text:?}");
         }
     }
 
     #[test]
+    fn a_version_one_file_still_names_a_size() {
+        // The file an older build wrote: a word for the size and a bitmap face.
+        // The face is gone, and the word still says how large the type was.
+        let text = r#"{ "version": 1, "size": "large", "position": "top", "face": "compact" }"#;
+        let (style, understood) = from_json(text);
+        assert!(understood);
+        assert_eq!(style.size_px, 18, "large stood for eighteen pixels");
+        assert_eq!(style.position, TitlePosition::Top);
+        assert!(style.family.is_empty(), "the old file named no font");
+    }
+
+    #[test]
+    fn the_three_old_size_words_land_on_three_different_pixels() {
+        assert_eq!(legacy_size_px("small"), Some(10));
+        assert_eq!(legacy_size_px("medium"), Some(DEFAULT_SIZE_PX));
+        assert_eq!(legacy_size_px("large"), Some(18));
+        assert_eq!(legacy_size_px("enormous"), None, "not a version 1 size");
+    }
+
+    #[test]
+    fn a_number_outside_the_range_is_clamped_by_the_reader() {
+        let (huge, _) = from_json(r#"{ "size_px": 400 }"#);
+        assert_eq!(huge.size_px, MAX_SIZE_PX);
+        let (tiny, _) = from_json(r#"{ "size_px": 1 }"#);
+        assert_eq!(tiny.size_px, MIN_SIZE_PX);
+    }
+
+    #[test]
+    fn the_window_labels_carry_the_pixel_size_the_deck_was_given() {
+        let style = TitleStyle {
+            size_px: 16,
+            ..TitleStyle::default()
+        };
+        // A window tile the same size as the deck's: the same number.
+        assert!((style.window_font(108.0, 108.0) - 16.0).abs() < 0.01);
+        // A window tile twice the deck's: the label scales with the tile.
+        assert!((style.window_font(144.0, 72.0) - 32.0).abs() < 0.01);
+        // With no deck there is no other reference, and the label is the number.
+        assert!((style.window_font(72.0, 0.0) - 16.0).abs() < 0.01);
+        // A tile too small to hold the type draws a legible label, not a speck.
+        assert!(style.window_font(1.0, 108.0) >= 7.0);
+    }
+
+    #[test]
+    fn the_summary_reads_as_a_sentence() {
+        let style = TitleStyle {
+            family: "Georgia".to_string(),
+            size_px: 12,
+            position: TitlePosition::Top,
+            uppercase: true,
+        };
+        assert_eq!(
+            style.summary(),
+            "drawn at 12 px, at the top, in the Georgia font, upper-cased"
+        );
+    }
+
+    #[test]
     fn the_file_has_a_name_of_its_own_in_the_configuration_folder() {
         assert_eq!(TITLE_STYLE_FILE, "title-style.json");
-        assert!(super::path().ends_with(TITLE_STYLE_FILE));
+        assert!(path().ends_with(TITLE_STYLE_FILE));
     }
 }

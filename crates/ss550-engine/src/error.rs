@@ -17,6 +17,36 @@ pub enum ActionError {
     #[error("{0:?} is not a URL: it needs a scheme, for example https://example.com")]
     InvalidUrl(String),
 
+    /// A navigation action names a page with nothing in it.
+    #[error("a page name cannot be empty")]
+    EmptyPageName,
+
+    /// A navigation action names a page longer than a page name may be.
+    #[error("a page name can hold at most {max} characters")]
+    PageNameTooLong {
+        /// The cap, in characters.
+        max: usize,
+    },
+
+    /// A navigation action names a page with a character a name cannot hold.
+    #[error("a page name cannot contain control characters")]
+    PageNameControlCharacter,
+
+    /// A profile switch names no profile.
+    #[error("a profile name cannot be empty")]
+    EmptyProfileName,
+
+    /// A navigation action was handed to the runner.
+    ///
+    /// Navigation is what the deck is *showing*, not something a process does:
+    /// the window applies it where the keys are drawn, and the runner refuses it
+    /// so a bound key can never half-run one.
+    #[error("{action} changes what the deck shows, so the window applies it; the runner cannot")]
+    NavigationIsNotRunnable {
+        /// The action, as its one-line label.
+        action: String,
+    },
+
     /// The program could not be started.
     #[error("could not run {program}: {source}")]
     Launch {

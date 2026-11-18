@@ -101,14 +101,15 @@ pub const SETTLE_TIME: Duration = Duration::from_secs(3);
 /// How long [`Device::connect`] keeps waiting once the deck has been seen.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Checks whether the SS550 deck is currently present on the USB bus.
+/// Checks whether the SS550 deck is currently present on the USB bus, once.
 ///
-/// This is the non-blocking probe for hotplug detection: it refreshes the
-/// device list and checks if the SS550 is enumerated. Returns `true` if
-/// the device is found, `false` otherwise.
-///
-/// Use this for periodic polling to detect plug/unplug events without
-/// blocking the call.
+/// Builds a fresh `HidApi` and refreshes the device list, which is a walk of
+/// **every** HID device on the machine — it opens each one to read its
+/// attributes. It is a connect-time question, not a monitor: a caller that runs
+/// it on a timer (the window did, twice a second, on its drawing thread) makes
+/// the whole input stack pay for that walk, and a single device that stalls
+/// during it can take the pointer down with it. Ask once, when deciding whether
+/// to connect, and let a failing read or write tell you the deck went away.
 ///
 /// # Example
 ///
@@ -156,7 +157,30 @@ const ABSENT_GRACE: Duration = Duration::from_millis(500);
 pub const DISCOVERY_POLL: Duration = Duration::from_secs(1);
 
 /// Presence poll interval while waiting for the boot to settle.
+/// How often the connect path samples the bus while waiting for the deck to
+/// settle.
+///
+/// This has to be **well below the longest intermediate appearance**, because
+/// that is what the settle window is measuring: the firmware re-enumerates more
+/// than once while booting and the longest measured appearance was 502 ms
+/// (see [`SETTLE_TIME`]), so a sample coarser than that can miss a disappearance
+/// and declare a deck settled while it is still bobbing — the open then fails and
+/// the app spends the whole attempt waiting for a device it cannot use. At 50 ms
+/// the window sees the gaps.
+///
+/// The cost is bounded on purpose: this loop only runs on the connector thread,
+/// only while an attempt is in flight, and `connect_should_give_up` stops a
+/// deckless attempt after [`ABSENT_GRACE`]. What must never do this is a *poll
+/// with a session*, on the UI thread, forever — that is what wedged input.
 const PRESENCE_POLL: Duration = Duration::from_millis(50);
+
+/// How often [`Device::connect_at_path`] retries a named path before giving up.
+///
+/// Opening a stale path fails immediately (there is no device behind it), so
+/// this is a pause between attempts, not a timeout: the caller's own timeout is
+/// what ends the loop. A short pause keeps a deck that is mid-boot from being
+/// missed while still costing only one `CreateFile` per try.
+const PATH_RETRY: Duration = Duration::from_millis(250);
 
 /// Reconnect backoff constants (reserved for M7: hotplug detection)
 /// These will be used when we implement automatic reconnect with exponential
@@ -351,6 +375,47 @@ impl Device {
         wait_until_settled(api, timeout)?;
         let device = Self::open_vendor_handle(api)?;
         Ok(Device::init_from_handle(device))
+    }
+
+    /// Opens the deck at a device path the caller already knows, through an
+    /// [`HidApi`] the caller owns.
+    ///
+    /// This is the cheap half of discovery: `open_path` does **not** walk the
+    /// bus, it opens one named device. Holding one `HidApi` for the life of the
+    /// process turns every reconnect into this call instead of a fresh
+    /// `HidApi::new()` — which always enumerates, and is the one call that can
+    /// park inside the HID driver while the machine is still bringing devices
+    /// up.
+    ///
+    /// A path is taken on trust: a stale one fails fast (there is no handle to
+    /// wait for), and the caller falls back to
+    /// [`Device::connect_with_api_timeout`] to discover a deck that moved.
+    pub fn connect_at_path_with(
+        api: &HidApi,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<Self, Ss550Error> {
+        let path = std::ffi::CString::new(path)
+            .map_err(|_| Ss550Error::DeviceNotFound { vid: VID, pid: PID })?;
+        let started = Instant::now();
+        loop {
+            match api.open_path(&path) {
+                Ok(device) => return Ok(Self::init_from_handle(device)),
+                Err(error) => {
+                    if started.elapsed() >= timeout {
+                        // Not `DeviceNotFound`: the path was named and refused,
+                        // which is a different thing from a bus with no deck.
+                        return Err(Ss550Error::HidIoError(error.to_string()));
+                    }
+                    std::thread::sleep(PATH_RETRY);
+                }
+            }
+        }
+    }
+
+    /// The device path this deck was opened from, when the platform has one.
+    pub fn device_path(&self) -> Option<String> {
+        self.transport.device_path()
     }
 
     /// Opens a fresh handle on the vendor collection (MI_00).

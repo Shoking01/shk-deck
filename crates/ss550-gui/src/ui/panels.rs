@@ -17,10 +17,9 @@ use gpui_kit::{
 use std::sync::Arc;
 
 use super::{
-    activate, body, card, color, micro_label, muted, one_line, path_line, segment, Tokens,
-    FONT_CAPTION, FONT_MICRO, FONT_SUB, RADIUS_MD, RADIUS_SM,
+    activate, body, card, color, micro_label, muted, one_line, path_line, segment, titlecontrols,
+    Tokens, FONT_CAPTION, FONT_MICRO, FONT_SUB, RADIUS_MD, RADIUS_SM,
 };
-use crate::titlestyle::{TitleFace, TitlePosition, TitleSize, TitleStyle};
 use crate::{ms_text, Controller};
 
 // ── Actions ─────────────────────────────────────────────────────────────
@@ -201,8 +200,8 @@ fn bound_card(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Cont
                 .ghost()
                 .compact()
                 .label("REMOVE")
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.remove_binding(key);
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.remove_binding(key, window, cx);
                     cx.notify();
                 }))
                 .into_any_element(),
@@ -384,6 +383,42 @@ pub(crate) fn settings_page(
             path_line(bindings, tokens, &mono),
             tokens,
         ))
+        .child(info_row(
+            "INSTALLED",
+            path_line(
+                match ss550_tray::install::installed_executable() {
+                    Ok(path) => path.display().to_string(),
+                    Err(error) => error.to_string(),
+                },
+                tokens,
+                &mono,
+            ),
+            tokens,
+        ))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(12.))
+                .w_full()
+                .pt(px(4.))
+                .child(
+                    Button::new("install-app")
+                        .primary()
+                        .label("INSTALL TO START MENU")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.install_app();
+                            cx.notify();
+                        })),
+                )
+                .child(muted(
+                    "Copies the controller to the folder above and puts an entry in this \
+                     user's Start Menu, so Windows Search and Flow Launcher find it. \
+                     Starting it again while it runs brings the window back.",
+                    tokens,
+                )),
+        )
         .child(one_line(
             "Paths are cut short from the left, so the name at the end stays visible.",
             FONT_CAPTION,
@@ -425,141 +460,60 @@ pub(crate) fn settings_page(
         .child(about)
 }
 
-/// How every titled key draws its words.
+/// How a title is drawn when its key does not say otherwise.
 ///
-/// The choice is app-wide and applied on the click: the controller recomposes
-/// the titled payloads and repaints those keys, so the deck itself is the
-/// preview and no second renderer exists to keep in step. The card is offered
-/// with no deck too — the style is the window's as much as the deck's, and it
-/// is saved whether or not anything is plugged in.
+/// The **default** style, applied on the click: the controller recomposes the
+/// payloads of the keys that follow it and repaints those, so the deck itself is
+/// the preview and no second renderer exists to keep in step. A key with a style
+/// of its own is untouched by this card — that is the difference between the two
+/// — and the card is offered with no deck too, because the default is saved
+/// whether or not anything is plugged in.
 fn titles_card(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller>) -> Div {
-    let style = controller.title_style;
-
-    let size_row = choice_row(
-        "SIZE",
-        TitleSize::ALL
-            .iter()
-            .map(|&size| {
-                segment(
-                    SharedString::from(format!("title-size-{}", size.as_str())),
-                    size.label(),
-                    style.size == size,
-                    tokens,
-                    cx,
-                    move |this: &mut Controller, _window, cx| {
-                        this.set_title_style(
-                            TitleStyle {
-                                size,
-                                ..this.title_style
-                            },
-                            cx,
-                        );
-                    },
-                )
-            })
-            .collect(),
-        tokens,
-    );
-
-    let position_row = choice_row(
-        "POSITION",
-        TitlePosition::ALL
-            .iter()
-            .map(|&position| {
-                segment(
-                    SharedString::from(format!("title-position-{}", position.as_str())),
-                    position.label(),
-                    style.position == position,
-                    tokens,
-                    cx,
-                    move |this: &mut Controller, _window, cx| {
-                        this.set_title_style(
-                            TitleStyle {
-                                position,
-                                ..this.title_style
-                            },
-                            cx,
-                        );
-                    },
-                )
-            })
-            .collect(),
-        tokens,
-    );
-
-    let face_row = choice_row(
-        "FACE",
-        TitleFace::ALL
-            .iter()
-            .map(|&face| {
-                segment(
-                    SharedString::from(format!("title-face-{}", face.as_str())),
-                    face.label(),
-                    style.face == face,
-                    tokens,
-                    cx,
-                    move |this: &mut Controller, _window, cx| {
-                        this.set_title_style(
-                            TitleStyle {
-                                face,
-                                ..this.title_style
-                            },
-                            cx,
-                        );
-                    },
-                )
-            })
-            .collect(),
-        tokens,
-    );
+    // How many keys say something of their own, bounded by the deck's own key
+    // count: the profile is keyed by key number and nothing else knows how many
+    // there are.
+    let key_count = controller
+        .session
+        .as_ref()
+        .map_or(0, crate::session::DeckSession::key_count);
+    // The page the deck is showing: a folder may set styles the root never did.
+    let overrides = match controller.current_keys() {
+        Some(keys) => (1..=key_count as u16)
+            .filter(|key| keys.title_style(*key).is_some())
+            .count(),
+        None => 0,
+    };
 
     card(tokens)
         .w_full()
-        .child(micro_label("TITLES", tokens))
+        .child(micro_label("TITLE DEFAULTS", tokens))
         .child(muted(
-            "One style for every key that says something, in the window and in the picture the \
-             deck receives. A change repaints each titled key at once, so the key itself is the \
-             preview.",
+            "How a title is drawn when the key does not say otherwise: the words are set in a \
+             font the system already has, at a pixel size, and a title too long for its band steps \
+             down rather than being cut. A key can carry a style of its own, from the editor on \
+             the key itself.",
             tokens,
         ))
-        .child(size_row)
-        .child(position_row)
-        .child(face_row)
+        .child(titlecontrols::rows(
+            controller,
+            crate::FontTarget::Defaults,
+            tokens,
+            cx,
+        ))
         .child(muted(
-            "COMPACT is three dots wide instead of five, so a long title fits on fewer lines. \
+            match overrides {
+                0 => "No key has a style of its own, so every title follows this.".to_string(),
+                1 => "One key has a style of its own and does not follow this.".to_string(),
+                count => format!("{count} keys have a style of their own and do not follow this."),
+            },
+            tokens,
+        ))
+        .child(muted(
+            "The size is a ceiling: the fit brings it down until the words fit, and never up. \
              Every choice is saved for the next start.",
             tokens,
         ))
 }
-
-/// A label and its exclusive segments on one line: the shape every Settings
-/// choice uses.
-fn choice_row(label: &'static str, choices: Vec<AnyElement>, tokens: Tokens) -> Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(12.))
-        .w_full()
-        .child(
-            div()
-                .flex_none()
-                .w(px(88.))
-                .text_size(px(FONT_MICRO))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(tokens.soft)
-                .child(label),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.))
-                .children(choices),
-        )
-}
-
 // ── Shared pieces for the pages ─────────────────────────────────────────
 
 /// A 44 px thumbnail: the fitted tile, or a quiet box when it is not ready.

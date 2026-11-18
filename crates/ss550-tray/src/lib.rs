@@ -61,6 +61,7 @@ pub mod dialog;
 pub mod favicon;
 pub mod icon;
 pub mod install;
+pub mod instance;
 mod keysend;
 #[cfg(test)]
 mod scratch;

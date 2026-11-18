@@ -52,6 +52,7 @@ pub mod profiles;
 pub mod recents;
 pub mod runner;
 pub mod store;
+pub mod title;
 
 pub use action::{validate_url, Action};
 pub use appearance::Appearance;
@@ -60,7 +61,10 @@ pub use config::{bindings_path, bindings_path_for, config_dir, recents_path_for}
 pub use error::{ActionError, KeyComboError, TitleError};
 pub use key::KeyNumber;
 pub use keys::{BaseKey, KeyCombo, Modifier, NamedKey, MAX_SUMMARY_CHARS};
-pub use profiles::{create_default_profiles, Profile, ProfileStore, MAX_TITLE_CHARS};
+pub use profiles::{
+    create_default_profiles, PageKeys, Profile, ProfileStore, MAX_PAGE_NAME_CHARS, MAX_TITLE_CHARS,
+};
 pub use recents::{Recents, MAX_RECENTS};
 pub use runner::{command_for, run_action, ActionRunner, CommandSpec, KeySender};
 pub use store::{ActionStore, Binding, STORE_VERSION};
+pub use title::{TitlePosition, TitleStyle, DEFAULT_SIZE_PX, MAX_SIZE_PX, MIN_SIZE_PX};

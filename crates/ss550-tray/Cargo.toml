@@ -48,6 +48,9 @@ windows = { version = "0.62", features = [
     # Resolving a shortcut to its target: `IShellLinkW` is loaded from the
     # `.lnk` through `IPersistFile`, which is a COM call, and `GetPath` fills a
     # `WIN32_FIND_DATAW` from the file-system module above.
+    # CreateMutexW and CreateEventW take a SECURITY_ATTRIBUTES pointer, which
+    # is what makes the single-instance objects reachable.
+    "Win32_Security",
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",

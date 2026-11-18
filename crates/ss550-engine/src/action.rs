@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::keys::KeyCombo;
+use crate::profiles::MAX_PAGE_NAME_CHARS;
 use crate::{ActionError, KeyComboError};
 
 /// What a key does when it is pressed.
@@ -49,6 +50,26 @@ pub enum Action {
     Keys {
         /// The combination to send.
         keys: KeyCombo,
+    },
+    /// Shows another page of this profile: what a folder is on the deck.
+    ///
+    /// Navigation is not an action that runs anywhere: it changes what the deck
+    /// is showing, so the window applies it and the runner refuses it. It is
+    /// stored like any other action, which is what lets a key be moved, copied
+    /// and saved with the profile it belongs to.
+    Folder {
+        /// The page's name, exactly as the profile spells it.
+        page: String,
+    },
+    /// Goes back to the page the deck came from.
+    ///
+    /// The window keeps the way in; this is the way out. On the root there is
+    /// nowhere to go, and the window says so.
+    Back,
+    /// Activates another profile of this deck.
+    Profile {
+        /// The profile's name, exactly as the store spells it.
+        name: String,
     },
 }
 
@@ -96,6 +117,9 @@ impl Action {
             // A `KeyCombo` is proof that the combination parses, and its fields
             // are private, so there is nothing left to check here.
             Action::Keys { .. } => Ok(()),
+            Action::Folder { page } => Self::validate_page_name(page),
+            Action::Back => Ok(()),
+            Action::Profile { name } => Self::validate_profile_name(name),
         }
     }
 
@@ -147,6 +171,42 @@ impl Action {
             // would save that copy and force every caller to deal with a type
             // it does not need.
             Action::Keys { keys } => Action::Keys { keys: keys.clone() },
+            // Navigation carries a name and nothing to clean: a name is trimmed
+            // when it is validated, and rewriting it here would give one page
+            // two spellings.
+            Action::Folder { page } => Action::Folder { page: page.clone() },
+            Action::Back => Action::Back,
+            Action::Profile { name } => Action::Profile { name: name.clone() },
+        }
+    }
+
+    /// Checks that a page name can address a page this build will accept.
+    ///
+    /// The rule is the profile's, stated once: a name that survives trimming has to
+    /// be non-empty, no longer than [`MAX_PAGE_NAME_CHARS`] and free of control
+    /// characters, because a page is addressed by its name and a name nothing can
+    /// type is a page nothing can open.
+    fn validate_page_name(page: &str) -> Result<(), ActionError> {
+        let trimmed = page.trim();
+        if trimmed.is_empty() {
+            return Err(ActionError::EmptyPageName);
+        }
+        if trimmed.chars().count() > MAX_PAGE_NAME_CHARS {
+            return Err(ActionError::PageNameTooLong {
+                max: MAX_PAGE_NAME_CHARS,
+            });
+        }
+        if trimmed.chars().any(char::is_control) {
+            return Err(ActionError::PageNameControlCharacter);
+        }
+        Ok(())
+    }
+
+    /// Checks that a profile name is something the store could hold.
+    pub(crate) fn validate_profile_name(name: &str) -> Result<(), ActionError> {
+        match name.trim().is_empty() {
+            true => Err(ActionError::EmptyProfileName),
+            false => Ok(()),
         }
     }
 
@@ -178,7 +238,24 @@ impl Action {
             Action::Launch { program, .. } => format!("LAUNCH {}", file_label(program)),
             Action::OpenUrl { url } => format!("OPEN {}", host_of(url)),
             Action::Keys { keys } => keys.to_string(),
+            Action::Folder { page } => format!("FOLDER {}", page.to_uppercase()),
+            Action::Back => "BACK".to_string(),
+            Action::Profile { name } => format!("PROFILE {}", name.to_uppercase()),
         }
+    }
+
+    /// Whether this action changes what the deck shows instead of running
+    /// something.
+    ///
+    /// The window asks before handing an action to the runner: navigation is
+    /// applied where the keys are drawn, because the window owns the page stack,
+    /// and handing it to a worker would give two threads a claim on the same
+    /// state.
+    pub fn is_navigation(&self) -> bool {
+        matches!(
+            self,
+            Action::Folder { .. } | Action::Back | Action::Profile { .. }
+        )
     }
 
     /// The full description, for the status line.
@@ -193,6 +270,9 @@ impl Action {
             }
             Action::OpenUrl { url } => format!("Open {url}"),
             Action::Keys { keys } => format!("Send {keys}"),
+            Action::Folder { page } => format!("Open the page {page}"),
+            Action::Back => "Go back to the page this one was opened from".to_string(),
+            Action::Profile { name } => format!("Switch to the profile {name}"),
         }
     }
 }
@@ -404,6 +484,112 @@ mod tests {
                 url: "https://example.com".to_string()
             }
         );
+    }
+
+    #[test]
+    fn the_navigation_actions_have_a_shape_in_the_file() {
+        // These are written into the bindings file, so the spelling is a
+        // contract: a build downstream reads what this one writes.
+        assert_eq!(
+            serde_json::to_string(&Action::Folder {
+                page: "Media".to_string()
+            })
+            .expect("serialise"),
+            r#"{"type":"folder","page":"Media"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Action::Back).expect("serialise"),
+            r#"{"type":"back"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Action::Profile {
+                name: "stream".to_string()
+            })
+            .expect("serialise"),
+            r#"{"type":"profile","name":"stream"}"#
+        );
+    }
+
+    #[test]
+    fn a_key_can_hold_a_navigation_action() {
+        // S2: the three are bound like any other action, and each says whether
+        // it changes the deck instead of running something.
+        for action in [
+            Action::Folder {
+                page: "Media".to_string(),
+            },
+            Action::Back,
+            Action::Profile {
+                name: "stream".to_string(),
+            },
+        ] {
+            let json = serde_json::to_string(&action).expect("serialise");
+            let read: Action = serde_json::from_str(&json).expect("read back");
+            assert_eq!(read, action);
+            assert!(action.is_navigation(), "{json} is navigation");
+            assert!(action.validate().is_ok(), "{json} is valid");
+        }
+        assert!(!Action::keys("ctrl+m")
+            .expect("a combination")
+            .is_navigation());
+    }
+
+    #[test]
+    fn the_runner_refuses_navigation_instead_of_half_running_it() {
+        // The window applies navigation; a worker with no window must say so
+        // rather than pretend the key did something.
+        for action in [
+            Action::Folder {
+                page: "Media".to_string(),
+            },
+            Action::Back,
+        ] {
+            assert!(
+                matches!(
+                    crate::run_action(&action),
+                    Err(ActionError::NavigationIsNotRunnable { .. })
+                ),
+                "{action:?} must be refused by the runner"
+            );
+        }
+    }
+
+    #[test]
+    fn a_page_name_that_could_not_address_a_page_is_refused() {
+        assert!(Action::Folder {
+            page: String::new()
+        }
+        .validate()
+        .is_err());
+        assert!(Action::Folder {
+            page: "   ".to_string()
+        }
+        .validate()
+        .is_err());
+        assert!(Action::Folder {
+            page: "bad\ttab".to_string()
+        }
+        .validate()
+        .is_err());
+        assert!(
+            Action::Folder {
+                page: "x".repeat(MAX_PAGE_NAME_CHARS + 1)
+            }
+            .validate()
+            .is_err(),
+            "a name longer than the cap is refused"
+        );
+        assert!(Action::Profile {
+            name: " ".to_string()
+        }
+        .validate()
+        .is_err());
+        assert!(Action::Profile {
+            name: "stream".to_string()
+        }
+        .validate()
+        .is_ok());
+        assert!(Action::Back.validate().is_ok());
     }
 
     #[test]

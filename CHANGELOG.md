@@ -7,6 +7,129 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Fixed — CLEAR KEY now clears the whole key, in both files
+- Clearing a key removes its **title** too, and the title's style with it. The
+  words named what the key ran, so leaving them on an empty key kept it promising
+  something that no longer happens. `CLEAR KEY` on a key that only ever had words
+  clears them as well.
+- The removal now reaches the **profile**, not only the bindings file. Binding a
+  key already wrote both; clearing wrote one, so a cleared key came back on the
+  next start, when the window hands the deck its profile's keys. The form in the
+  editor is emptied at the same time, so `SAVE TITLE` cannot put back the words
+  that were just removed.
+
+### Added — profiles can be renamed, and the right-hand column has its own scroll
+- The `PROFILE` card renames the active profile: a name field and `RENAME`. A
+  profile is addressed by its name — that is what a `profile` binding holds and
+  what the store remembers as active — so the profile, the active name and every
+  key in every profile that switches to it move together. A name another profile
+  already has, or one that is blank, is refused with a sentence and nothing moves.
+- The column beside the deck grid scrolls inside itself instead of with the page.
+  Choosing a key and reaching for its editor no longer drags the grid off screen:
+  the width the column is given is the window's own height minus the bars, the
+  padding and the page heading, so a taller window shows more of it and a short
+  one still leaves the deck visible.
+
+### Added — folders on the deck, and keys that open them
+- A profile now owns **pages**. The profile's own keys are its root page; a page
+  under it is a folder with its own bindings, colours, pictures, titles and title
+  styles, so the same physical key can mean two things on two pages. A profile
+  file written by any earlier build loads unchanged — the root page is written
+  flat, and `pages` appears only once a folder exists, so there is no migration.
+- Three navigation actions, bound like any other: **open a page**, **go back**,
+  and **switch profile**. They are applied by the window on the press and refused
+  by the action runner, which has no window to swap a page in.
+- `VOLVER` walks a stack: back goes where the deck came from, not to the root, so
+  two sibling folders are reachable without passing through it. On the top page it
+  says so instead of doing nothing. Every profile starts at its root, and the
+  stack is runtime state: a page that was removed can never strand the deck.
+- The `PAGES` card on the `Deck` page creates, renames, opens and removes pages,
+  and binds the selected key to a page, to `BACK`, or to another profile. A rename
+  moves the folder **and** every key that opens it, on every page — a page is
+  addressed by its name, so the keys had to follow.
+
+### Fixed — a navigation key can no longer be overwritten by the editor
+- `SAVE BINDING` now refuses to write when the selected key holds a navigation
+  action: the editor has no fields for one, so saving would have replaced it with
+  an empty program. The status line says where to rebind it instead.
+
+### Added — the controller installs as a program you can find and start
+- The program is called **Sh-Deck**: the tray tooltip, the window title, the app
+  bar and the Start Menu entry all use that name. The file on disk is still
+  `ss550-gui.exe`, because the install folder and the logon entry already name
+  it; renaming the file would move a path the user's Windows starts at sign-in.
+- `Settings → FILES → INSTALL TO START MENU` copies the running binary into
+  `%LOCALAPPDATA%\Programs\ss550\` (the same copy the logon entry names) and
+  writes `Sh-Deck.lnk` into this user's Start Menu. Installing also removes the
+  entry the program used to write under its old name, so a launcher never shows
+  two controllers. Windows Search and launchers such as Flow Launcher index that
+  folder, so the controller is found by typing its name. Per-user, no installer,
+  no administrator rights; deleting the folder and the entry is a complete
+  uninstall.
+- **One controller per desktop.** A second start — a double click on the entry
+  while the controller lives in the tray — rings a named event, and the running
+  one shows its window and takes focus. Before this, a second start opened a
+  second controller that fought for the deck, the tray icon and the tiles.
+- The executable now carries its own icon: a white `S` on a black-to-violet
+  gradient with `Deck` set down the right edge, at 256, 128, 64, 48, 32, 24 and
+  16 pixels, embedded as a Windows resource. Explorer, the taskbar and the Start
+  Menu entry all use it, and the entry needs no side file.
+- **The notification area shows the same icon.** The tray used to draw its own
+  picture — fifteen red keys — which is why the old logo survived next to the new
+  one. It now embeds the application's artwork as 32×32 RGBA, masked to a rounded
+  badge, generated from the same file the `.ico` comes from.
+
+### Fixed — the controller finds the deck without walking the bus on every attempt
+- `hidapi`'s `HidApi::new()` enumerates every HID device on the machine, opening
+  each one to read its attributes; that walk is what made the controller a
+  suspect when the pointer froze. The app now keeps **one** HID context for the
+  life of the process and remembers the deck's device path in
+  `config_dir()/deck-path.txt`, so every reconnect after the first is a single
+  `CreateFile` on that path instead of a walk. A path that stops opening is
+  forgotten and the deck is discovered again — one walk per moved deck, not one
+  per retry.
+- The path is written when the deck connects and removed when it is not found,
+  so a machine that has never seen a deck behaves exactly as before.
+
+### Fixed — a running controller no longer walks every HID device on the machine
+- The 500 ms maintenance tick used to ask Windows whether the deck was still
+  there by building a fresh `HidApi` and refreshing the whole device list. That
+  is a walk of **every** HID device on the machine, opening each one to read its
+  attributes, twice a second, on the thread that draws the window — and a device
+  that stalls during that walk can take the rest of the bus with it, the pointer
+  included. The app now detects a deck that went away the way it detects every
+  other transport failure: from the read or the write that failed on the session
+  it already holds, which is checked every 50 ms.
+- A deck that is no longer enumerable (`DeviceNotFound`) now counts as a lost
+  connection as well, so the reconnect that already handles a missing device is
+  not bypassed by a session that cannot reach it.
+
+### Changed — a title is drawn with a font the system already has
+- Every titled key draws its words with a system font, at a size in pixels the
+  user picks, instead of a five-by-seven bitmap of dots.
+- **Each key carries its own style.** Font, pixel size, position and case live
+  in the profile beside the words, so two keys of one deck can be set in two
+  fonts, and switching profile switches both. The old app-wide style is now the
+  default that keys without one follow; the editor on a key offers its own
+  block, and `USE THE DEFAULT STYLE` takes the override away without touching
+  the words.
+- `title-style.json` is the **default** style and records the family, the pixel
+  size, the position and whether the words are upper-cased; a version 1 file
+  still loads, with `small`/`medium`/`large` mapped to the ten, fourteen and
+  eighteen pixels they stood for. A profile that predates per-key styles loads
+  unchanged.
+- The bitmap had no lower case and no accents: `Canción` was drawn `CANCI#N`,
+  with the accented letter replaced by the fallback mark. The font fixes that,
+  and a title keeps the case it was typed in unless UPPERCASE is chosen.
+- The pixel size is a ceiling, not an order: a title too long for its band steps
+  down until it fits, and never above the number the user chose.
+- The window's label draws the same family at the same size, so the window and
+  the key on the desk agree about the type as well as about the words.
+- Reading the system's fonts happens on the background executor, once, the first
+  time a key has words to draw: until it answers a titled key shows its picture
+  without them, and the repaint that follows draws them. A profile with no
+  titles never asks for the scan.
+
 ### Added — blank keys, and a picture from anywhere
 - `BLANK` is a colour a key can take, and the default: a key with nothing bound
   to it no longer glows white. The six default profiles stop carrying the test

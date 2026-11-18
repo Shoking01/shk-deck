@@ -6448,8 +6448,10 @@ dependencies = [
 name = "ss550-gui"
 version = "0.1.0"
 dependencies = [
+ "cosmic-text",
  "deck-api",
  "deck-simulator",
+ "embed-resource",
  "gpui-kit",
  "image",
  "jpeg-encoder",

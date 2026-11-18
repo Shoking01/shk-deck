@@ -17,9 +17,11 @@ use gpui_kit::{
 pub(crate) mod deck;
 pub(crate) mod editor;
 pub(crate) mod page;
+pub(crate) mod pages;
 pub(crate) mod palette;
 pub(crate) mod panels;
 pub(crate) mod shell;
+pub(crate) mod titlecontrols;
 
 pub(crate) use page::Page;
 
@@ -355,7 +357,8 @@ pub(crate) fn path_line(
 
 #[cfg(test)]
 mod tests {
-    use super::{color, shorten, Tokens, FONT_MICRO, PAGE_PAD, RADIUS_MD, RADIUS_PILL, RADIUS_SM};
+    use super::{color, shorten, Tokens, PAGE_PAD, RADIUS_MD, RADIUS_PILL, RADIUS_SM};
+    use crate::titlestyle::TitleLook as _;
     use gpui_kit::component::{Theme, ThemeMode};
 
     #[test]
@@ -423,14 +426,23 @@ mod tests {
     }
 
     #[test]
-    fn a_title_in_the_window_is_the_same_step_as_every_other_caption() {
-        // The title style scales the window's label from one base size. If that
-        // base drifted from the micro-label, a title would be the only text in
-        // the window that is not on the type scale.
-        assert_eq!(
-            crate::titlestyle::WINDOW_BASE,
-            FONT_MICRO,
-            "the title's base size is the window's micro-label"
+    fn a_title_in_the_window_is_drawn_at_the_size_the_user_chose() {
+        // The user's number is pixels on the deck's tile, so a window tile of
+        // that same size shows exactly that number; on a smaller tile the label
+        // scales down with it, and it never drops below the micro-label step
+        // where no type in the window would be legible.
+        let style = crate::titlestyle::TitleStyle::default();
+        assert!(
+            (style.window_font(108.0, 108.0) - f32::from(style.size_px)).abs() < 0.01,
+            "a window tile the size of the deck's shows the chosen number"
+        );
+        assert!(
+            style.window_font(54.0, 108.0) < f32::from(style.size_px),
+            "a smaller window tile draws a smaller label"
+        );
+        assert!(
+            style.window_font(1.0, 108.0) >= 7.0,
+            "a tiny window tile still draws a legible label"
         );
     }
 }
