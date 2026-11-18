@@ -62,8 +62,13 @@ The user's own words for the outcome (verbatim, from the request):
   catalogue and `system-stats`, plus a sampler thread that survives a failing
   provider. Windows providers: `sysinfo` for CPU/RAM/disk, WMI performance
   counters for GPU usage, WMI thermal sources (LibreHardwareMonitor when it is
-  running, then the ACPI thermal zone) for temperatures. Route: inline. Status:
-  pending.
+  running, then the ACPI thermal zone) for temperatures. Route: inline. **Done.**
+  26 tests plus `examples/stats_once.rs`, which prints one walk over the machine
+  and is the support tool for a key that shows a dash. Measured on this machine
+  (L2): `cpu.usage 43% (12 threads)`, `gpu.usage 72% (VIDEO)`, `ram.usage 72%
+  (11.5 / 15.9 GB)`, `disk.free 53% (496.4 / 942.3 GB free)`, and both
+  temperatures `— , no sensor`. The GPU counters do answer on an AMD card, which
+  is the point of reading Windows' own counters instead of a vendor SDK.
 - **T3 — the action.** `Action::Plugin { plugin, cell }` in `ss550-engine`:
   serialised as `{"type":"plugin",...}`, validated, described, and refused by the
   runner (it is the window's business, like navigation). Route: inline. Status:

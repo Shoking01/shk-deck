@@ -1,0 +1,23 @@
+[package]
+name = "ss550-plugins"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "The plugins this build ships and the thread that measures them"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+ss550-plugin-api = { path = "../ss550-plugin-api" }
+# CPU usage, memory and free space: the numbers a machine can answer without
+# asking for permission. Only the two feature sets this crate reads are
+# compiled in.
+sysinfo = { version = "0.31", default-features = false, features = ["system", "disk"] }
+
+# The GPU counters and the thermal sources live in WMI, not in a Win32 call:
+# `wmi` keeps the COM work behind a safe API, which is what lets this crate stay
+# `deny(unsafe_code)`.
+[target."cfg(windows)".dependencies]
+serde = { version = "1.0", features = ["derive"] }
+wmi = { version = "0.18", default-features = false }
+
+[dev-dependencies]
