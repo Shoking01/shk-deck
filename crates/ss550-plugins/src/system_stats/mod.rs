@@ -15,6 +15,7 @@
 //! [`thermal`] for why, and what the plugin says when they do not.
 
 mod gpu;
+mod lhm;
 mod machine;
 mod thermal;
 

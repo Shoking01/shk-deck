@@ -6477,6 +6477,7 @@ name = "ss550-plugins"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "ss550-plugin-api",
  "sysinfo",
  "wmi",

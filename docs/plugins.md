@@ -49,26 +49,32 @@ chip's registers, and reading it takes a kernel driver, so the plugin asks the
 sources that exist and says nothing rather than guessing:
 
 1. **LibreHardwareMonitor** — free and open source, and the recommended source.
-   While it runs it publishes every sensor it reads in its own WMI namespace
-   (`ROOT\LibreHardwareMonitor`), which any program can read. It carries the CPU
-   *and* an AMD or NVIDIA card. Download it from
+   It carries the CPU *and* an AMD or NVIDIA card. Download it from
    [its releases page](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases),
-   unpack it anywhere, and start it as administrator (some sensors need it); turn
-   on *Options → Run on Windows startup* and *Minimize on startup* so it stays out
-   of the way. The plugin picks it up at the next sample — nothing to configure
-   here.
-2. **OpenHardwareMonitor** — the older tool LibreHardwareMonitor grew out of. A
-   machine still running it publishes the same class in
-   `ROOT\OpenHardwareMonitor`, and it is read too. The key's caption says `OHM`
-   instead of `LHM`.
+   unpack it anywhere, and start it as administrator (some sensors need it).
+   **Then turn on its web server**: `Options → Remote Web Server → Run` (port
+   8085 unless it was changed). That is the interface the current build offers —
+   **0.9.5 removed the WMI provider**, so a WMI query against a current install
+   finds nothing. The plugin reads `http://127.0.0.1:8085/data.json` and takes the
+   hottest sensor of each chip. Last, turn on `Options → Run on Windows startup`
+   and `Minimize on startup` so it stays out of the way.
+2. **An older LibreHardwareMonitor (0.9.4 or earlier)**, or **OpenHardwareMonitor**
+   — the tool LibreHardwareMonitor grew out of. Both publish their sensors in a
+   WMI namespace (`ROOT\LibreHardwareMonitor`, `ROOT\OpenHardwareMonitor`), and
+   both are still read: the caption says `LHM` or `OHM`.
 3. **The ACPI thermal zone** (`MSAcpi_ThermalZoneTemperature`), which is part of
    Windows. Many desktop boards publish no zone at all — the MSI board this was
    built on publishes none — and where it exists it is a zone of the board rather
    than a core, so the caption says `ACPI`.
 4. **Nothing.** The key shows `—` and the caption says `no sensor`, and binding a
-   temperature key says what to run in the status line.
+   temperature key says what to turn on in the status line.
 
 A fabricated `0` on a card at 80 °C would be worse than a dash.
+
+The order is: LibreHardwareMonitor's web server, then the two WMI namespaces,
+then ACPI. Each is tried once per sample and a missing one costs a failed
+connection or a failed query, never a stall: the timeouts are 200 ms to connect
+and 500 ms to read.
 
 ## The GPU could answer without a monitoring tool
 

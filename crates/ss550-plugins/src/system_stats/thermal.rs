@@ -32,9 +32,10 @@ pub(crate) enum Subject {
 /// The namespaces that publish every sensor a monitoring tool reads.
 ///
 /// Both tools expose the same WMI class with the same field names, because one
-/// grew out of the other: LibreHardwareMonitor is the maintained fork, and
-/// OpenHardwareMonitor is the older build some machines still have installed.
-/// Reading either costs one query, so both are tried before giving up.
+/// grew out of the other. **LibreHardwareMonitor 0.9.5 removed its WMI
+/// provider** — a current build creates no namespace at all — so this path is the
+/// one older LibreHardwareMonitor and OpenHardwareMonitor still answer on, and
+/// [`lhm`] is what a current build is read through.
 const MONITOR_NAMESPACES: [(&str, &str); 2] = [
     ("ROOT\\LibreHardwareMonitor", "LHM"),
     ("ROOT\\OpenHardwareMonitor", "OHM"),
@@ -55,7 +56,7 @@ pub(crate) fn temperature(subject: Subject) -> Reading {
 /// after a temperature key is bound and nothing answers.
 pub(crate) fn sources_tried() -> &'static str {
     if cfg!(windows) {
-        "run LibreHardwareMonitor (free) and the reading fills in on the next sample; this machine exposes no ACPI thermal zone to Windows"
+        "open LibreHardwareMonitor and turn on Options → Remote Web Server → Run (port 8085), or keep an older LibreHardwareMonitor / OpenHardwareMonitor running; this machine exposes no ACPI thermal zone to Windows"
     } else {
         "this build has no temperature source on this platform"
     }
@@ -63,6 +64,12 @@ pub(crate) fn sources_tried() -> &'static str {
 
 #[cfg(windows)]
 fn temperature_on_this_platform(subject: Subject) -> Reading {
+    // A current LibreHardwareMonitor is read through its web server, which is the
+    // only interface it still offers; the WMI namespaces below are what an older
+    // build and OpenHardwareMonitor answer on.
+    if let Some(celsius) = super::lhm::temperature(subject) {
+        return Reading::temperature(celsius).with_detail("LHM");
+    }
     if let Some((celsius, source)) = from_monitor(subject) {
         return Reading::temperature(celsius).with_detail(source);
     }
