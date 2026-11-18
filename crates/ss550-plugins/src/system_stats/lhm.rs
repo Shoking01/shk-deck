@@ -10,10 +10,12 @@
 //! ```
 //!
 //! `GET /data.json` returns the whole sensor tree. A sensor node carries a
-//! `Type` (its kind, `Temperature` among them), a formatted `Value` and an
-//! **`RawValue`**, which is the number in the unit the tree states — degrees
-//! Celsius for a temperature. The formatted value is a string with a unit and a
-//! locale, so the raw one is what this reads.
+//! `Type` (its kind, `Temperature` among them) and a `RawValue`, and — the part
+//! the tool's own source misleads about — **the released build formats
+//! `RawValue` too**: `"59,0 °C"`, with the decimal separator of the machine's
+//! culture. The number is therefore extracted from the string by position (the
+//! rightmost of `,` and `.` is the decimal one), the unit is honoured, and a
+//! plain number — what the source writes — is accepted as well.
 //!
 //! Reading it is a plain HTTP GET over loopback with no dependencies of its own:
 //! the request is `HTTP/1.0` so the server answers with a length and closes, and
@@ -95,19 +97,62 @@ struct Node {
 impl Node {
     /// The number this sensor measured, when it measured one.
     ///
-    /// The range is the same one the WMI path refuses readings outside of: a
-    /// sensor answering `0` or `400` is a sensor with nothing to say, and a dash
-    /// on the key is better than a made-up degree.
+    /// The value arrives in one of two shapes, and this reads both: a number
+    /// (`RawValue: 59.0`), which is what the tool's own source writes, and a
+    /// **formatted string** (`"59,0 °C"`), which is what the released build
+    /// actually sends — with the decimal separator of the machine's locale. The
+    /// unit is honoured: a tool set to Fahrenheit is converted rather than
+    /// reported as sixty degrees of the wrong scale.
+    ///
+    /// The range is the one the WMI path refuses readings outside of: a sensor
+    /// answering `0` or `400` is a sensor with nothing to say, and a dash on the
+    /// key is better than a made-up degree.
     fn measured(&self) -> Option<f32> {
         let value = match self.raw_value.as_ref()? {
             serde_json::Value::Number(number) => number.as_f64()?,
             // `AllowNamedFloatingPointLiterals` on the server side writes `NaN`
-            // as a string.
+            // as a string, so a string is not automatically a number.
+            serde_json::Value::String(text) => measured_celsius(text)?,
             _ => return None,
         };
         let value = value as f32;
         (value.is_finite() && value > 0.0 && value <= 150.0).then_some(value)
     }
+}
+
+/// The number in a formatted value, as degrees Celsius.
+///
+/// The tool formats its numbers with the machine's culture: `59,0 °C` on a
+/// Spanish machine, `59.0 °C` on an English one. The separators are therefore
+/// read by position — the rightmost of `,` and `.` is the decimal one — rather
+/// than assumed, and the unit decides the scale.
+fn measured_celsius(text: &str) -> Option<f64> {
+    let trimmed = text.trim();
+    let fahrenheit = trimmed.contains('°') && trimmed.contains('F');
+    let digits: String = trimmed
+        .chars()
+        .filter(|character| character.is_ascii_digit() || matches!(character, '-' | '.' | ','))
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+
+    let number = match (digits.rfind(','), digits.rfind('.')) {
+        (Some(comma), Some(dot)) if comma > dot => {
+            // `1.234,5`: the comma is the decimal separator.
+            digits.replace('.', "").replace(',', ".")
+        }
+        (Some(_), None) => digits.replace(',', "."),
+        // `1,234.5` or a plain `59.5`.
+        (_, Some(_)) => digits.replace(',', ""),
+        (None, None) => digits,
+    };
+    let value: f64 = number.parse().ok()?;
+    Some(if fahrenheit {
+        (value - 32.0) * 5.0 / 9.0
+    } else {
+        value
+    })
 }
 
 /// The hottest temperature under the node for `subject`.
@@ -156,12 +201,16 @@ mod tests {
     use super::*;
 
     /// One device with a temperature group, as the server writes it.
+    ///
+    /// The values are strings, which is what the released build sends:
+    /// `RawValue` is formatted with the machine's culture, comma decimal
+    /// included.
     fn document(cpu: &[(&str, f32)], gpu: &[(&str, f32)]) -> String {
         let sensors = |rows: &[(&str, f32)]| {
             rows.iter()
                 .map(|(name, value)| {
                     format!(
-                        r#"{{"id":9,"Text":"{name}","Type":"Temperature","Value":"{value} °C","RawValue":{value},"Children":[]}}"#
+                        r#"{{"id":9,"Text":"{name}","Type":"Temperature","Value":"{value:.1} °C","RawValue":"{value:.1} °C","Children":[]}}"#
                     )
                 })
                 .collect::<Vec<_>>()
@@ -234,6 +283,65 @@ mod tests {
         assert!(belongs("/gpu-intel/0", Subject::Gpu));
         assert!(!belongs("/hdd/0", Subject::Gpu));
         assert!(!belongs("/lpc/nct6798d/0", Subject::Cpu));
+    }
+
+    #[test]
+    #[ignore = "asks the real server on this machine"]
+    fn live_probe() {
+        match fetch() {
+            Some(body) => println!(
+                "LIVE bytes={} cpu={:?} gpu={:?}",
+                body.len(),
+                hottest(&body, Subject::Cpu),
+                hottest(&body, Subject::Gpu)
+            ),
+            None => println!("LIVE fetch returned None"),
+        }
+    }
+
+    #[test]
+    fn a_number_and_a_formatted_string_are_both_a_measurement() {
+        // Both shapes are accepted: the tool's source writes a number, its
+        // released build writes a localized string.
+        let numeric = Node {
+            kind: Some("Temperature".into()),
+            raw_value: Some(serde_json::json!(63.8)),
+            hardware_id: None,
+            children: Vec::new(),
+        };
+        assert_eq!(numeric.measured(), Some(63.8));
+
+        for (text, expected) in [
+            ("59,0 °C", Some(59.0_f32)),
+            ("59.0 °C", Some(59.0)),
+            // Below zero is not a running chip, and neither is 1234 degrees.
+            ("-4,5 °C", None),
+            ("1.234,5 °C", None),
+            ("NaN", None),
+        ] {
+            let node = Node {
+                kind: Some("Temperature".into()),
+                raw_value: Some(serde_json::json!(text)),
+                hardware_id: None,
+                children: Vec::new(),
+            };
+            assert_eq!(node.measured(), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_tool_set_to_fahrenheit_is_converted_not_mistaken() {
+        let body = r#"{"id":1,"Text":"Sensor","Children":[
+            {"id":0,"Text":"DESKTOP","Children":[
+                {"id":2,"Text":"CPU","HardwareId":"/amdcpu/0","Children":[
+                    {"id":3,"Text":"Temperatures","Children":[
+                        {"id":4,"Text":"Core","Type":"Temperature","RawValue":"140,0 °F","Children":[]}
+                    ]}
+                ]}
+            ]}
+        ]}"#;
+        // 140 °F is 60 °C, which is what the key shows.
+        assert_eq!(hottest(body, Subject::Cpu), Some(60.0));
     }
 
     #[test]
