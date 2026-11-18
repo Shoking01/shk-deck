@@ -45,19 +45,28 @@ written, so `cpu..usage` can never become a key that silently never updates.
 ### Why a temperature can say `—`, and how to make it answer
 
 Windows exposes no sensor API of its own. A chip's temperature lives in the
-chip's registers, and reading it takes a kernel driver, so the plugin asks the
+chip's registers, and reading it takes a privileged path, so the plugin asks the
 sources that exist and says nothing rather than guessing:
 
-1. **LibreHardwareMonitor** — free and open source, and the recommended source.
-   It carries the CPU *and* an AMD or NVIDIA card. Download it from
+0. **The graphics card, natively.** AMD's own library, `atiadlxx.dll`, is
+   installed by the Radeon driver on every machine with a card in it, and
+   `ss550-sensors` reads the card's edge temperature straight from it — no
+   program running, no administrator rights, nothing to install. The key's
+   caption says `ADL`. (Its older `ADL2_OverdriveN_Temperature_Get` answers "not
+   supported" on RDNA cards, so the crate performs the performance-log handshake
+   the driver requires instead.)
+1. **LibreHardwareMonitor** — free and open source, and the source that covers
+   the processor. It carries the CPU *and* an AMD or NVIDIA card. Download it
+   from
    [its releases page](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases),
-   unpack it anywhere, and start it as administrator (some sensors need it).
-   **Then turn on its web server**: `Options → Remote Web Server → Run` (port
-   8085 unless it was changed). That is the interface the current build offers —
-   **0.9.5 removed the WMI provider**, so a WMI query against a current install
-   finds nothing. The plugin reads `http://127.0.0.1:8085/data.json` and takes the
-   hottest sensor of each chip. Last, turn on `Options → Run on Windows startup`
-   and `Minimize on startup` so it stays out of the way.
+   unpack it anywhere, and start it (it needs administrator once, to install its
+   signed driver). **Then turn on its web server**:
+   `Options → Remote Web Server → Run` (port 8085 unless it was changed). That
+   is the interface the current build offers — **0.9.5 removed the WMI
+   provider**, so a WMI query against a current install finds nothing. The plugin
+   reads `http://127.0.0.1:8085/data.json` and takes the hottest sensor of each
+   chip. Last, turn on `Options → Run on Windows startup` and
+   `Minimize on startup` so it stays out of the way.
 2. **An older LibreHardwareMonitor (0.9.4 or earlier)**, or **OpenHardwareMonitor**
    — the tool LibreHardwareMonitor grew out of. Both publish their sensors in a
    WMI namespace (`ROOT\LibreHardwareMonitor`, `ROOT\OpenHardwareMonitor`), and
@@ -86,13 +95,20 @@ rather than a line of code:
 
 | route | GPU temperature | CPU temperature | what it costs |
 |---|---|---|---|
+| AMD's `atiadlxx.dll` (implemented) | **yes**, nothing running | no | a crate with a declared `unsafe` exception |
 | LibreHardwareMonitor | yes | yes | an app running, with its signed driver |
-| AMD ADL (`atiadlxx.dll`) | yes, no extra app | no | a new crate with a declared `unsafe` exception |
-| AMD Ryzen Master SDK | no | yes | the full app and its driver installed, a C++ SDK, and the same exception |
+| PawnIO's driver, directly | no | yes (next step) | a module blob (LGPL-2.1) and the same exception |
+| AMD Ryzen Master SDK | no | yes | the full app and its driver, plus a distribution licence AMD grants in writing — not usable here |
 
-The CPU is the hard half on every route: no user-mode API reads a Ryzen's
-temperature, so some kernel driver is always involved. The GPU is the half that
-can be had natively.
+The GPU half is done: `ss550-sensors` asks AMD's library and gets the card's edge
+temperature. Verified on the machine this was written on — `62 °C` from the
+driver, with LibreHardwareMonitor closed.
+
+The CPU half is the one that needs a driver no matter what. PawnIO is already
+installed on a machine that has run LibreHardwareMonitor, it is signed, and its
+API is four functions; the module that reads a Ryzen's SMN register is
+LGPL-2.1 and can be shipped with its notices. That is the next step, and it is
+the only way to a temperature with nothing else running.
 
 
 ### How the GPU number is read

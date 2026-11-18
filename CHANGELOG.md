@@ -8,6 +8,11 @@ messages; the file below is a human summary, not a substitute for
 ## Unreleased
 
 ### Added — plugins, and the first one: system stats
+- The **graphics card's temperature needs no other program**: `ss550-sensors`
+  asks AMD's own display library (`atiadlxx.dll`, installed with the Radeon
+  driver) through its performance-log interface, read-only, and the key's caption
+  says `ADL`. LibreHardwareMonitor is still the source for the **processor**,
+  which no user-mode API can read without a kernel driver.
 - The controller can host **plugins**: a piece of the build that measures
   something and publishes **cells** a key can show. `system-stats` is the first:
   `cpu.usage`, `cpu.temp`, `gpu.usage`, `gpu.temp`, `ram.usage` and `disk.free`.

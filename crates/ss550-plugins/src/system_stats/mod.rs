@@ -17,6 +17,7 @@
 mod gpu;
 mod lhm;
 mod machine;
+mod native;
 mod thermal;
 
 use ss550_plugin_api::{CellId, CellSpec, Plugin, PluginId, Snapshot};

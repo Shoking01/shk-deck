@@ -44,6 +44,9 @@ const MONITOR_NAMESPACES: [(&str, &str); 2] = [
 /// The ACPI thermal zone's label.
 const FROM_ACPI: &str = "ACPI";
 
+/// The label for a card read through AMD's own display library.
+const FROM_ADL: &str = "ADL";
+
 /// The temperature of one chip, with its source beside it.
 pub(crate) fn temperature(subject: Subject) -> Reading {
     temperature_on_this_platform(subject)
@@ -64,6 +67,13 @@ pub(crate) fn sources_tried() -> &'static str {
 
 #[cfg(windows)]
 fn temperature_on_this_platform(subject: Subject) -> Reading {
+    // A Radeon answers through AMD's own library, with no program in between:
+    // that is the source that needs nothing installed and nothing running.
+    if subject == Subject::Gpu {
+        if let Some(celsius) = super::native::gpu_temperature() {
+            return Reading::temperature(celsius).with_detail(FROM_ADL);
+        }
+    }
     // A current LibreHardwareMonitor is read through its web server, which is the
     // only interface it still offers; the WMI namespaces below are what an older
     // build and OpenHardwareMonitor answer on.
