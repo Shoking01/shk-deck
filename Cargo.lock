@@ -874,6 +874,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ss550-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "ss550-probe"
 version = "0.1.0"
 dependencies = [
