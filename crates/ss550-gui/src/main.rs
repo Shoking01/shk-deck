@@ -44,6 +44,8 @@ use gpui_kit::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use ss550_driver::LONG_CONNECT_TIMEOUT;
 use ss550_engine::{Action, ActionRunner, ActionStore, KeyNumber, Recents};
+use ss550_plugin_api::Reading;
+use ss550_plugins::{Catalogue, Sampler, Samples};
 use ss550_tray::{autostart, install, TrayCommand, TrayHost};
 
 use titlestyle::TitleLook as _;
@@ -54,6 +56,7 @@ mod diagnostics;
 mod favicons;
 mod icons;
 mod pictures;
+mod plugintile;
 mod provider;
 mod render;
 mod session;
@@ -176,6 +179,24 @@ enum Tile {
     TitledColour(Vec<u8>),
 }
 
+/// What one key's plugin face is, before anything is sent.
+///
+/// Resolved ahead of the first byte, like [`Tile`], because a refusal halfway
+/// through a page must not leave the window and the deck disagreeing about the
+/// keys that came after it.
+enum Payload {
+    /// Not a plugin key: the key's own face decides.
+    NotAPlugin,
+    /// A face to send, with the reading it was drawn from, so the repaint rule
+    /// remembers exactly what went out.
+    Ready { jpeg: Vec<u8>, reading: Reading },
+    /// The fonts are still being read, so there is nothing to draw with yet. The
+    /// repaint that follows the scan draws it.
+    Pending,
+    /// A binding this build cannot draw, and the sentence that says why.
+    Failed(String),
+}
+
 /// Decides one key's face, before anything is sent.
 ///
 /// The order is the whole of the rule: the profile's appearance first, because
@@ -268,6 +289,8 @@ enum DraftKind {
     OpenUrl,
     /// Send a key combination to the focused window.
     Keys,
+    /// Show a live reading from a plugin on this key.
+    Plugin,
 }
 
 impl DraftKind {
@@ -280,6 +303,7 @@ impl DraftKind {
             DraftKind::Launch => "run an app",
             DraftKind::OpenUrl => "open a URL",
             DraftKind::Keys => "send a keystroke",
+            DraftKind::Plugin => "show a live reading",
         }
     }
 }
@@ -702,6 +726,11 @@ struct Controller {
     selected_key: KeyNumber,
     /// Which kind of action the panel is editing.
     draft: DraftKind,
+    /// The plugin cell the editor has chosen, while the draft is a reading.
+    ///
+    /// Held apart from the inputs because a cell is two ids, not a string: the
+    /// list under the form sets it, and SAVE BINDING turns it into the action.
+    draft_plugin: Option<(String, String)>,
     program_input: Entity<InputState>,
     args_input: Entity<TextareaState>,
     url_input: Entity<InputState>,
@@ -838,6 +867,59 @@ struct Controller {
     /// Polled every tick: a start that found this one asks for the window by
     /// ringing the event this holds.
     singleton: Option<ss550_tray::instance::SingleInstance>,
+    /// What the plugins of this build can measure, by name.
+    ///
+    /// Read-only after construction: the list is baked into the build, and the
+    /// editor lists it exactly as the plugin published it.
+    plugins: Catalogue,
+    /// The thread that walks the machine, when it is running.
+    ///
+    /// `None` when the thread could not start: the editor still lists the cells
+    /// and a bound key keeps the face it had, which is a window that has lost a
+    /// gauge and not a window that lies.
+    sampler: Option<Sampler>,
+    /// The newest readings, as the sampler last handed them over.
+    samples: Samples,
+    /// What each key bound to a plugin is currently showing.
+    ///
+    /// The repaint rule's memory: a reading that draws the same face as this one
+    /// costs no bytes on the link, so a percentage that has not moved does not
+    /// send a JPEG.
+    drawn_readings: Vec<Option<Reading>>,
+}
+
+/// The keys the newest sample would change on the deck.
+///
+/// S6, stated as a function over plain data so it is a test and not a
+/// convention: a key is due only when it is bound to a plugin, that cell was
+/// measured, and the reading draws a different face from the one the key last
+/// drew. A key bound to anything else is never due, and a cell the sample does
+/// not carry is left alone rather than blanked.
+fn readings_to_repaint(
+    actions: &[Option<Action>],
+    drawn: &[Option<Reading>],
+    samples: &Samples,
+) -> Vec<usize> {
+    let mut due = Vec::new();
+    for (index, action) in actions.iter().enumerate() {
+        let Some(action) = action.as_ref() else {
+            continue;
+        };
+        let Some((plugin, cell)) = action.plugin_cell() else {
+            continue;
+        };
+        let Some(reading) = samples.get_named(plugin, cell) else {
+            continue;
+        };
+        let unchanged = drawn
+            .get(index)
+            .and_then(Option::as_ref)
+            .is_some_and(|drawn| drawn.same_face(reading));
+        if !unchanged {
+            due.push(index);
+        }
+    }
+    due
 }
 
 impl Controller {
@@ -1056,6 +1138,7 @@ impl Controller {
             runner: ActionRunner::with_key_sender(key_sender),
             selected_key: KeyNumber::default(),
             draft: DraftKind::Launch,
+            draft_plugin: None,
             program_input,
             args_input,
             url_input,
@@ -1097,6 +1180,13 @@ impl Controller {
             profile_input,
             _font_query_changes: font_query_changes,
             singleton: None,
+            // The catalogue is a list this build carries; the sampler is a
+            // thread that starts here and is joined when the window is dropped,
+            // so a machine is walked for exactly as long as the app runs.
+            plugins: Catalogue::built_in(),
+            sampler: Some(Sampler::start(ss550_plugins::SAMPLE_INTERVAL)),
+            samples: Samples::new(),
+            drawn_readings: Vec::new(),
         };
 
         // Look for the deck right away: its settle window starts the moment
@@ -1207,6 +1297,7 @@ impl Controller {
         self.recents = recents;
         self.slots = vec![Slot::Off; key_count];
         self.pressed = vec![false; key_count];
+        self.drawn_readings = vec![None; key_count];
         if !key_exists(&session, self.selected_key) {
             self.selected_key = KeyNumber::default();
         }
@@ -1398,7 +1489,8 @@ impl Controller {
             .session
             .as_ref()
             .map_or(0, session::DeckSession::key_count);
-        let wants_words = needs_fonts(spec, self.current_keys(), key_count);
+        let wants_words = needs_fonts(spec, self.current_keys(), key_count)
+            || (spec.is_some() && !self.reading_keys().is_empty());
         if wants_words && self.text.is_none() && !self.text_scan {
             self.fonts_wanted = true;
         }
@@ -1457,9 +1549,12 @@ impl Controller {
                     .map(titletext::TextEngine::families)
                     .unwrap_or_default();
                 // The words can be drawn now, so the keys that were painted
-                // without them are recomposed and repainted — once.
+                // without them are recomposed and repainted — once. A key bound
+                // to a plugin is one of them: its face is words too.
                 this.rebuild_icons();
-                for key in this.titled_keys() {
+                let mut again = this.titled_keys();
+                again.extend(this.reading_keys());
+                for key in again {
                     this.repaint_key(key);
                 }
                 cx.notify();
@@ -1929,14 +2024,37 @@ impl Controller {
             ));
         }
 
+        // A key bound to a plugin shows the reading instead of the face its
+        // appearance would give it. Decided here, before the session is
+        // borrowed, so a refusal halfway through the page cannot leave the deck
+        // and the window disagreeing about the keys that came after it.
+        let mut faces: Vec<Payload> = Vec::with_capacity(key_count);
+        for action in actions.iter() {
+            let payload = match action.as_ref() {
+                Some(action) => self.plugin_face(action),
+                None => Payload::NotAPlugin,
+            };
+            faces.push(payload);
+        }
+
         let Some(session) = self.session.as_mut() else {
             return;
         };
 
         let mut failure = None;
         let mut painted = vec![slot; key_count];
+        let mut drawn: Vec<(usize, Reading)> = Vec::new();
         for (index, plan) in plans.iter().enumerate() {
-            let result = match plan {
+            let result = match &faces[index] {
+                Payload::Ready { jpeg, .. } => Self::paint_over_black(session, index, jpeg),
+                Payload::Pending => {
+                    // Nothing can be drawn yet: the key keeps what it had, and
+                    // the repaint after the font scan draws the reading.
+                    painted[index] = self.slots.get(index).copied().unwrap_or(slot);
+                    continue;
+                }
+                Payload::Failed(message) => Err(PaintFailure::Picture(message.clone())),
+                Payload::NotAPlugin => match plan {
                     Tile::Asset { name, title, style } => {
                         let tile = asset_tile(
                             &self.assets,
@@ -1955,16 +2073,29 @@ impl Controller {
                     Tile::Art(picture) => Self::paint_over_black(session, index, picture),
                     Tile::TitledColour(picture) => Self::paint_over_black(session, index, picture),
                     Tile::Colour(rgb) => session.paint(index, *rgb).map_err(PaintFailure::Session),
+                },
             };
 
             if let Err(error) = result {
                 failure = Some(error);
                 break;
             }
-            painted[index] = match plan {
-                Tile::Asset { .. } | Tile::Art(_) | Tile::TitledColour(_) => Slot::Image,
-                Tile::Colour(_) => slot,
+            if let Payload::Ready { reading, .. } = &faces[index] {
+                drawn.push((index, reading.clone()));
+            }
+            painted[index] = match &faces[index] {
+                Payload::Ready { .. } => Slot::Image,
+                _ => match plan {
+                    Tile::Asset { .. } | Tile::Art(_) | Tile::TitledColour(_) => Slot::Image,
+                    Tile::Colour(_) => slot,
+                },
             };
+        }
+
+        // What the deck now shows, remembered per key: the next sample compares
+        // against this, and only a clip that changed is sent again.
+        for (index, reading) in drawn {
+            self.mark_drawn(index, reading);
         }
 
         match failure {
@@ -2086,6 +2217,20 @@ impl Controller {
         // where the pages and the keys drawn from them live. The runner never
         // sees it: a worker with no window cannot swap a page.
         if self.apply_navigation(&action, idx) {
+            return;
+        }
+
+        // A reading is a gauge, not a button: pressing it refreshes what it
+        // shows from the newest sample and runs nothing. Saying which
+        // measurement it is keeps the press from feeling like nothing happened.
+        if action.is_reading() {
+            let key = u16::try_from(idx + 1).unwrap_or(u16::MAX);
+            let refreshed = self.repaint_key(key);
+            self.note = if refreshed {
+                format!("Key #{} shows {}.", idx + 1, action.describe()).into()
+            } else {
+                self.note.clone()
+            };
             return;
         }
 
@@ -2392,6 +2537,10 @@ impl Controller {
         }
 
         self.heartbeat();
+        // The newest walk over the machine, and the keys it moved. The sample was
+        // measured on another thread; painting it happens here, on the one that
+        // talks to the deck.
+        self.pump_samples();
     }
 
     /// Handles an unexpected disconnect with exponential backoff.
@@ -2584,13 +2733,14 @@ impl Controller {
         // Every field is written on every load, empty included: a field left
         // holding the previous key's value is how the wrong program gets saved
         // onto the wrong key.
-        let (program, args, url, keys, kind) = match binding {
+        let (program, args, url, keys, kind, chosen) = match binding {
             Some(Action::Launch { program, args }) => (
                 program.display().to_string(),
                 args.join("\n"),
                 String::new(),
                 String::new(),
                 DraftKind::Launch,
+                None,
             ),
             Some(Action::OpenUrl { url }) => (
                 String::new(),
@@ -2598,6 +2748,7 @@ impl Controller {
                 url,
                 String::new(),
                 DraftKind::OpenUrl,
+                None,
             ),
             Some(Action::Keys { keys }) => (
                 String::new(),
@@ -2605,6 +2756,17 @@ impl Controller {
                 String::new(),
                 keys.to_string(),
                 DraftKind::Keys,
+                None,
+            ),
+            // A reading is edited by the list under the form, which is the only
+            // place that knows which cells this build has.
+            Some(Action::Plugin { plugin, cell }) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                DraftKind::Plugin,
+                Some((plugin, cell)),
             ),
             // A navigation key has no field in this editor yet: it is selected
             // like any other, and the editor shows nothing to fill. Its own
@@ -2616,6 +2778,7 @@ impl Controller {
                 String::new(),
                 String::new(),
                 self.draft,
+                None,
             ),
             None => (
                 String::new(),
@@ -2623,10 +2786,12 @@ impl Controller {
                 String::new(),
                 String::new(),
                 self.draft,
+                None,
             ),
         };
 
         self.draft = kind;
+        self.draft_plugin = chosen;
         // The key's face is decided by the program in the field, so the icon
         // cache is told which one it is before the editor draws. A field that is
         // only text has no picture, and the editor draws the initial instead.
@@ -2675,6 +2840,9 @@ impl Controller {
             DraftKind::Keys => self
                 .keys_input
                 .update(cx, |state, cx| state.focus(window, cx)),
+            // A reading is chosen by clicking a row, not by typing: the caret
+            // has nowhere to go, and the list is already on screen.
+            DraftKind::Plugin => {}
         }
     }
 
@@ -2841,6 +3009,24 @@ impl Controller {
                     }
                 }
             }
+            DraftKind::Plugin => match self.draft_plugin.clone() {
+                // The list only offers cells this build has, but a form that was
+                // loaded from a binding and then saved again must not write back
+                // a cell that has since gone: the engine checks the spelling,
+                // and only the catalogue knows what exists.
+                Some((plugin, cell)) if !self.plugins.knows(&plugin, &cell) => {
+                    self.note =
+                        format!("\"{cell}\" is not a cell this build has, so nothing was bound.")
+                            .into();
+                    return;
+                }
+                Some((plugin, cell)) => Action::Plugin { plugin, cell },
+                None => {
+                    self.note =
+                        "Choose a measurement from the list, then press SAVE BINDING.".into();
+                    return;
+                }
+            },
         };
 
         self.bind_and_repaint(self.selected_key, action, cx);
@@ -2913,9 +3099,12 @@ impl Controller {
         };
 
         // Recompose every variant whose style came from the default, then
-        // repaint those keys.
+        // repaint those keys. A key that shows a reading is drawn with the same
+        // family, so it moves with the default too.
         self.rebuild_icons();
-        for key in self.inherited_title_keys() {
+        let mut again = self.inherited_title_keys();
+        again.extend(self.reading_keys());
+        for key in again {
             self.repaint_key(key);
         }
         cx.notify();
@@ -3427,6 +3616,113 @@ impl Controller {
             .map_err(PaintFailure::Session)
     }
 
+    /// The face a key bound to a plugin shows, drawn from the newest sample.
+    ///
+    /// Resolved before the session is borrowed, like every other payload: the
+    /// reading, the cell and the font are read here, and the bytes are ready
+    /// before the first one goes out.
+    fn plugin_face(&mut self, action: &Action) -> Payload {
+        let Some((plugin, cell)) = action.plugin_cell() else {
+            return Payload::NotAPlugin;
+        };
+        let Some(spec) = self.session.as_ref().map(session::DeckSession::image_spec) else {
+            return Payload::Failed(
+                "Connect a deck to draw a reading: the tile size comes from it.".to_string(),
+            );
+        };
+        // A binding can outlive the build that wrote it: a cell that is no longer
+        // here is a sentence, not a key that quietly stops moving.
+        let Some(specs) = self.plugins.find(plugin, cell).cloned() else {
+            return Payload::Failed(format!(
+                "\"{cell}\" is not a cell this build has. Bind the key to a plugin it lists."
+            ));
+        };
+        let reading = self
+            .samples
+            .get_named(plugin, cell)
+            .cloned()
+            // The first sample of a session has not arrived yet: the key shows
+            // the dash it will show only until the machine answers.
+            .unwrap_or_else(|| Reading::unavailable("no answer"));
+
+        let family = self.title_style.family.clone();
+        let Some(text) = self.text.as_mut() else {
+            // Words need a font, and the scan is asked for from the loop that has
+            // a context to spawn with. Until it answers the key keeps what it had.
+            if !self.text_scan {
+                self.fonts_wanted = true;
+            }
+            return Payload::Pending;
+        };
+        match plugintile::compose(spec, &specs, &reading, &family, text) {
+            Some(jpeg) => Payload::Ready { jpeg, reading },
+            None => Payload::Failed(
+                "This deck's tile could not hold the reading as a picture.".to_string(),
+            ),
+        }
+    }
+
+    /// Remembers what one key's plugin face drew, so the next sample is compared
+    /// against what is actually on the deck.
+    fn mark_drawn(&mut self, index: usize, reading: Reading) {
+        if self.drawn_readings.len() <= index {
+            self.drawn_readings.resize(index + 1, None);
+        }
+        self.drawn_readings[index] = Some(reading);
+    }
+
+    /// Takes the newest walk over the machine, and repaints the keys it moved.
+    ///
+    /// Called from the maintenance tick, never from a frame: the sample was
+    /// measured on another thread, and everything here happens on the window's
+    /// own.
+    fn pump_samples(&mut self) -> bool {
+        let Some(samples) = self.sampler.as_ref().and_then(Sampler::try_recv) else {
+            return false;
+        };
+        self.samples = samples;
+        self.repaint_changed_readings()
+    }
+
+    /// Repaints only the keys whose face the newest sample changed.
+    ///
+    /// This is S6 in one function: the reading is compared with what that key
+    /// last drew, and a key whose number, caption and bar are the same costs
+    /// nothing. A key off the visible page is not repainted at all.
+    fn repaint_changed_readings(&mut self) -> bool {
+        let key_count = self
+            .session
+            .as_ref()
+            .map_or(0, session::DeckSession::key_count);
+        let actions: Vec<Option<Action>> = (0..key_count)
+            .map(|index| {
+                let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
+                self.action_for(key).cloned()
+            })
+            .collect();
+        let due = readings_to_repaint(&actions, &self.drawn_readings, &self.samples);
+        let mut changed = false;
+        for index in due {
+            let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
+            changed |= self.repaint_key(key);
+        }
+        changed
+    }
+
+    /// The keys on this page that show a plugin reading.
+    ///
+    /// The font scan needs them: their face is words like any title, so the
+    /// repaint that follows the scan has to include them.
+    fn reading_keys(&self) -> Vec<u16> {
+        let count = self
+            .session
+            .as_ref()
+            .map_or(0, session::DeckSession::key_count);
+        (1..=count as u16)
+            .filter(|key| self.action_for(*key).is_some_and(Action::is_reading))
+            .collect()
+    }
+
     /// Repaints one key from what the profile says it shows now.
     ///
     /// Returns `false` when the picture path failed; the note already says why.
@@ -3445,9 +3741,44 @@ impl Controller {
             .and_then(|keys| keys.title(key))
             .map(str::to_string);
         let action = self.action_for(key).cloned();
-        // The title and the action are taken as owned values: the plan needs the
-        // cache and the font mutably, and a borrow of the store cannot outlive
-        // that.
+        // A key bound to a plugin shows the reading and nothing else: its
+        // appearance and its title are not drawn over it, because the number is
+        // the whole point of the key.
+        if let Some(action) = action.as_ref() {
+            match self.plugin_face(action) {
+                Payload::NotAPlugin => {}
+                Payload::Ready { jpeg, reading } => {
+                    let index = usize::from(key.saturating_sub(1));
+                    let Some(session) = self.session.as_mut() else {
+                        return true;
+                    };
+                    return match Self::paint_over_black(session, index, &jpeg) {
+                        Ok(()) => {
+                            if let Some(entry) = self.slots.get_mut(index) {
+                                *entry = Slot::Image;
+                            }
+                            self.mark_drawn(index, reading);
+                            true
+                        }
+                        Err(PaintFailure::Session(error)) => {
+                            self.report(error);
+                            false
+                        }
+                        Err(PaintFailure::Picture(message)) => {
+                            self.note = message.into();
+                            false
+                        }
+                    };
+                }
+                // The face cannot be drawn yet; the repaint after the font scan
+                // draws it, and nothing is reported in the meantime.
+                Payload::Pending => return true,
+                Payload::Failed(message) => {
+                    self.note = message.into();
+                    return false;
+                }
+            }
+        }
         // The key's own style, or the app's default: one resolution, used by the
         // plan and by the picture the deck receives.
         let style = self.style_for(key);
@@ -3818,11 +4149,66 @@ fn main() {
 mod tests {
     use super::{
         advance_clicks, apply_pick, join_notes, load_recents_at, navigate, needs_fonts, plan_tile,
-        read_deck_path_at, record_recent_at, resolve_style, slot_for, write_deck_path_at,
-        NavOutcome, PickOutcome, PictureDialog, Slot, Tile,
+        read_deck_path_at, readings_to_repaint, record_recent_at, resolve_style, slot_for,
+        write_deck_path_at, NavOutcome, PickOutcome, PictureDialog, Slot, Tile,
     };
     use ss550_engine::{Action, AssetLibrary, Recents};
+    use ss550_plugin_api::{CellId, PluginId, Reading};
+    use ss550_plugins::Samples;
     use std::path::PathBuf;
+
+    fn cell(id: &str) -> CellId {
+        CellId::parse(id).expect("a usable cell id")
+    }
+
+    #[test]
+    fn only_a_key_whose_reading_changed_is_repainted() {
+        let plugin = |id: &str| Action::Plugin {
+            plugin: "system-stats".to_string(),
+            cell: id.to_string(),
+        };
+        let actions = vec![
+            Some(plugin("cpu.usage")),
+            Some(plugin("gpu.usage")),
+            Some(Action::Back),
+            None,
+            Some(plugin("cpu.temp")),
+        ];
+        let drawn = vec![
+            Some(Reading::percent(41.0)),
+            Some(Reading::percent(50.0)),
+            None,
+            None,
+            None,
+        ];
+        let mut samples = Samples::new();
+        let owner = PluginId::parse("system-stats").expect("a usable plugin id");
+        samples.set(owner.clone(), cell("cpu.usage"), Reading::percent(42.0));
+        samples.set(owner, cell("gpu.usage"), Reading::percent(50.0));
+
+        // 0 moved, 1 draws the same face, 2 is not a reading, 3 is unbound, and
+        // 4 was not measured — so 4 keeps what it shows instead of blanking.
+        assert_eq!(readings_to_repaint(&actions, &drawn, &samples), vec![0]);
+    }
+
+    #[test]
+    fn a_key_that_has_never_been_painted_is_due_even_when_the_reading_is_unchanged() {
+        // The first sample of a session: nothing has been drawn yet, so a key
+        // bound to a plugin has to be painted even though there is no "previous"
+        // face to compare against.
+        let action = Action::Plugin {
+            plugin: "system-stats".to_string(),
+            cell: "cpu.usage".to_string(),
+        };
+        let mut samples = Samples::new();
+        samples.set(
+            PluginId::parse("system-stats").expect("a usable plugin id"),
+            cell("cpu.usage"),
+            Reading::percent(42.0),
+        );
+        let due = readings_to_repaint(&[Some(action)], &[None], &samples);
+        assert_eq!(due, vec![0]);
+    }
 
     #[test]
     fn a_title_on_a_key_that_runs_nothing_still_asks_for_a_font() {

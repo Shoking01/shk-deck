@@ -32,9 +32,33 @@ pub enum ActionError {
     #[error("a page name cannot contain control characters")]
     PageNameControlCharacter,
 
-    /// A profile switch names no profile.
+    /// A plugin switch names no profile.
     #[error("a profile name cannot be empty")]
     EmptyProfileName,
+
+    /// A plugin binding names a plugin id the contract refuses.
+    #[error("the plugin id is not usable: {source}")]
+    PluginId {
+        /// Why the contract refused it.
+        source: ss550_plugin_api::IdError,
+    },
+
+    /// A plugin binding names a cell id the contract refuses.
+    #[error("the plugin cell is not usable: {source}")]
+    PluginCell {
+        /// Why the contract refused it.
+        source: ss550_plugin_api::IdError,
+    },
+
+    /// A plugin reading was handed to the runner.
+    ///
+    /// A reading is drawn on the key and refreshed by the window; there is
+    /// nothing to start, and a worker with no window cannot draw one.
+    #[error("{action} is a reading the window draws, not something to run")]
+    ReadingIsNotRunnable {
+        /// The action, as its one-line label.
+        action: String,
+    },
 
     /// A navigation action was handed to the runner.
     ///

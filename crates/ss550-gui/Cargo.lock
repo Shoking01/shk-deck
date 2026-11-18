@@ -6441,6 +6441,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "ss550-plugin-api",
  "thiserror 2.0.21",
 ]
 
@@ -6458,8 +6459,27 @@ dependencies = [
  "raw-window-handle",
  "ss550-driver",
  "ss550-engine",
+ "ss550-plugin-api",
+ "ss550-plugins",
  "ss550-tray",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "ss550-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "ss550-plugins"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "ss550-plugin-api",
+ "sysinfo",
+ "wmi",
 ]
 
 [[package]]
@@ -8511,6 +8531,20 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "wmi"
+version = "0.18.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c81b85c57a57500e56669586496bf2abd5cf082b9d32995251185d105208b64"
+dependencies = [
+ "futures",
+ "log",
+ "serde",
+ "thiserror 2.0.21",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
+]
 
 [[package]]
 name = "writeable"

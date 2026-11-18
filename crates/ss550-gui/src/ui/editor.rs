@@ -111,6 +111,18 @@ pub(crate) fn key_editor(
                 this.note = "Fill the combination, then press SAVE BINDING.".into();
                 cx.notify();
             },
+        ))
+        .child(segment(
+            SharedString::from("draft-plugin"),
+            "LIVE STAT",
+            draft == DraftKind::Plugin,
+            tokens,
+            cx,
+            |this, _window, cx| {
+                this.draft = DraftKind::Plugin;
+                this.note = "Pick a measurement, then press SAVE BINDING.".into();
+                cx.notify();
+            },
         ));
 
     let launch_fields = div()
@@ -176,6 +188,7 @@ pub(crate) fn key_editor(
         DraftKind::Launch => launch_fields,
         DraftKind::OpenUrl => url_fields,
         DraftKind::Keys => key_fields,
+        DraftKind::Plugin => plugin_fields(controller, tokens, cx),
     };
 
     let save_row = div()
@@ -321,6 +334,87 @@ pub(crate) fn editor_heading(number: ss550_engine::KeyNumber, tokens: Tokens) ->
         .child(micro_label(format!("#{}", number.get()), tokens))
 }
 
+/// The measurement a key shows, chosen from what the plugins of this build
+/// publish.
+///
+/// The list is the catalogue itself, not a copy: a cell this build does not have
+/// cannot be chosen, and the same list is what refuses a binding that names one
+/// after a plugin goes away. Nothing is measured to draw it — the plugin states
+/// its cells once, when it is built.
+fn plugin_fields(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller>) -> Div {
+    let chosen = controller.draft_plugin.clone();
+    let cells: Vec<ss550_plugin_api::CellSpec> = controller.plugins.cells().to_vec();
+
+    let mut list = div().flex().flex_col().gap(px(2.)).w_full();
+    for (position, cell) in cells.iter().enumerate() {
+        let picked = chosen.as_ref().is_some_and(|(plugin, id)| {
+            plugin == cell.plugin().as_str() && id == cell.cell().as_str()
+        });
+        let plugin = cell.plugin().to_string();
+        let id = cell.cell().to_string();
+        let swatch = cell.accent();
+        let row = div()
+            .id(SharedString::from(format!("plugin-cell-{position}")))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .h(px(34.))
+            .w_full()
+            .min_w(px(0.))
+            .px(px(8.))
+            .rounded(px(RADIUS_SM))
+            .bg(if picked {
+                tokens.accent_tint
+            } else {
+                tokens.elevated
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(10.))
+                    .h(px(10.))
+                    .rounded(px(5.))
+                    .bg(gpui_kit::rgb(
+                        (u32::from(swatch[0]) << 16)
+                            | (u32::from(swatch[1]) << 8)
+                            | u32::from(swatch[2]),
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w(px(0.))
+                    .child(one_line(cell.label(), FONT_SUB, tokens.ink))
+                    .child(one_line(cell.hint(), FONT_CAPTION, tokens.soft)),
+            );
+        list = list.child(activate(row, cx, move |this, _window, cx| {
+            this.draft = DraftKind::Plugin;
+            this.draft_plugin = Some((plugin.clone(), id.clone()));
+            this.note = format!(
+                "{} will show {} — press SAVE BINDING.",
+                this.selected_key.get(),
+                id
+            )
+            .into();
+            cx.notify();
+        }));
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .w_full()
+        .child(micro_label("MEASUREMENT · what this key shows", tokens))
+        .child(list)
+        .child(one_line(
+            "The key redraws itself as the measurement moves. Pressing it refreshes it.",
+            FONT_CAPTION,
+            tokens.soft,
+        ))
+}
 
 /// The picture the key would wear for the program in the field.
 ///

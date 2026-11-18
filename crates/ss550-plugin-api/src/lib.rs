@@ -62,7 +62,9 @@ pub enum IdError {
     },
 
     /// The id holds a character the contract does not allow.
-    #[error("{character:?} is not allowed in an id: use lowercase letters, digits, '-', '_' or '.'")]
+    #[error(
+        "{character:?} is not allowed in an id: use lowercase letters, digits, '-', '_' or '.'"
+    )]
     BadCharacter {
         /// The character that was refused.
         character: char,
@@ -159,9 +161,8 @@ fn parse_id(text: &str, max: usize, segments: bool) -> Result<String, IdError> {
     if length > max {
         return Err(IdError::TooLong { max, length });
     }
-    let separators = |character: char| {
-        character == '-' || (segments && (character == '.' || character == '_'))
-    };
+    let separators =
+        |character: char| character == '-' || (segments && (character == '.' || character == '_'));
     for (position, character) in trimmed.chars().enumerate() {
         if character.is_ascii_lowercase() || character.is_ascii_digit() {
             continue;
@@ -173,9 +174,12 @@ fn parse_id(text: &str, max: usize, segments: bool) -> Result<String, IdError> {
         // nothing, and `-cpu` is not a name.
         let edge = position == 0 || position + 1 == length;
         let doubled = trimmed.chars().nth(position + 1).is_some_and(separators);
-        let doubled_before = position > 0 && trimmed.chars().nth(position - 1).is_some_and(separators);
+        let doubled_before =
+            position > 0 && trimmed.chars().nth(position - 1).is_some_and(separators);
         if edge || doubled || doubled_before {
-            return Err(IdError::BadSeparator { separator: character });
+            return Err(IdError::BadSeparator {
+                separator: character,
+            });
         }
     }
     Ok(trimmed.to_string())
@@ -292,7 +296,7 @@ impl Reading {
     /// backwards.
     pub fn percent(value: f32) -> Self {
         if !value.is_finite() {
-            return Self::unavailable("the provider answered nothing usable");
+            return Self::unavailable("no answer");
         }
         let clamped = value.clamp(0.0, 100.0);
         Reading::Value {
@@ -308,7 +312,7 @@ impl Reading {
     /// a scale of nothing tells less than the number alone.
     pub fn temperature(celsius: f32) -> Self {
         if !celsius.is_finite() {
-            return Self::unavailable("the provider answered nothing usable");
+            return Self::unavailable("no answer");
         }
         Reading::Value {
             text: format!("{celsius:.0}°C"),
@@ -321,7 +325,7 @@ impl Reading {
     /// whole units with a unit suffix of the caller's choosing.
     pub fn whole(value: f32, suffix: &str) -> Self {
         if !value.is_finite() {
-            return Self::unavailable("the provider answered nothing usable");
+            return Self::unavailable("no answer");
         }
         Reading::Value {
             text: format!("{value:.0}{suffix}"),
@@ -389,13 +393,17 @@ impl Reading {
     /// when something a person can see has changed. `detail` counts because it
     /// is drawn, and so does the reason a reading is missing; a reading that
     /// changed in a way nothing shows is not a reason to spend the link.
+    ///
+    /// The bar's tolerance is one pixel of a hundred-pixel span, rounded up: a
+    /// fraction that moves less than that draws the same bar, so it draws the
+    /// same face.
     pub fn same_face(&self, other: &Reading) -> bool {
         self.text() == other.text()
             && self.detail() == other.detail()
             && self.reason() == other.reason()
             && match (self.fraction(), other.fraction()) {
                 (None, None) => true,
-                (Some(left), Some(right)) => (left - right).abs() < 0.005,
+                (Some(left), Some(right)) => (left - right).abs() < 0.011,
                 _ => false,
             }
     }
@@ -485,9 +493,18 @@ mod tests {
 
     #[test]
     fn an_id_with_a_capital_a_space_or_a_slash_is_refused() {
-        assert!(matches!(PluginId::parse("System"), Err(IdError::BadCharacter { .. })));
-        assert!(matches!(PluginId::parse("system stats"), Err(IdError::BadCharacter { .. })));
-        assert!(matches!(PluginId::parse("../etc"), Err(IdError::BadCharacter { .. })));
+        assert!(matches!(
+            PluginId::parse("System"),
+            Err(IdError::BadCharacter { .. })
+        ));
+        assert!(matches!(
+            PluginId::parse("system stats"),
+            Err(IdError::BadCharacter { .. })
+        ));
+        assert!(matches!(
+            PluginId::parse("../etc"),
+            Err(IdError::BadCharacter { .. })
+        ));
         assert!(matches!(PluginId::parse(""), Err(IdError::Empty)));
         assert!(matches!(PluginId::parse("   "), Err(IdError::Empty)));
     }
@@ -585,7 +602,10 @@ mod tests {
         assert!(left.same_face(&same));
         assert!(!left.same_face(&other_detail), "the detail line is drawn");
         assert!(!left.same_face(&other_number));
-        assert!(!left.same_face(&unavailable), "a reason is a face of its own");
+        assert!(
+            !left.same_face(&unavailable),
+            "a reason is a face of its own"
+        );
         assert!(
             !Reading::unavailable("no sensor")
                 .same_face(&Reading::unavailable("thermal zone closed")),
@@ -593,6 +613,13 @@ mod tests {
         );
         assert!(Reading::temperature(56.0).same_face(&Reading::temperature(56.2)));
         assert!(!Reading::temperature(56.0).same_face(&Reading::temperature(57.0)));
+
+        // Half a percent moves the bar by less than one of its pixels, so the
+        // face is the same face and nothing is sent.
+        let close = Reading::percent(41.5);
+        let nearer = Reading::percent(41.9);
+        assert_eq!(close.text(), nearer.text());
+        assert!(close.same_face(&nearer), "the bar did not move a pixel");
     }
 
     #[test]
@@ -602,7 +629,10 @@ mod tests {
         snapshot.set(cell("cpu.usage"), Reading::percent(12.0));
         snapshot.set(cell("cpu.temp"), Reading::unavailable("none"));
 
-        assert_eq!(snapshot.get(&cell("cpu.usage")).map(Reading::text), Some("12%"));
+        assert_eq!(
+            snapshot.get(&cell("cpu.usage")).map(Reading::text),
+            Some("12%")
+        );
         assert!(snapshot.get(&cell("gpu.usage")).is_none());
         assert_eq!(snapshot.iter().count(), 2);
 

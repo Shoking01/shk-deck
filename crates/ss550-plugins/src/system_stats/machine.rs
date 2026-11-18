@@ -58,7 +58,12 @@ impl Machine {
             // A machine that mounts something else first still has a disk; the
             // largest one is the least surprising answer when the system drive
             // cannot be recognised.
-            .or_else(|| self.disks.list().iter().max_by_key(|disk| disk.total_space()));
+            .or_else(|| {
+                self.disks
+                    .list()
+                    .iter()
+                    .max_by_key(|disk| disk.total_space())
+            });
 
         match chosen {
             Some(disk) => disk_reading(disk.available_space(), disk.total_space()),
@@ -128,7 +133,11 @@ mod tests {
         let total = 512 * 1024 * 1024 * 1024;
         let free = 128 * 1024 * 1024 * 1024;
         let reading = disk_reading(free, total);
-        assert_eq!(reading.text(), "25%", "the number is the free space, not the use");
+        assert_eq!(
+            reading.text(),
+            "25%",
+            "the number is the free space, not the use"
+        );
         assert_eq!(reading.detail(), Some("128.0 / 512.0 GB free"));
     }
 

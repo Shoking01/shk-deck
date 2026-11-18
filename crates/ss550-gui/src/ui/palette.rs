@@ -66,9 +66,13 @@ pub(crate) fn drop_plan(drag: &PaletteDrag) -> DropPlan {
     }
 }
 
-/// The three templates, in the order the rail lists them.
-pub(crate) const TEMPLATES: [DraftKind; 3] =
-    [DraftKind::Launch, DraftKind::OpenUrl, DraftKind::Keys];
+/// The templates, in the order the rail lists them.
+pub(crate) const TEMPLATES: [DraftKind; 4] = [
+    DraftKind::Launch,
+    DraftKind::OpenUrl,
+    DraftKind::Keys,
+    DraftKind::Plugin,
+];
 
 /// What a template's row reads.
 pub(crate) fn template_label(kind: DraftKind) -> &'static str {
@@ -76,6 +80,7 @@ pub(crate) fn template_label(kind: DraftKind) -> &'static str {
         DraftKind::Launch => "Run app",
         DraftKind::OpenUrl => "Open URL",
         DraftKind::Keys => "Keystrokes",
+        DraftKind::Plugin => "Live stat",
     }
 }
 
@@ -328,12 +333,12 @@ mod tests {
     }
 
     #[test]
-    fn the_actions_section_offers_only_the_three_templates() {
+    fn the_actions_section_offers_only_the_four_templates() {
         let listed = entries();
         assert_eq!(listed.len(), TEMPLATES.len());
 
         let labels: Vec<&str> = listed.iter().map(|entry| entry.label.as_ref()).collect();
-        assert_eq!(labels, ["Run app", "Open URL", "Keystrokes"]);
+        assert_eq!(labels, ["Run app", "Open URL", "Keystrokes", "Live stat"]);
 
         for (entry, kind) in listed.iter().zip(TEMPLATES) {
             assert!(matches!(entry.drag, PaletteDrag::Template(listed) if listed == kind));
@@ -398,10 +403,15 @@ mod tests {
 
     #[test]
     fn every_kind_of_action_has_a_template_and_a_name() {
-        // `DraftKind` and the palette are two lists of the same three things;
-        // a kind with no row would be a kind the user cannot reach.
-        assert_eq!(TEMPLATES.len(), 3);
-        for kind in [DraftKind::Launch, DraftKind::OpenUrl, DraftKind::Keys] {
+        // `DraftKind` and the palette are two lists of the same kinds; a kind
+        // with no row would be a kind the user cannot reach.
+        assert_eq!(TEMPLATES.len(), 4);
+        for kind in [
+            DraftKind::Launch,
+            DraftKind::OpenUrl,
+            DraftKind::Keys,
+            DraftKind::Plugin,
+        ] {
             assert!(TEMPLATES.contains(&kind), "{kind:?} has no row");
             assert!(!template_label(kind).trim().is_empty());
         }

@@ -165,10 +165,7 @@ mod tests {
 
     #[test]
     fn a_total_over_a_hundred_is_clamped() {
-        let rows = vec![
-            (instance("3D"), 90),
-            (instance("3D"), 90),
-        ];
+        let rows = vec![(instance("3D"), 90), (instance("3D"), 90)];
         assert_eq!(busiest(&rows), Some(("3D".to_string(), 100.0)));
     }
 

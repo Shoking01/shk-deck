@@ -7,6 +7,24 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Added — plugins, and the first one: system stats
+- The controller can host **plugins**: a piece of the build that measures
+  something and publishes **cells** a key can show. `system-stats` is the first:
+  `cpu.usage`, `cpu.temp`, `gpu.usage`, `gpu.temp`, `ram.usage` and `disk.free`.
+  A key bound to a cell becomes a live gauge — the window redraws its face as the
+  measurement moves, and pressing it refreshes it on the spot.
+- Load, memory and free space come from the machine's own counters; the GPU's
+  engines come from the Windows performance counters, which answer on any card
+  and not just one make. The two **temperatures** are the readings Windows does
+  not simply answer: the plugin reads LibreHardwareMonitor's WMI namespace when
+  it is running, then the ACPI thermal zone, and says `—` with a reason when
+  neither answers. See `docs/plugins.md`.
+- A reading is redrawn only when its face changed, at most once per two-second
+  sample, and never on the thread that draws: measuring a machine is not
+  something a frame can wait for.
+- The editor gained a fourth kind, `LIVE STAT`, which lists the cells of this
+  build and binds one the same way an app or a URL is bound.
+
 ### Fixed — CLEAR KEY now clears the whole key, in both files
 - Clearing a key removes its **title** too, and the title's style with it. The
   words named what the key ran, so leaving them on an empty key kept it promising

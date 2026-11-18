@@ -44,9 +44,18 @@ const STOP_CHECK: Duration = Duration::from_millis(50);
 /// Every plugin this build ships.
 ///
 /// One function, so the catalogue and the sampler can never disagree about what
-/// exists: both are built from this list.
+/// exists: both are built from this list. Only the sampler calls it — building a
+/// plugin reads the machine.
 fn built_in_plugins() -> Vec<Box<dyn Plugin>> {
     vec![Box::new(SystemStats::new())]
+}
+
+/// The cells of every plugin this build ships, without building one.
+///
+/// This is what the window lists, so it must stay free of I/O: a plugin's
+/// `describe` is a table of names, not a measurement.
+fn built_in_descriptions() -> Vec<Vec<CellSpec>> {
+    vec![SystemStats::describe()]
 }
 
 /// What the window needs to know about the plugins without measuring anything.
@@ -60,11 +69,14 @@ pub struct Catalogue {
 
 impl Catalogue {
     /// The catalogue of this build.
+    ///
+    /// Built from what each plugin *says* it measures, never from a plugin that
+    /// has been constructed: this runs while the window is being built, and
+    /// constructing one reads the machine. That work belongs to the sampler's
+    /// thread, and `the_catalogue_lists_exactly_what_the_plugin_measures` holds
+    /// the two lists together.
     pub fn built_in() -> Self {
-        let cells = built_in_plugins()
-            .iter()
-            .flat_map(|plugin| plugin.cells().iter().cloned())
-            .collect();
+        let cells = built_in_descriptions().into_iter().flatten().collect();
         Self { cells }
     }
 
@@ -105,6 +117,15 @@ impl Samples {
     /// What one cell measured, when it was measured at all.
     pub fn get(&self, plugin: &PluginId, cell: &CellId) -> Option<&Reading> {
         self.readings.get(&(plugin.clone(), cell.clone()))
+    }
+
+    /// Records what one cell measured.
+    ///
+    /// The sampler builds a walk this way, and so does any caller that already
+    /// has readings in hand — a replay, a test, a window that was told the
+    /// numbers by something else.
+    pub fn set(&mut self, plugin: PluginId, cell: CellId, reading: Reading) {
+        self.readings.insert((plugin, cell), reading);
     }
 
     /// The same lookup, for the caller that holds the ids as text.
@@ -266,6 +287,16 @@ mod tests {
     }
 
     #[test]
+    fn the_catalogue_lists_exactly_what_the_plugin_measures() {
+        // The window lists `describe`, the sampler measures `new`: if the two
+        // ever diverged, the editor would offer a cell no key could show.
+        let described = SystemStats::describe();
+        let built = SystemStats::new();
+        assert_eq!(described, built.cells().to_vec());
+        assert_eq!(Catalogue::built_in().cells(), described.as_slice());
+    }
+
+    #[test]
     fn every_label_fits_the_band_the_window_draws_it_in() {
         // The face draws the label at a size that holds about six characters;
         // a longer one is a plugin writing a sentence where a name belongs.
@@ -290,7 +321,12 @@ mod tests {
             .insert((plugin.clone(), cell.clone()), Reading::percent(12.0));
 
         assert_eq!(samples.get(&plugin, &cell).map(Reading::text), Some("12%"));
-        assert_eq!(samples.get_named("system-stats", "cpu.usage").map(Reading::text), Some("12%"));
+        assert_eq!(
+            samples
+                .get_named("system-stats", "cpu.usage")
+                .map(Reading::text),
+            Some("12%")
+        );
         assert!(samples.get_named("system-stats", "gpu.usage").is_none());
         assert!(samples.get_named("other", "cpu.usage").is_none());
         assert_eq!(samples.len(), 1);

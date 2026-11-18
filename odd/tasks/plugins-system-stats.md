@@ -71,19 +71,39 @@ The user's own words for the outcome (verbatim, from the request):
   is the point of reading Windows' own counters instead of a vendor SDK.
 - **T3 — the action.** `Action::Plugin { plugin, cell }` in `ss550-engine`:
   serialised as `{"type":"plugin",...}`, validated, described, and refused by the
-  runner (it is the window's business, like navigation). Route: inline. Status:
-  pending.
+  runner (it is the window's business, like navigation). Route: inline. **Done.**
+  158 engine tests: the JSON spelling is pinned, a padded id is trimmed on the way
+  in, five unusable id pairs are refused, and the runner answers
+  `ReadingIsNotRunnable` instead of spawning anything. Validation is the contract
+  crate's own rule, so the engine and a later loader cannot disagree.
 - **T4 — the face.** `crates/ss550-gui/src/plugintile.rs`: label, value, detail
   line and bar, drawn into the deck's own image size and encoded once per change.
-  Route: inline. Status: pending.
+  Route: inline. **Done.** Six tests: the tile's own size, the bar's fill against
+  the percentage and its absence for a temperature, a dash drawn dimmer than a
+  number, the same reading encoding the same bytes (which is what makes a skipped
+  repaint safe), the payload starting with JPEG SOI and fitting the deck's byte
+  limit, and the four parts never overlapping at 96/108/112/160 pixels. Checked by
+  eye too: the encoded faces were written out and looked at, rotated 180° the way
+  the deck's own `encode_tile` sends them.
 - **T5 — the window wiring.** A sampler owned by the controller, drained on the
   maintenance tick; a key bound to a cell is painted from the newest snapshot and
-  repainted only when its face changed. Route: inline. Status: pending.
+  repainted only when its face changed. Route: inline. **Done.** 177 GUI tests.
+  The repaint rule is extracted as `readings_to_repaint`, a function over plain
+  data, and pinned by `only_a_key_whose_reading_changed_is_repainted` (a key that
+  moved, one that did not, one that is not a reading, one unbound, one not
+  measured) and by `a_key_that_has_never_been_painted_is_due_even_when_the_reading_is_unchanged`.
 - **T6 — binding one.** The editor and the palette can bind a cell to a key, from
-  the same list the plugin publishes. Route: inline. Status: pending.
+  the same list the plugin publishes. Route: inline. **Done.** The palette's
+  fourth template is `Live stat`; the editor's fourth segment is `LIVE STAT`,
+  listing the catalogue's six cells with their label, hint and accent, and
+  `SAVE BINDING` writes the binding. `load_draft` opens an existing reading in
+  that list, so a key bound to a cell shows which one.
 - **T7 — the docs.** `docs/plugins.md` (what a plugin is, what each cell reads,
   and why a temperature can be unavailable), `CHANGELOG.md`. Route: inline.
-  Status: pending.
+  **Done.** The doc states the contract, the table of cells and their providers,
+  the three-source temperature chain and why a dash beats a fabricated number,
+  the GPU-engine rule (busiest type, not the sum), the repaint rule, and where
+  each piece of code lives.
 
 ## Log
 
@@ -101,3 +121,29 @@ The user's own words for the outcome (verbatim, from the request):
 - **L3** (decision): the deck receives JPEGs only. A live reading therefore has
   to be pixels, re-encoded and re-sent, which is why S6 bounds the repaint to
   changed faces at the sample interval instead of a frame timer.
+- **L4** (user, verbatim): "Separalo en commits y revisa". The working tree had
+  carried ~4.000 lines of in-flight work (pages, titles, the right-hand column,
+  the tray install) that my commits had swallowed because they share files with
+  this feature. History was rewritten so `feat(gui): titles, pages, the
+  right-hand column and the tray icon` (e2c9d95) holds that work untouched, and
+  this feature sits on top of it: the two test counts that follow are the
+  feature's own. Nothing was lost; `backup/pre-split` keeps the mixed history.
+- **L5** (independent verification, read-only): S1–S5 and S7 passed; **S6 failed**
+  as first written — `Catalogue::built_in()` constructed the plugin, and
+  `SystemStats::new()` reads the machine, so `Controller::new` ran
+  `System::new_all` on GPUI's thread while the window was being built. Fixed:
+  `SystemStats::describe()` returns the cell table with no provider, the
+  catalogue is built from `describe`, and only the sampler thread constructs a
+  plugin. `the_catalogue_lists_exactly_what_the_plugin_measures` holds the two
+  lists together. Three cheaper findings were also taken: `save_binding` refuses
+  a cell the catalogue no longer has (instead of re-writing it from a stale
+  form), `Reading::same_face` tolerates one bar pixel (0.011) so a fraction that
+  moves less than a pixel no longer costs a JPEG, and TITLE DEFAULTS now repaints
+  the keys that show a reading (they are drawn in that family).
+  Left as follow-ups, with reasons: encoding a face still happens on the UI
+  thread inside the maintenance tick (large change: the sampler would have to own
+  the font engine and the deck's image spec); a sampler thread that panics leaves
+  the keys frozen with nothing saying so (`try_recv` folds `Disconnected` into
+  "no new sample"); a `Payload::Failed` stops the rest of the page from being
+  painted on connect, matching the pre-existing picture rule; the window's own
+  key tile still shows `action.summary()` where the deck shows the reading.

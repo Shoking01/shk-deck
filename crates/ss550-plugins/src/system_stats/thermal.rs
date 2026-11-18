@@ -82,13 +82,7 @@ fn libre_hardware_monitor(subject: Subject) -> Option<f32> {
         .ok()?;
     let sensors: Vec<(&str, Option<&str>, Option<f32>)> = rows
         .iter()
-        .map(|row| {
-            (
-                row.name.as_str(),
-                row.sensor_type.as_deref(),
-                row.value,
-            )
-        })
+        .map(|row| (row.name.as_str(), row.sensor_type.as_deref(), row.value))
         .collect();
     pick_temperature(&sensors, subject)
 }
@@ -131,7 +125,10 @@ fn kelvin_tenths_to_celsius(raw: u32) -> Option<f32> {
 /// in a range a running machine could be in, and its name belongs to the chip
 /// asked about. "Hottest" and not "first": a processor with four cores has four
 /// answers, and the one that matters is the worst of them.
-fn pick_temperature(sensors: &[(&str, Option<&str>, Option<f32>)], subject: Subject) -> Option<f32> {
+fn pick_temperature(
+    sensors: &[(&str, Option<&str>, Option<f32>)],
+    subject: Subject,
+) -> Option<f32> {
     sensors
         .iter()
         .filter(|(name, kind, value)| {
@@ -167,7 +164,11 @@ fn belongs_to(name: &str, subject: Subject) -> bool {
 mod tests {
     use super::*;
 
-    fn sensor<'a>(name: &'a str, kind: &'a str, value: f32) -> (&'a str, Option<&'a str>, Option<f32>) {
+    fn sensor<'a>(
+        name: &'a str,
+        kind: &'a str,
+        value: f32,
+    ) -> (&'a str, Option<&'a str>, Option<f32>) {
         (name, Some(kind), Some(value))
     }
 
@@ -180,9 +181,17 @@ mod tests {
 
     #[test]
     fn a_zone_that_cannot_be_a_chip_answers_nothing() {
-        assert_eq!(kelvin_tenths_to_celsius(0), None, "273 °C below zero is no reading");
+        assert_eq!(
+            kelvin_tenths_to_celsius(0),
+            None,
+            "273 °C below zero is no reading"
+        );
         assert_eq!(kelvin_tenths_to_celsius(10), None);
-        assert_eq!(kelvin_tenths_to_celsius(5000), None, "226 °C until the metal melts");
+        assert_eq!(
+            kelvin_tenths_to_celsius(5000),
+            None,
+            "226 °C until the metal melts"
+        );
     }
 
     #[test]
@@ -225,8 +234,9 @@ mod tests {
     #[test]
     fn the_reading_says_where_the_number_came_from() {
         let sensors = [sensor("CPU Package", "Temperature", 44.0)];
-        let reading = Reading::temperature(pick_temperature(&sensors, Subject::Cpu).expect("a value"))
-            .with_detail(FROM_MONITOR);
+        let reading =
+            Reading::temperature(pick_temperature(&sensors, Subject::Cpu).expect("a value"))
+                .with_detail(FROM_MONITOR);
         assert_eq!(reading.text(), "44°C");
         assert_eq!(reading.detail(), Some("LHM"));
     }

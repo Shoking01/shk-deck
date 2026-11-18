@@ -56,13 +56,18 @@ struct Cells {
 }
 
 impl SystemStats {
-    /// Builds the plugin and reads the machine once.
-    pub fn new() -> Self {
+    /// The cells this plugin offers, without reading anything.
+    ///
+    /// The window lists these when it starts, and listing them must not touch
+    /// the machine: `System::new_all` walks every counter and every volume, and
+    /// doing that while the window is being built is the one thing the sampler
+    /// thread exists to keep off the UI thread.
+    pub fn describe() -> Vec<CellSpec> {
         // A literal id that the contract would refuse is a programming mistake,
         // not a runtime condition: `the_cells_are_named_the_way_the_contract_spells_them`
-        // runs this very constructor in every test, so these cannot fire.
+        // runs this very function in every test, so these cannot fire.
         let id = PluginId::parse(ID).expect("a literal plugin id the contract accepts");
-        let cells = vec![
+        vec![
             cell(
                 &id,
                 CPU_USAGE,
@@ -105,7 +110,13 @@ impl SystemStats {
                 "Free space on the system disk",
                 [0xFB, 0xBF, 0x24],
             ),
-        ];
+        ]
+    }
+
+    /// Builds the plugin and reads the machine once.
+    pub fn new() -> Self {
+        let id = PluginId::parse(ID).expect("a literal plugin id the contract accepts");
+        let cells = Self::describe();
         let ids = Cells {
             cpu_usage: cells[0].cell().clone(),
             cpu_temperature: cells[1].cell().clone(),
@@ -161,13 +172,7 @@ impl Plugin for SystemStats {
 }
 
 /// One cell of this plugin.
-fn cell(
-    plugin: &PluginId,
-    id: &str,
-    label: &str,
-    hint: &str,
-    accent: [u8; 3],
-) -> CellSpec {
+fn cell(plugin: &PluginId, id: &str, label: &str, hint: &str, accent: [u8; 3]) -> CellSpec {
     CellSpec::new(
         plugin.clone(),
         CellId::parse(id).expect("a literal cell id the contract accepts"),
@@ -187,7 +192,11 @@ mod tests {
         // constructor would panic on a bad one, so this test is the guard for
         // the `expect`s in the table above.
         let plugin = SystemStats::new();
-        let ids: Vec<&str> = plugin.cells().iter().map(|cell| cell.cell().as_str()).collect();
+        let ids: Vec<&str> = plugin
+            .cells()
+            .iter()
+            .map(|cell| cell.cell().as_str())
+            .collect();
         assert_eq!(
             ids,
             [
@@ -201,7 +210,10 @@ mod tests {
         );
         assert_eq!(plugin.id().as_str(), "system-stats");
         assert_eq!(plugin.name(), "System stats");
-        assert!(plugin.cells().iter().all(|cell| cell.plugin() == plugin.id()));
+        assert!(plugin
+            .cells()
+            .iter()
+            .all(|cell| cell.plugin() == plugin.id()));
     }
 
     #[test]
@@ -230,7 +242,11 @@ mod tests {
         let mut plugin = SystemStats::new();
         std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
         let snapshot = plugin.sample();
-        for cell in [&plugin.ids.cpu_usage, &plugin.ids.ram_usage, &plugin.ids.disk_free] {
+        for cell in [
+            &plugin.ids.cpu_usage,
+            &plugin.ids.ram_usage,
+            &plugin.ids.disk_free,
+        ] {
             let reading = snapshot.get(cell).expect("measured");
             assert!(
                 reading.fraction().is_some(),

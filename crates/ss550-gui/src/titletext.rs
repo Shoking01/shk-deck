@@ -192,8 +192,86 @@ impl TextEngine {
         (lines, block)
     }
 
+    /// Draws one line of text centred in a band of `picture`.
+    ///
+    /// This is the exporter a plugin's key uses, and it is deliberately separate
+    /// from [`TextEngine::draw`]: a reading is not a title. There is no scrim, no
+    /// case folding and no three-line block — just words at a pixel size, in a
+    /// band the caller owns, in an ink the caller chose, stepping down until they
+    /// fit that band.
+    ///
+    /// `None` when there is nothing to draw, so the caller can skip the encode.
+    pub(crate) fn draw_band(
+        &mut self,
+        picture: &RgbaImage,
+        text: &str,
+        px: u16,
+        band: (u32, u32),
+        family: &str,
+        ink: Color,
+    ) -> Option<RgbaImage> {
+        let (width, height) = picture.dimensions();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let text = prepared(text, false);
+        if text.is_empty() {
+            return None;
+        }
+
+        let margin = (width / 16).max(1);
+        let box_width = width.saturating_sub(margin * 2).max(1);
+        let family = match family.is_empty() {
+            true => Family::SansSerif,
+            false => Family::Name(family),
+        };
+        let (band_top, band_height) = band;
+
+        // The size is a ceiling that only steps down: the caller states the size
+        // it wants, and a band too short for it gets smaller words instead of
+        // clipped ones.
+        let mut chosen = px.max(MIN_FIT_PX);
+        let mut block = self.measure_family(&text, family, chosen, box_width);
+        while block > f32::from(u16::try_from(band_height).unwrap_or(u16::MAX))
+            && chosen > MIN_FIT_PX
+        {
+            chosen -= 1;
+            block = self.measure_family(&text, family, chosen, box_width);
+        }
+
+        let room = band_height.saturating_sub(block.ceil() as u32);
+        let top = band_top + room / 2;
+        let mut picture = picture.clone();
+        let mut buffer = self.buffer_family(&text, family, chosen, box_width);
+        let Self { font_system, cache } = self;
+        let (tile_width, tile_height) = (width as i32, height as i32);
+        let origin = (margin as i32, top as i32);
+        buffer.draw(
+            font_system,
+            cache,
+            ink,
+            |x, y, _glyph_width, _height, color| {
+                blend(
+                    &mut picture,
+                    origin.0 + x,
+                    origin.1 + y,
+                    color,
+                    tile_width,
+                    tile_height,
+                );
+            },
+        );
+        Some(picture)
+    }
+
     /// One shaped buffer at `px`, wrapped to `box_width` and centred in it.
     fn buffer(&mut self, text: &str, style: &TitleStyle, px: u16, box_width: u32) -> Buffer {
+        self.buffer_family(text, family(style), px, box_width)
+    }
+
+    /// [`TextEngine::buffer`] for a font named outright, which is what the
+    /// exporter of a reading has.
+    fn buffer_family(&mut self, text: &str, family: Family<'_>, px: u16, box_width: u32) -> Buffer {
         let size = f32::from(px);
         let mut buffer = Buffer::new(
             &mut self.font_system,
@@ -203,10 +281,18 @@ impl TextEngine {
         // No height: the point of measuring is to learn how tall the words are,
         // so a clipped buffer would answer the question with the answer.
         buffer.set_size(Some(box_width as f32), None);
-        let attrs = Attrs::new().family(family(style)).color(INK);
+        let attrs = Attrs::new().family(family).color(INK);
         buffer.set_text(text, &attrs, Shaping::Advanced, Some(Align::Center));
         buffer.shape_until_scroll(&mut self.font_system, false);
         buffer
+    }
+
+    /// The height of `text` at `px`, in pixels.
+    fn measure_family(&mut self, text: &str, family: Family<'_>, px: u16, box_width: u32) -> f32 {
+        let buffer = self.buffer_family(text, family, px, box_width);
+        buffer.layout_runs().fold(0.0f32, |tallest, run| {
+            tallest.max(run.line_top + run.line_height)
+        })
     }
 }
 

@@ -379,11 +379,14 @@ impl IconCache {
             },
             // A keystroke and a navigation key have nothing of their own to
             // draw: the tile shows the initial of what they do, which for
-            // navigation is the page's name.
+            // navigation is the page's name. A plugin key's face is the reading
+            // itself, which this cache does not compose, so the grid draws the
+            // glyph and the deck receives the reading.
             Some(Action::Keys { .. })
             | Some(Action::Folder { .. })
             | Some(Action::Back)
-            | Some(Action::Profile { .. }) => Artwork::Glyph,
+            | Some(Action::Profile { .. })
+            | Some(Action::Plugin { .. }) => Artwork::Glyph,
         }
     }
 
@@ -494,8 +497,12 @@ impl IconCache {
                 .then_some(Base::Glyph(letter)),
             // A navigation key draws the initial of the page or profile it
             // names: the tile is never blank, and the letter says where it
-            // goes.
-            Action::Folder { .. } | Action::Back | Action::Profile { .. } => self
+            // goes. A plugin key draws the initial of the cell it measures, in
+            // the window; the deck receives the reading itself.
+            Action::Folder { .. }
+            | Action::Back
+            | Action::Profile { .. }
+            | Action::Plugin { .. } => self
                 .glyphs
                 .contains_key(&letter)
                 .then_some(Base::Glyph(letter)),
@@ -571,6 +578,9 @@ pub(crate) fn glyph_letter(action: &Action) -> char {
         Action::Folder { page } => first_letter(page),
         Action::Profile { name } => first_letter(name),
         Action::Back => 'B',
+        // A reading has no picture of its own: the initial of the cell it
+        // measures is what the window's tile draws in its place.
+        Action::Plugin { cell, .. } => first_letter(cell),
     }
 }
 
