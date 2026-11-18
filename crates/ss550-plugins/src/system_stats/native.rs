@@ -42,6 +42,12 @@ pub(crate) fn gpu_temperature() -> Option<f32> {
 /// elevated, the value arrives with no other program involved.
 #[cfg(windows)]
 pub(crate) fn cpu_temperature() -> Option<f32> {
+    // The helper first: it is the process that holds the privilege, so asking it
+    // keeps this one unprivileged. A start of the app that happens to be elevated
+    // can open the driver itself, and the direct path is the fallback for that.
+    if let Some(celsius) = ss550_sensors::helper::cpu_temperature() {
+        return Some(celsius);
+    }
     let mut guard = CPU.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     guard
         .get_or_insert_with(Cpu::open)
@@ -55,8 +61,10 @@ pub(crate) fn cpu_temperature() -> Option<f32> {
 /// between "no sensor" and "not allowed to ask".
 #[cfg(windows)]
 pub(crate) fn cpu_driver_available() -> bool {
-    let mut guard = CPU.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.get_or_insert_with(Cpu::open).is_some()
+    ss550_sensors::helper::is_running() || {
+        let mut guard = CPU.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.get_or_insert_with(Cpu::open).is_some()
+    }
 }
 
 #[cfg(not(windows))]

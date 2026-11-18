@@ -33,6 +33,7 @@
 
 #[cfg(windows)]
 mod adl;
+pub mod helper;
 #[cfg(windows)]
 mod pawnio;
 

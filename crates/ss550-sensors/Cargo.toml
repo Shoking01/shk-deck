@@ -16,6 +16,10 @@ license = "MIT OR Apache-2.0"
 [lints.rust]
 unsafe_code = "allow"
 
+[[bin]]
+name = "ss550-sensor-helper"
+path = "src/bin/sensor_helper.rs"
+
 # The library is loaded at run time, from the copy AMD's driver installs.
 [target."cfg(windows)".dependencies]
 libloading = "0.8"

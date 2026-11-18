@@ -19,6 +19,12 @@ messages; the file below is a human summary, not a substitute for
   driver) through its performance-log interface, read-only, and the key's caption
   says `ADL`. LibreHardwareMonitor is still the source for the **processor**,
   which no user-mode API can read without a kernel driver.
+- The privilege that reading a processor needs lives in a separate, tiny program:
+  ss550-sensor-helper.exe opens PawnIO's driver once a second and answers one
+  question on loopback (ss550-sensors/1 cpu=59.0), so Sh-Deck and its window stay
+  unprivileged. Registered as a logon task with highest privileges (one UAC
+  prompt, once), it starts with the session. The plugin asks it first and falls
+  back to LibreHardwareMonitor when it is not there.
 - The controller can host **plugins**: a piece of the build that measures
   something and publishes **cells** a key can show. `system-stats` is the first:
   `cpu.usage`, `cpu.temp`, `gpu.usage`, `gpu.temp`, `ram.usage` and `disk.free`.

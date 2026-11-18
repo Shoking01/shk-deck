@@ -100,12 +100,30 @@ rather than a line of code:
 | LibreHardwareMonitor | yes | yes | an app running, with its signed driver |
 | AMD Ryzen Master SDK | no | yes | the full app and its driver, plus a distribution licence AMD grants in writing — not usable here |
 
-Both halves are written. The GPU needs nothing from the user; the CPU needs one
+Both halves are written. The GPU needs nothing from the user. The CPU needs one
 thing Windows will not give away: the PawnIO driver opens **only to an elevated
 process** (`E_ACCESSDENIED` otherwise, by design — it exposes kernel
-primitives). So an ordinary start of Sh-Deck reads the processor from
-LibreHardwareMonitor, and an elevated start reads it from the chip itself with
-nothing else running. The status line says which of the two applies.
+primitives).
+
+So the privilege lives in a separate, tiny program:
+
+- `ss550-sensor-helper.exe` (built from `ss550-sensors`) opens the driver, reads
+  the processor once a second, and answers one question on
+  `127.0.0.1:47821`: `ss550-sensors/1 cpu=59.0`. It accepts no command, writes no
+  file and touches no hardware beyond reading that register.
+- It is registered as a logon task with highest privileges
+  (`resources/install-sensor-helper.ps1`, once, with one UAC prompt), so it
+  starts with the session and never asks again.
+- Sh-Deck and the window stay **unprivileged**. The plugin asks the helper first,
+  falls back to opening the driver itself (which works if the app happened to be
+  started elevated), and then to LibreHardwareMonitor — and the key's caption says
+  which answered: `SMU`, `SMU`, or `LHM`.
+
+The channel is loopback TCP, which is not authenticated: any local process could
+read the number (a temperature is not a secret) and one could bind the port first
+and answer with a different one. The worst that buys is a wrong degree on a key,
+which is why the client validates the range and why the helper only ever reports
+the reading it already has.
 
 
 ### How the GPU number is read
