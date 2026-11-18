@@ -47,6 +47,13 @@ const FROM_ACPI: &str = "ACPI";
 /// The label for a card read through AMD's own display library.
 const FROM_ADL: &str = "ADL";
 
+/// The label for a processor read through PawnIO's driver.
+///
+/// `SMU` is the processor's own system management unit: the register this reads
+/// is its thermal block, so the caption names what measured the number rather
+/// than the library that carried it.
+const FROM_SMU: &str = "SMU";
+
 /// The temperature of one chip, with its source beside it.
 pub(crate) fn temperature(subject: Subject) -> Reading {
     temperature_on_this_platform(subject)
@@ -59,7 +66,11 @@ pub(crate) fn temperature(subject: Subject) -> Reading {
 /// after a temperature key is bound and nothing answers.
 pub(crate) fn sources_tried() -> &'static str {
     if cfg!(windows) {
-        "open LibreHardwareMonitor and turn on Options → Remote Web Server → Run (port 8085), or keep an older LibreHardwareMonitor / OpenHardwareMonitor running; this machine exposes no ACPI thermal zone to Windows"
+        if super::native::cpu_driver_available() {
+            // The driver is here and this process may use it: nothing to explain.
+            return "the processor is read through PawnIO's driver";
+        }
+        "open LibreHardwareMonitor and turn on Options → Remote Web Server → Run (port 8085), or keep an older LibreHardwareMonitor / OpenHardwareMonitor running; this machine exposes no ACPI thermal zone to Windows, and PawnIO's driver refuses a process that is not elevated"
     } else {
         "this build has no temperature source on this platform"
     }
@@ -67,11 +78,19 @@ pub(crate) fn sources_tried() -> &'static str {
 
 #[cfg(windows)]
 fn temperature_on_this_platform(subject: Subject) -> Reading {
-    // A Radeon answers through AMD's own library, with no program in between:
-    // that is the source that needs nothing installed and nothing running.
-    if subject == Subject::Gpu {
-        if let Some(celsius) = super::native::gpu_temperature() {
-            return Reading::temperature(celsius).with_detail(FROM_ADL);
+    // The sources that need nothing running come first: AMD's own library for the
+    // card, and PawnIO's driver for the processor — the second only when this
+    // process may open it, which the driver decides.
+    match subject {
+        Subject::Gpu => {
+            if let Some(celsius) = super::native::gpu_temperature() {
+                return Reading::temperature(celsius).with_detail(FROM_ADL);
+            }
+        }
+        Subject::Cpu => {
+            if let Some(celsius) = super::native::cpu_temperature() {
+                return Reading::temperature(celsius).with_detail(FROM_SMU);
+            }
         }
     }
     // A current LibreHardwareMonitor is read through its web server, which is the

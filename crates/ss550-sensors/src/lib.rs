@@ -33,9 +33,13 @@
 
 #[cfg(windows)]
 mod adl;
+#[cfg(windows)]
+mod pawnio;
 
 #[cfg(windows)]
 pub use adl::Gpu;
+#[cfg(windows)]
+pub use pawnio::Cpu;
 
 /// The edge temperature of a Radeon, in whole degrees.
 ///

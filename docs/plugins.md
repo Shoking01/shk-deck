@@ -95,20 +95,17 @@ rather than a line of code:
 
 | route | GPU temperature | CPU temperature | what it costs |
 |---|---|---|---|
-| AMD's `atiadlxx.dll` (implemented) | **yes**, nothing running | no | a crate with a declared `unsafe` exception |
+| AMD's `atiadlxx.dll` (implemented) | **yes**, nothing running, no privileges | no | a crate with a declared `unsafe` exception |
+| PawnIO's driver, directly (implemented) | no | **yes**, nothing else running — **when the process is elevated** | the same exception, plus a module blob (LGPL-2.1) |
 | LibreHardwareMonitor | yes | yes | an app running, with its signed driver |
-| PawnIO's driver, directly | no | yes (next step) | a module blob (LGPL-2.1) and the same exception |
 | AMD Ryzen Master SDK | no | yes | the full app and its driver, plus a distribution licence AMD grants in writing — not usable here |
 
-The GPU half is done: `ss550-sensors` asks AMD's library and gets the card's edge
-temperature. Verified on the machine this was written on — `62 °C` from the
-driver, with LibreHardwareMonitor closed.
-
-The CPU half is the one that needs a driver no matter what. PawnIO is already
-installed on a machine that has run LibreHardwareMonitor, it is signed, and its
-API is four functions; the module that reads a Ryzen's SMN register is
-LGPL-2.1 and can be shipped with its notices. That is the next step, and it is
-the only way to a temperature with nothing else running.
+Both halves are written. The GPU needs nothing from the user; the CPU needs one
+thing Windows will not give away: the PawnIO driver opens **only to an elevated
+process** (`E_ACCESSDENIED` otherwise, by design — it exposes kernel
+primitives). So an ordinary start of Sh-Deck reads the processor from
+LibreHardwareMonitor, and an elevated start reads it from the chip itself with
+nothing else running. The status line says which of the two applies.
 
 
 ### How the GPU number is read

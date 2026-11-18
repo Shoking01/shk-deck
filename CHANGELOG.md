@@ -9,6 +9,12 @@ messages; the file below is a human summary, not a substitute for
 
 ### Added — plugins, and the first one: system stats
 - The **graphics card's temperature needs no other program**: `ss550-sensors`
+- The **processor's temperature** is now read from the chip itself, through PawnIO's
+  signed driver and an AMD module (LGPL-2.1, vendored with its notices): the Ryzen's
+  thermal register, no monitoring program running. The driver opens **only to an
+  elevated process**, so an ordinary start still reads the processor from
+  LibreHardwareMonitor, and an elevated one reads it with nothing else running; the
+  key's caption says `SMU` or `LHM` accordingly.
   asks AMD's own display library (`atiadlxx.dll`, installed with the Radeon
   driver) through its performance-log interface, read-only, and the key's caption
   says `ADL`. LibreHardwareMonitor is still the source for the **processor**,

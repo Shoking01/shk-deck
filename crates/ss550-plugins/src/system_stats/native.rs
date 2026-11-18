@@ -13,10 +13,13 @@
 use std::sync::Mutex;
 
 #[cfg(windows)]
-use ss550_sensors::Gpu;
+use ss550_sensors::{Cpu, Gpu};
 
 #[cfg(windows)]
 static GPU: Mutex<Option<Option<Gpu>>> = Mutex::new(None);
+
+#[cfg(windows)]
+static CPU: Mutex<Option<Option<Cpu>>> = Mutex::new(None);
 
 /// The card's edge temperature in whole degrees, from AMD's library.
 ///
@@ -31,7 +34,42 @@ pub(crate) fn gpu_temperature() -> Option<f32> {
         .and_then(Gpu::temperature)
 }
 
+/// The processor's package temperature, from PawnIO's driver.
+///
+/// The driver refuses a process that is not elevated — `E_ACCESSDENIED`, by
+/// design, because it exposes kernel primitives — so this answers `None` from an
+/// ordinary start and the rest of the chain takes over. When the app itself runs
+/// elevated, the value arrives with no other program involved.
+#[cfg(windows)]
+pub(crate) fn cpu_temperature() -> Option<f32> {
+    let mut guard = CPU.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .get_or_insert_with(Cpu::open)
+        .as_ref()
+        .and_then(Cpu::temperature)
+}
+
+/// Whether the process can open the sensor driver at all.
+///
+/// The window reports this so a user who elevated the app knows the difference
+/// between "no sensor" and "not allowed to ask".
+#[cfg(windows)]
+pub(crate) fn cpu_driver_available() -> bool {
+    let mut guard = CPU.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.get_or_insert_with(Cpu::open).is_some()
+}
+
 #[cfg(not(windows))]
 pub(crate) fn gpu_temperature() -> Option<f32> {
     None
+}
+
+#[cfg(not(windows))]
+pub(crate) fn cpu_temperature() -> Option<f32> {
+    None
+}
+
+#[cfg(not(windows))]
+pub(crate) fn cpu_driver_available() -> bool {
+    false
 }

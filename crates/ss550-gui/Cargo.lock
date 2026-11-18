@@ -6479,6 +6479,7 @@ dependencies = [
  "serde",
  "serde_json",
  "ss550-plugin-api",
+ "ss550-sensors",
  "sysinfo",
  "wmi",
 ]
@@ -6488,6 +6489,13 @@ name = "ss550-protocol"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "ss550-sensors"
+version = "0.1.0"
+dependencies = [
+ "libloading 0.8.9",
 ]
 
 [[package]]
