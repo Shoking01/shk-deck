@@ -8,16 +8,16 @@ pub const MAX_JPEG_SIZE: usize = 9_000;
 
 /// The panel's own pixel size, which is what a key image has to cover.
 ///
-/// The community reference for this family sizes button images at 100×100 and
-/// sends exactly that. On the deck in front of this project a 100×100 payload
-/// does not reach the panel's top and left edges: a measured 7.5 % of the panel
-/// on each keeps whatever the key showed before, which is invisible on a solid
-/// colour and a visible frame around a picture. The panel measures 108 pixels
-/// across (100 / (1 − 0.075)), and that is what the encoder is asked for, so the
-/// picture fills the key the deck actually has.
-pub const WIDTH: u16 = 108;
+/// The community reference for this family sizes button images at 100×100, but
+/// on the deck in front of this project that leaves a visible strip at the top
+/// and left — the panel is larger than the payload. The size was measured in two
+/// steps: a 100×100 payload left roughly 7.5 % of the panel uncovered, which
+/// pointed at 108; a 108×108 payload still left a thin frame, so the panel is a
+/// little larger again. 112 is the next LCD step and is what the encoder is
+/// asked for, so the picture fills the key the deck actually has.
+pub const WIDTH: u16 = 112;
 /// See [`WIDTH`].
-pub const HEIGHT: u16 = 108;
+pub const HEIGHT: u16 = 112;
 
 /// Rotation options for button images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
