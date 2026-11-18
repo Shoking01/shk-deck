@@ -111,13 +111,13 @@ The user's own words for the outcome (verbatim, from the request):
   que quiero es un plugin para ver las stats de mi PC. Uso, temperatura de la
   CPU. Lo mismo la GPU y tambien el uso de Ram y del Disco (Porcentaje de espacio
   disponible)"
-- **L2** (probe, this machine): AMD Radeon RX 6600, AMD Ryzen 5 5600, MSI
-  MS-7C96. `Get-CimInstance -Namespace root/WMI MSAcpi_ThermalZoneTemperature`
-  answers nothing, no LibreHardwareMonitor is running, and there is no `nvml.dll`.
-  So on this machine the two temperatures are **not** readable today, which is
-  exactly what S4 has to say out loud instead of printing a number. LibreHardwareMonitor,
-  when it is running, is read through its own WMI namespace and does carry CPU
-  and AMD GPU temperatures.
+- **L2** (probe, this machine): the GPU performance counters answer, and the
+  thermal sources do not: `MSAcpi_ThermalZoneTemperature` returns nothing, no
+  LibreHardwareMonitor is running, and the card has no `nvml.dll`. So on this
+  machine the two temperatures are **not** readable today, which is exactly what
+  S4 has to say out loud instead of printing a number. LibreHardwareMonitor, when
+  it is running, is read through its own WMI namespace and does carry CPU and
+  GPU temperatures.
 - **L3** (decision): the deck receives JPEGs only. A live reading therefore has
   to be pixels, re-encoded and re-sent, which is why S6 bounds the repaint to
   changed faces at the sample interval instead of a frame timer.
@@ -147,3 +147,39 @@ The user's own words for the outcome (verbatim, from the request):
   "no new sample"); a `Payload::Failed` stops the rest of the page from being
   painted on connect, matching the pre-existing picture rule; the window's own
   key tile still shows `action.summary()` where the deck shows the reading.
+- **L6** (native review, granted by the user, four lenses): the OpenCode review
+  transport refused every reviewer launch — `opencode_review_transport_relay_refused
+  (reason: provider_failed)`, eight times over two grouped attempts — so no
+  capture reached Go and the four slots were recorded unachievable
+  (`reason: reviewer_provider_failed`); the review stopped with
+  `unachievable_lens_slot`. The reviewer sessions themselves did run and returned
+  their reports, and their findings were taken:
+  - `error.rs` had lost a doc line in the history split ("A plugin switch names no
+    profile") — restored.
+  - The press note read "Key #3 shows Show cpu.usage…" — `describe()` already
+    opens with the verb, so the template no longer adds one.
+  - `Reading::same_face`'s pixel tolerance was unsound: two fractions can differ
+    by less than a pixel and still round to different bar columns, so a skipped
+    repaint would leave a bar a repaint would have drawn differently. The
+    comparison is exact again, and `temperature` now shares `whole`'s formatting
+    instead of restating it.
+  - `Sampler::is_alive` and one sentence in the status line: a sampler that dies
+    no longer presents its last numbers as live.
+  - One key whose face cannot be drawn no longer aborts the rest of the page; it
+    is skipped, the page is painted, and the sentence is the note.
+  - `Pending` answers `false` ("nothing was painted"), `draw_bar` clamps to the
+    picture so a tiny spec cannot panic the paint path, `Samples::get_named`
+    parses and delegates to `get` (one lookup, one spelling), the contract lost
+    the unused `Snapshot::at`/`taken_at` pair, and `SystemStats::new` names its
+    six ids instead of taking them by position from `describe()`.
+  - Two new tests cover what the review said was unproved: the real faces — with
+    their caption lines and their dashes — fit the deck's byte budget, and a
+    picture smaller than the bar's own margin draws instead of panicking. The
+    live-machine tests now assert shape, never a specific machine's disks, so a
+    VM without WMI cannot fail them.
+  Still open, by decision: encoding a face on the UI thread (the cost is measured
+  nowhere and the fix moves the font engine to the sampler), a wedged WMI call
+  delaying `Sampler::drop` (needs a detached thread or a timeout), the duplicated
+  paint sequence between `repaint_key` and the page paint, the spread of
+  index-conversion spellings, and the documented layout arithmetic in
+  `plugintile.rs`.

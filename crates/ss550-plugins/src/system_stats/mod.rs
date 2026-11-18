@@ -116,18 +116,19 @@ impl SystemStats {
     /// Builds the plugin and reads the machine once.
     pub fn new() -> Self {
         let id = PluginId::parse(ID).expect("a literal plugin id the contract accepts");
-        let cells = Self::describe();
+        // The ids are taken by name, not by position: `describe` decides what the
+        // editor lists, and a sample must not depend on the order of that table.
         let ids = Cells {
-            cpu_usage: cells[0].cell().clone(),
-            cpu_temperature: cells[1].cell().clone(),
-            gpu_usage: cells[2].cell().clone(),
-            gpu_temperature: cells[3].cell().clone(),
-            ram_usage: cells[4].cell().clone(),
-            disk_free: cells[5].cell().clone(),
+            cpu_usage: cell_id(CPU_USAGE),
+            cpu_temperature: cell_id(CPU_TEMPERATURE),
+            gpu_usage: cell_id(GPU_USAGE),
+            gpu_temperature: cell_id(GPU_TEMPERATURE),
+            ram_usage: cell_id(RAM_USAGE),
+            disk_free: cell_id(DISK_FREE),
         };
         Self {
             id,
-            cells,
+            cells: Self::describe(),
             ids,
             machine: Machine::new(),
         }
@@ -173,13 +174,16 @@ impl Plugin for SystemStats {
 
 /// One cell of this plugin.
 fn cell(plugin: &PluginId, id: &str, label: &str, hint: &str, accent: [u8; 3]) -> CellSpec {
-    CellSpec::new(
-        plugin.clone(),
-        CellId::parse(id).expect("a literal cell id the contract accepts"),
-        label,
-        hint,
-        accent,
-    )
+    CellSpec::new(plugin.clone(), cell_id(id), label, hint, accent)
+}
+
+/// A cell id from one of the literals above.
+///
+/// The only `expect` in this crate's production paths, and it is guarded by
+/// `the_cells_are_named_the_way_the_contract_spells_them`, which parses every
+/// literal through this function.
+fn cell_id(id: &str) -> CellId {
+    CellId::parse(id).expect("a literal cell id the contract accepts")
 }
 
 #[cfg(test)]
@@ -236,17 +240,14 @@ mod tests {
 
     #[test]
     fn the_two_numbers_a_machine_always_states_are_never_missing() {
-        // Load, memory and free space come from counters every Windows machine
-        // answers; a dash there would be this plugin's bug, not the machine's
-        // silence.
+        // Load and memory come from counters every Windows machine answers; a
+        // dash there would be this plugin's bug, not the machine's silence. The
+        // disk is asked only for a face: whether a runner lists one is the
+        // runner's business, and a dash with a reason is a valid answer.
         let mut plugin = SystemStats::new();
         std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
         let snapshot = plugin.sample();
-        for cell in [
-            &plugin.ids.cpu_usage,
-            &plugin.ids.ram_usage,
-            &plugin.ids.disk_free,
-        ] {
+        for cell in [&plugin.ids.cpu_usage, &plugin.ids.ram_usage] {
             let reading = snapshot.get(cell).expect("measured");
             assert!(
                 reading.fraction().is_some(),
@@ -255,5 +256,7 @@ mod tests {
                 reading.reason()
             );
         }
+        let disk = snapshot.get(&plugin.ids.disk_free).expect("measured");
+        assert!(!disk.text().is_empty(), "the disk always has a face");
     }
 }

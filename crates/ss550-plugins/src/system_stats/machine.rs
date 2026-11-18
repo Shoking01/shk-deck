@@ -160,20 +160,24 @@ mod tests {
     #[test]
     fn the_live_machine_answers_load_memory_and_free_space() {
         // The real counters, read once: this is the one test that can tell
-        // whether the provider is wired at all. It asserts the shape and not the
-        // numbers, because the numbers are this machine's business.
+        // whether the provider is wired at all. It asserts the *shape* and never
+        // a number, because the numbers — and whether a runner lists a disk at
+        // all — are the machine's business.
         let mut machine = Machine::new();
         std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
 
         let cpu = machine.cpu();
         assert!(cpu.fraction().is_some(), "load is a percentage");
+
         let memory = machine.memory();
         assert!(memory.fraction().is_some(), "memory is a percentage");
+
         let disk = machine.disk();
-        assert!(
-            disk.fraction().is_some(),
-            "a machine with no readable disk is not a machine this test runs on: {:?}",
-            disk.reason()
-        );
+        assert!(!disk.text().is_empty(), "a disk reading is always a face");
+        if let Some(fraction) = disk.fraction() {
+            assert!((0.0..=1.0).contains(&fraction), "a bar is a share");
+        } else {
+            assert!(disk.reason().is_some(), "a dash says why");
+        }
     }
 }

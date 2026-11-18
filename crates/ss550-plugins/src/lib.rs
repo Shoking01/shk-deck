@@ -43,9 +43,11 @@ const STOP_CHECK: Duration = Duration::from_millis(50);
 
 /// Every plugin this build ships.
 ///
-/// One function, so the catalogue and the sampler can never disagree about what
-/// exists: both are built from this list. Only the sampler calls it — building a
-/// plugin reads the machine.
+/// Two lists, and a test holds them together
+/// (`the_catalogue_lists_exactly_what_the_plugin_measures`): the catalogue must
+/// **not** build a plugin — building one reads the machine, and the catalogue is
+/// built while the window opens — while the sampler must build every plugin it
+/// measures. [`built_in_descriptions`] is the first list, this is the second.
 fn built_in_plugins() -> Vec<Box<dyn Plugin>> {
     vec![Box::new(SystemStats::new())]
 }
@@ -129,10 +131,14 @@ impl Samples {
     }
 
     /// The same lookup, for the caller that holds the ids as text.
+    ///
+    /// The two strings are parsed into the ids the map is keyed by, so this is
+    /// the one lookup with one spelling: an id the contract would refuse is not a
+    /// cell this build measured, and answers `None` like any other absent cell.
     pub fn get_named(&self, plugin: &str, cell: &str) -> Option<&Reading> {
-        self.readings.iter().find_map(|((owner, id), reading)| {
-            (owner.as_str() == plugin && id.as_str() == cell).then_some(reading)
-        })
+        let plugin = PluginId::parse(plugin).ok()?;
+        let cell = CellId::parse(cell).ok()?;
+        self.get(&plugin, &cell)
     }
 
     /// How many cells were measured.
@@ -198,6 +204,18 @@ impl Sampler {
     /// Whether the thread is running.
     pub fn is_running(&self) -> bool {
         self.thread.is_some()
+    }
+
+    /// Whether the thread is still alive, rather than merely started.
+    ///
+    /// [`Sampler::is_running`] answers "was a thread started"; this answers "is
+    /// it still there". A sampler that panicked leaves every reading frozen on
+    /// its last number, and a window that cannot tell the difference shows a
+    /// stale number as if it were live.
+    pub fn is_alive(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
     }
 
     /// Takes the newest walk, when it has not been taken already.

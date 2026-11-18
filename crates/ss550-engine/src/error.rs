@@ -32,7 +32,7 @@ pub enum ActionError {
     #[error("a page name cannot contain control characters")]
     PageNameControlCharacter,
 
-    /// A plugin switch names no profile.
+    /// A profile switch names no profile.
     #[error("a profile name cannot be empty")]
     EmptyProfileName,
 

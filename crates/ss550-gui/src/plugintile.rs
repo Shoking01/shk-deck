@@ -172,11 +172,16 @@ pub(crate) fn compose(
 }
 
 /// Paints the track and the filled part of the bar.
+///
+/// Every edge is clamped to the picture: a deck states a square size in the
+/// hundreds, but `face` is written against `max(1)`, and a bar that reached one
+/// column past a one-pixel picture would panic in the paint path instead of
+/// drawing nothing.
 fn draw_bar(picture: &mut RgbaImage, layout: &Layout, accent: [u8; 3], fraction: f32) {
     let (width, height) = picture.dimensions();
     let (top, bar_height) = layout.bar;
-    let left = layout.margin;
-    let right = width.saturating_sub(layout.margin).max(left + 1);
+    let left = layout.margin.min(width);
+    let right = width.saturating_sub(layout.margin).min(width).max(left);
     let span = right.saturating_sub(left);
     let filled = left + ((span as f32 * fraction.clamp(0.0, 1.0)).round() as u32);
 
@@ -295,6 +300,38 @@ mod tests {
     }
 
     #[test]
+    fn the_faces_this_build_produces_fit_the_decks_byte_budget() {
+        // The real faces are the ones with a caption: `12 threads`, `3D`,
+        // `496.4 / 942.3 GB free`, or the reason a dash has. A budget proven
+        // only on a bare number proves nothing about what the deck receives.
+        let mut text = engine();
+        let spec = deck_api::ImageSpec::new(112, 112, 4096, deck_api::ImageFormat::Jpeg);
+        let faces = [
+            Reading::percent(42.0).with_detail("12 threads"),
+            Reading::percent(71.0).with_detail("11.3 / 15.9 GB"),
+            Reading::percent(53.0).with_detail("496.4 / 942.3 GB free"),
+            Reading::temperature(61.0).with_detail("LHM"),
+            Reading::unavailable("no sensor"),
+        ];
+        for reading in faces {
+            let jpeg = compose(spec, &cell(), &reading, "", &mut text).unwrap_or_else(|| {
+                panic!(
+                    "{:?} did not fit {} bytes",
+                    reading.text(),
+                    spec.max_bytes()
+                )
+            });
+            assert!(jpeg.starts_with(&[0xFF, 0xD8]), "a JPEG starts with SOI");
+            assert!(
+                jpeg.len() <= spec.max_bytes(),
+                "{:?} is {} bytes",
+                reading.text(),
+                jpeg.len()
+            );
+        }
+    }
+
+    #[test]
     fn the_face_encodes_at_the_decks_size() {
         let mut text = engine();
         let spec = deck_api::ImageSpec::new(112, 112, 4096, deck_api::ImageFormat::Jpeg);
@@ -302,6 +339,25 @@ mod tests {
             compose(spec, &cell(), &Reading::percent(42.0), "", &mut text).expect("a payload");
         assert!(jpeg.starts_with(&[0xFF, 0xD8]), "a JPEG starts with SOI");
         assert!(jpeg.len() <= spec.max_bytes());
+    }
+
+    #[test]
+    fn the_bar_is_clamped_to_a_picture_smaller_than_its_own_margin() {
+        // A deck states hundreds of pixels, but `face` accepts `max(1)` and the
+        // bar must not reach past the picture: a panic here is a panicking
+        // paint path, not a cosmetic bug.
+        let mut text = engine();
+        for (width, height) in [(1, 1), (1, 40), (4, 4), (8, 120)] {
+            let picture = face(
+                width,
+                height,
+                &cell(),
+                &Reading::percent(50.0),
+                "",
+                &mut text,
+            );
+            assert_eq!(picture.dimensions(), (width, height));
+        }
     }
 
     #[test]

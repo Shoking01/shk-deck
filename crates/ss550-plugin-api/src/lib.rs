@@ -309,20 +309,16 @@ impl Reading {
     /// A temperature in whole degrees Celsius.
     ///
     /// There is no bar: a bar needs a scale that means something, and `56°C` on
-    /// a scale of nothing tells less than the number alone.
+    /// a scale of nothing tells less than the number alone. It is [`Reading::whole`]
+    /// with the degree suffix, so the formatting rule lives in one place.
     pub fn temperature(celsius: f32) -> Self {
-        if !celsius.is_finite() {
-            return Self::unavailable("no answer");
-        }
-        Reading::Value {
-            text: format!("{celsius:.0}°C"),
-            fraction: None,
-            detail: None,
-        }
+        Self::whole(celsius, "°C")
     }
 
-    /// A reading that has a number and no bar, e.g. a temperature, rounded to
-    /// whole units with a unit suffix of the caller's choosing.
+    /// A reading that has a number and no bar, rounded to whole units.
+    ///
+    /// A percentage has a bar and a temperature has its own constructor; this is
+    /// for a number with a unit neither of them states.
     pub fn whole(value: f32, suffix: &str) -> Self {
         if !value.is_finite() {
             return Self::unavailable("no answer");
@@ -391,19 +387,23 @@ impl Reading {
     ///
     /// This is the whole of the repaint rule: the deck is sent a new JPEG only
     /// when something a person can see has changed. `detail` counts because it
-    /// is drawn, and so does the reason a reading is missing; a reading that
-    /// changed in a way nothing shows is not a reason to spend the link.
+    /// is drawn, and so does the reason a reading is missing.
     ///
-    /// The bar's tolerance is one pixel of a hundred-pixel span, rounded up: a
-    /// fraction that moves less than that draws the same bar, so it draws the
-    /// same face.
+    /// The comparison is **exact**, and deliberately so: the bar's fill is
+    /// `round(span × fraction)`, so two fractions that differ can still land on
+    /// different columns even when they differ by less than a pixel — a
+    /// tolerance would then skip a repaint and leave a bar on the deck that a
+    /// repaint would have drawn differently. Being conservative here costs one
+    /// JPEG in the rare case; being tolerant costs the invariant the whole
+    /// repaint rule rests on: a key that is skipped is byte for byte the key a
+    /// repaint would have sent.
     pub fn same_face(&self, other: &Reading) -> bool {
         self.text() == other.text()
             && self.detail() == other.detail()
             && self.reason() == other.reason()
             && match (self.fraction(), other.fraction()) {
                 (None, None) => true,
-                (Some(left), Some(right)) => (left - right).abs() < 0.011,
+                (Some(left), Some(right)) => left == right,
                 _ => false,
             }
     }
@@ -416,8 +416,6 @@ impl Reading {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Snapshot {
     cells: BTreeMap<CellId, Reading>,
-    /// When the sample was taken, as the plugin's own clock.
-    at: Option<std::time::Instant>,
 }
 
 impl Snapshot {
@@ -439,17 +437,6 @@ impl Snapshot {
     /// The cells, in id order.
     pub fn iter(&self) -> impl Iterator<Item = (&CellId, &Reading)> {
         self.cells.iter()
-    }
-
-    /// Stamps the sample with the moment it was taken.
-    pub fn at(mut self, at: std::time::Instant) -> Self {
-        self.at = Some(at);
-        self
-    }
-
-    /// When the sample was taken, when that was recorded.
-    pub fn taken_at(&self) -> Option<std::time::Instant> {
-        self.at
     }
 }
 
@@ -614,17 +601,17 @@ mod tests {
         assert!(Reading::temperature(56.0).same_face(&Reading::temperature(56.2)));
         assert!(!Reading::temperature(56.0).same_face(&Reading::temperature(57.0)));
 
-        // Half a percent moves the bar by less than one of its pixels, so the
-        // face is the same face and nothing is sent.
+        // Two percentages that print the same number but carry different
+        // fractions are a different face: the bar rounds `span × fraction`, so a
+        // tolerance could skip a repaint and leave a bar one column off.
         let close = Reading::percent(41.5);
         let nearer = Reading::percent(41.9);
         assert_eq!(close.text(), nearer.text());
-        assert!(close.same_face(&nearer), "the bar did not move a pixel");
+        assert!(!close.same_face(&nearer), "the bar can move a column");
     }
 
     #[test]
-    fn a_snapshot_answers_by_cell_and_keeps_the_time_it_was_taken() {
-        let at = std::time::Instant::now();
+    fn a_snapshot_answers_by_cell_in_id_order() {
         let mut snapshot = Snapshot::new();
         snapshot.set(cell("cpu.usage"), Reading::percent(12.0));
         snapshot.set(cell("cpu.temp"), Reading::unavailable("none"));
@@ -635,9 +622,7 @@ mod tests {
         );
         assert!(snapshot.get(&cell("gpu.usage")).is_none());
         assert_eq!(snapshot.iter().count(), 2);
-
-        let stamped = snapshot.at(at);
-        assert_eq!(stamped.taken_at(), Some(at));
-        assert_eq!(Snapshot::new().taken_at(), None);
+        let order: Vec<&str> = snapshot.iter().map(|(cell, _)| cell.as_str()).collect();
+        assert_eq!(order, ["cpu.temp", "cpu.usage"], "the map is ordered by id");
     }
 }

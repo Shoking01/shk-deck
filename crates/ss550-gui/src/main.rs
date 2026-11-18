@@ -880,6 +880,11 @@ struct Controller {
     sampler: Option<Sampler>,
     /// The newest readings, as the sampler last handed them over.
     samples: Samples,
+    /// The sentence that says the sampler thread stopped, once it has.
+    ///
+    /// Kept so the note is written once: a dead sampler stays dead, and a window
+    /// that says so on every tick would bury every other message.
+    sampler_gone: Option<String>,
     /// What each key bound to a plugin is currently showing.
     ///
     /// The repaint rule's memory: a reading that draws the same face as this one
@@ -1186,6 +1191,7 @@ impl Controller {
             plugins: Catalogue::built_in(),
             sampler: Some(Sampler::start(ss550_plugins::SAMPLE_INTERVAL)),
             samples: Samples::new(),
+            sampler_gone: None,
             drawn_readings: Vec::new(),
         };
 
@@ -2044,6 +2050,12 @@ impl Controller {
         let mut failure = None;
         let mut painted = vec![slot; key_count];
         let mut drawn: Vec<(usize, Reading)> = Vec::new();
+        // A key whose reading cannot be drawn — a cell this build no longer has,
+        // or a face the deck's size cannot hold — is one key's problem. The rest
+        // of the page is still valid, so it is painted and the sentence is kept
+        // for last: stopping here would leave every key after it showing whatever
+        // the previous page or profile left on the glass.
+        let mut unreadable: Option<String> = None;
         for (index, plan) in plans.iter().enumerate() {
             let result = match &faces[index] {
                 Payload::Ready { jpeg, .. } => Self::paint_over_black(session, index, jpeg),
@@ -2053,7 +2065,13 @@ impl Controller {
                     painted[index] = self.slots.get(index).copied().unwrap_or(slot);
                     continue;
                 }
-                Payload::Failed(message) => Err(PaintFailure::Picture(message.clone())),
+                Payload::Failed(message) => {
+                    if unreadable.is_none() {
+                        unreadable = Some(message.clone());
+                    }
+                    painted[index] = self.slots.get(index).copied().unwrap_or(slot);
+                    continue;
+                }
                 Payload::NotAPlugin => match plan {
                     Tile::Asset { name, title, style } => {
                         let tile = asset_tile(
@@ -2104,10 +2122,15 @@ impl Controller {
             None => {
                 let shown = painted.iter().filter(|slot| **slot == Slot::Image).count();
                 self.slots = painted;
-                self.note = if shown == 0 {
-                    format!("All {key_count} keys painted {}.", slot_name(slot)).into()
-                } else {
-                    format!("{shown} of {key_count} keys show what they run.").into()
+                self.note = match unreadable {
+                    // The one sentence a page with a key it cannot draw keeps,
+                    // because the rest of the page was painted and the user needs
+                    // to know which key did not.
+                    Some(message) => message.into(),
+                    None if shown == 0 => {
+                        format!("All {key_count} keys painted {}.", slot_name(slot)).into()
+                    }
+                    None => format!("{shown} of {key_count} keys show what they run.").into(),
                 };
             }
         }
@@ -2227,7 +2250,9 @@ impl Controller {
             let key = u16::try_from(idx + 1).unwrap_or(u16::MAX);
             let refreshed = self.repaint_key(key);
             self.note = if refreshed {
-                format!("Key #{} shows {}.", idx + 1, action.describe()).into()
+                // `describe` starts with the verb, so the template does not add
+                // one: "Key #3: Show cpu.usage, measured by the plugin …".
+                format!("Key #{}: {}.", idx + 1, action.describe()).into()
             } else {
                 self.note.clone()
             };
@@ -3677,6 +3702,18 @@ impl Controller {
     /// measured on another thread, and everything here happens on the window's
     /// own.
     fn pump_samples(&mut self) -> bool {
+        // A sampler that is gone leaves every gauge showing its last number. The
+        // window cannot refresh them, so it says so once instead of letting a
+        // stale percentage pass for a live one.
+        if let Some(sampler) = &self.sampler {
+            if !sampler.is_alive() && self.sampler_gone.is_none() {
+                self.sampler_gone = Some(
+                    "The plugin sampler stopped: the readings on the keys are the last ones it took."
+                        .to_string(),
+                );
+                self.note = self.sampler_gone.clone().unwrap_or_default().into();
+            }
+        }
         let Some(samples) = self.sampler.as_ref().and_then(Sampler::try_recv) else {
             return false;
         };
@@ -3770,9 +3807,10 @@ impl Controller {
                         }
                     };
                 }
-                // The face cannot be drawn yet; the repaint after the font scan
-                // draws it, and nothing is reported in the meantime.
-                Payload::Pending => return true,
+                // The face cannot be drawn yet, so nothing was painted: the
+                // repaint after the font scan draws it, and a caller that asks
+                // "did this key change?" is told the truth.
+                Payload::Pending => return false,
                 Payload::Failed(message) => {
                     self.note = message.into();
                     return false;
