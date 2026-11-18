@@ -3251,6 +3251,23 @@ impl Controller {
                 if self.repaint_key(u16::from(number.get())) {
                     self.note = saved.into();
                 }
+                // A temperature that has no source answers a dash for ever, and
+                // the sentence that explains it belongs at the moment the key is
+                // bound, not in a document nobody opens.
+                if let Some((plugin, cell)) = recent.plugin_cell() {
+                    let unavailable = self
+                        .samples
+                        .get_named(plugin, cell)
+                        .is_some_and(|reading| reading.reason().is_some());
+                    if unavailable {
+                        self.note = format!(
+                            "{} No temperature source answered yet: {}.",
+                            self.note,
+                            ss550_plugins::temperature_hint()
+                        )
+                        .into();
+                    }
+                }
                 // A recents write that failed is a status line of its own: the
                 // binding was made, but the rail must not pretend it remembered
                 // something it did not.

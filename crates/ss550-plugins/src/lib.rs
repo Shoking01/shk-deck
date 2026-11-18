@@ -29,7 +29,7 @@ use ss550_plugin_api::{CellId, CellSpec, Plugin, PluginId, Reading};
 
 pub mod system_stats;
 
-pub use system_stats::SystemStats;
+pub use system_stats::{temperature_hint, SystemStats};
 
 /// How often the sampler walks the machine.
 ///

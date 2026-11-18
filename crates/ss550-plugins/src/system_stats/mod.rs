@@ -172,6 +172,15 @@ impl Plugin for SystemStats {
     }
 }
 
+/// What this machine offers for a temperature, in one sentence.
+///
+/// The plugin cannot invent a sensor, so when a chip answers nothing the useful
+/// half of the answer is *what to run*: the window repeats this after a
+/// temperature key is bound and nothing answers.
+pub fn temperature_hint() -> &'static str {
+    thermal::sources_tried()
+}
+
 /// One cell of this plugin.
 fn cell(plugin: &PluginId, id: &str, label: &str, hint: &str, accent: [u8; 3]) -> CellSpec {
     CellSpec::new(plugin.clone(), cell_id(id), label, hint, accent)

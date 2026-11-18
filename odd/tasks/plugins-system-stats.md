@@ -128,12 +128,27 @@ The user's own words for the outcome (verbatim, from the request):
   face on another cell's key. Route: inline. **Done.** `face_tiles` is keyed by
   `(key, plugin, cell)` and the tile passes no appearance for a reading key, so
   the profile cannot paint over a gauge.
-- **T13 — the caption names the disk, and the face explains itself.**
-  `disk.free` says which volume answered (`C: · 496.4 / 942.3 GB free`); the
+- **T13 — the caption names the disk, and the face explains itself.**  `disk.free` says which volume answered (`C: · 496.4 / 942.3 GB free`); the
   layout's proportions, floors and the shared margin live in one named table
   (`Shares`, and a `Band` that carries its own margin) instead of scattered
   divisions. Route: inline. **Done.** Checked by eye: the six real faces were
   encoded and looked at, and the disk caption fits its band on one line.
+- **T14 — temperatures answer from whatever is running, and say what to run.**
+  Read `ROOT\OpenHardwareMonitor` as well as `ROOT\LibreHardwareMonitor` (one is
+  a fork of the other, same class), and make the dash actionable: binding a
+  temperature key that has no source puts the sentence in the status line, and
+  `stats_once` prints it at the end. `docs/plugins.md` gains the setup steps and
+  the table of routes. Route: inline. **Done.** 29 plugin tests. `stats_once`
+  prints, on this machine, `cpu.temp — no sensor` plus the sentence naming
+  LibreHardwareMonitor and the missing ACPI zone.
+
+Probe (this machine, for the record): `atiadlxx.dll` loads and exports
+`ADL2_Main_Control_Create` and `ADL2_New_QueryPMLogData_Get`, so the **GPU**
+temperature is readable natively. `MSAcpi_ThermalZoneTemperature` exists as a
+class but has **zero instances**, so there is no built-in CPU temperature. The
+Ryzen Master SDK's files are installed, but its driver
+(`AMDRyzenMasterDriver.sys`) is **not** in `System32\drivers` and no service is
+registered, so the SDK alone answers nothing.
 
 ## Log
 

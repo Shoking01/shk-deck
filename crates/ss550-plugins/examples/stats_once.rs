@@ -18,17 +18,27 @@ fn main() {
 
     println!("{} ({})", plugin.name(), plugin.id());
     let snapshot = plugin.sample();
+    let mut missing_heat = false;
     for cell in plugin.cells() {
         let reading = snapshot.get(cell.cell());
         let value = reading.map_or("<not measured>", |reading| reading.text());
         let detail = reading
             .and_then(|reading| reading.detail().or_else(|| reading.reason()))
             .unwrap_or("");
+        if reading.is_some_and(|reading| reading.reason().is_some()) {
+            missing_heat = true;
+        }
         println!(
             "  {:<10} {:<6} {:<8} {detail}",
             cell.cell().as_str(),
             cell.label(),
             value
+        );
+    }
+    if missing_heat {
+        println!(
+            "\nA dash is a reading nothing measured. To fill it in: {}",
+            ss550_plugins::temperature_hint()
         );
     }
 }

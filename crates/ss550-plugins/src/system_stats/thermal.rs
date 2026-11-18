@@ -29,8 +29,17 @@ pub(crate) enum Subject {
     Gpu,
 }
 
-/// Where a temperature came from, as the key prints it.
-const FROM_MONITOR: &str = "LHM";
+/// The namespaces that publish every sensor a monitoring tool reads.
+///
+/// Both tools expose the same WMI class with the same field names, because one
+/// grew out of the other: LibreHardwareMonitor is the maintained fork, and
+/// OpenHardwareMonitor is the older build some machines still have installed.
+/// Reading either costs one query, so both are tried before giving up.
+const MONITOR_NAMESPACES: [(&str, &str); 2] = [
+    ("ROOT\\LibreHardwareMonitor", "LHM"),
+    ("ROOT\\OpenHardwareMonitor", "OHM"),
+];
+
 /// The ACPI thermal zone's label.
 const FROM_ACPI: &str = "ACPI";
 
@@ -39,10 +48,23 @@ pub(crate) fn temperature(subject: Subject) -> Reading {
     temperature_on_this_platform(subject)
 }
 
+/// What this machine offers for a temperature, in one sentence.
+///
+/// The plugin cannot invent a sensor, so when a chip answers nothing the useful
+/// half of the answer is *what was tried*. This is the sentence the window shows
+/// after a temperature key is bound and nothing answers.
+pub(crate) fn sources_tried() -> &'static str {
+    if cfg!(windows) {
+        "run LibreHardwareMonitor (free) and the reading fills in on the next sample; this machine exposes no ACPI thermal zone to Windows"
+    } else {
+        "this build has no temperature source on this platform"
+    }
+}
+
 #[cfg(windows)]
 fn temperature_on_this_platform(subject: Subject) -> Reading {
-    if let Some(celsius) = libre_hardware_monitor(subject) {
-        return Reading::temperature(celsius).with_detail(FROM_MONITOR);
+    if let Some((celsius, source)) = from_monitor(subject) {
+        return Reading::temperature(celsius).with_detail(source);
     }
     // The thermal zone is a property of the machine, not of a chip: it can
     // answer for the processor but never for the graphics card.
@@ -59,12 +81,23 @@ fn temperature_on_this_platform(_subject: Subject) -> Reading {
     Reading::unavailable("no sensor")
 }
 
-/// The hottest temperature LibreHardwareMonitor reports for `subject`.
+/// The hottest temperature a monitoring tool publishes for `subject`.
+///
+/// The tools are tried in order, and the first one that answers wins: a machine
+/// running both does not pay two queries for the same number.
 #[cfg(windows)]
-fn libre_hardware_monitor(subject: Subject) -> Option<f32> {
+fn from_monitor(subject: Subject) -> Option<(f32, &'static str)> {
+    MONITOR_NAMESPACES.iter().find_map(|(namespace, label)| {
+        published_temperature(namespace, subject).map(|celsius| (celsius, *label))
+    })
+}
+
+/// The hottest temperature one tool's namespace reports for `subject`.
+#[cfg(windows)]
+fn published_temperature(namespace: &str, subject: Subject) -> Option<f32> {
     use serde::Deserialize;
 
-    /// One of LibreHardwareMonitor's sensors.
+    /// One of the tool's sensors.
     #[derive(Deserialize)]
     #[serde(rename_all = "PascalCase")]
     struct Sensor {
@@ -76,7 +109,7 @@ fn libre_hardware_monitor(subject: Subject) -> Option<f32> {
         value: Option<f32>,
     }
 
-    let connection = wmi::WMIConnection::with_namespace_path("ROOT\\LibreHardwareMonitor").ok()?;
+    let connection = wmi::WMIConnection::with_namespace_path(namespace).ok()?;
     let rows: Vec<Sensor> = connection
         .raw_query("SELECT Name, SensorType, Value FROM Sensor")
         .ok()?;
@@ -236,9 +269,23 @@ mod tests {
         let sensors = [sensor("CPU Package", "Temperature", 44.0)];
         let reading =
             Reading::temperature(pick_temperature(&sensors, Subject::Cpu).expect("a value"))
-                .with_detail(FROM_MONITOR);
+                .with_detail(MONITOR_NAMESPACES[0].1);
         assert_eq!(reading.text(), "44°C");
         assert_eq!(reading.detail(), Some("LHM"));
+    }
+
+    #[test]
+    fn both_monitoring_tools_are_read_and_the_newer_one_comes_first() {
+        // One is a fork of the other and they publish the same class in
+        // different namespaces: a machine with either installed must answer.
+        assert_eq!(
+            MONITOR_NAMESPACES,
+            [
+                ("ROOT\\LibreHardwareMonitor", "LHM"),
+                ("ROOT\\OpenHardwareMonitor", "OHM"),
+            ]
+        );
+        assert!(sources_tried().contains("LibreHardwareMonitor"));
     }
 
     #[test]

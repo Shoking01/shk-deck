@@ -42,25 +42,52 @@ written, so `cpu..usage` can never become a key that silently never updates.
 | `ram.usage` | RAM | physical memory in use | the machine's own counters |
 | `disk.free` | DISK | free space on the system disk | the machine's own counters |
 
-### Why a temperature can say `—`
+### Why a temperature can say `—`, and how to make it answer
 
 Windows exposes no sensor API of its own. A chip's temperature lives in the
 chip's registers, and reading it takes a kernel driver, so the plugin asks the
 sources that exist and says nothing rather than guessing:
 
-1. **LibreHardwareMonitor**, when it is running. It publishes every sensor it
-   reads in its own WMI namespace (`ROOT\LibreHardwareMonitor`), which any
-   program can read without administrator rights — the CPU, and an AMD or NVIDIA
-   card. This is the only source that carries a GPU temperature.
-2. **The ACPI thermal zone** (`MSAcpi_ThermalZoneTemperature`), which is part of
-   Windows. Many desktop boards answer nothing there; the number it does answer
-   is a zone of the board rather than a core, so the key's caption says `ACPI`.
-3. **Nothing.** The key shows `—` and the caption says `no sensor`.
+1. **LibreHardwareMonitor** — free and open source, and the recommended source.
+   While it runs it publishes every sensor it reads in its own WMI namespace
+   (`ROOT\LibreHardwareMonitor`), which any program can read. It carries the CPU
+   *and* an AMD or NVIDIA card. Download it from
+   [its releases page](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases),
+   unpack it anywhere, and start it as administrator (some sensors need it); turn
+   on *Options → Run on Windows startup* and *Minimize on startup* so it stays out
+   of the way. The plugin picks it up at the next sample — nothing to configure
+   here.
+2. **OpenHardwareMonitor** — the older tool LibreHardwareMonitor grew out of. A
+   machine still running it publishes the same class in
+   `ROOT\OpenHardwareMonitor`, and it is read too. The key's caption says `OHM`
+   instead of `LHM`.
+3. **The ACPI thermal zone** (`MSAcpi_ThermalZoneTemperature`), which is part of
+   Windows. Many desktop boards publish no zone at all — the MSI board this was
+   built on publishes none — and where it exists it is a zone of the board rather
+   than a core, so the caption says `ACPI`.
+4. **Nothing.** The key shows `—` and the caption says `no sensor`, and binding a
+   temperature key says what to run in the status line.
 
-A fabricated `0` on a card at 80 °C would be worse than a dash. If you want the
-two temperatures on a machine that answers neither, leave
-[LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)
-running: the plugin picks it up at the next sample, with no setting to change.
+A fabricated `0` on a card at 80 °C would be worse than a dash.
+
+## The GPU could answer without a monitoring tool
+
+The graphics driver installs AMD's own library, `atiadlxx.dll`, and it exports the
+calls that return the card's temperature (`ADL2_Main_Control_Create`,
+`ADL2_New_QueryPMLogData_Get`). Reading it needs native calls, which this project
+allows in exactly one crate today (`ss550-tray`), so it is a documented decision
+rather than a line of code:
+
+| route | GPU temperature | CPU temperature | what it costs |
+|---|---|---|---|
+| LibreHardwareMonitor | yes | yes | an app running, with its signed driver |
+| AMD ADL (`atiadlxx.dll`) | yes, no extra app | no | a new crate with a declared `unsafe` exception |
+| AMD Ryzen Master SDK | no | yes | the full app and its driver installed, a C++ SDK, and the same exception |
+
+The CPU is the hard half on every route: no user-mode API reads a Ryzen's
+temperature, so some kernel driver is always involved. The GPU is the half that
+can be had natively.
+
 
 ### How the GPU number is read
 
