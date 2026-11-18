@@ -42,6 +42,13 @@ messages; the file below is a human summary, not a substitute for
   the two cannot disagree about what a key is.
 - The editor gained a fourth kind, `LIVE STAT`, which lists the cells of this
   build and binds one the same way an app or a URL is bound.
+- A **Stats** page in the window: one card per measurement with the number, the
+  source it came from (`SMU`, `ADL`, `LHM`, `ACPI`) and four minutes of samples as
+  a sparkline, one bar per sample. A card turns amber past a warning line and red at
+  the limit (80 and 95 for a percentage or a temperature), a steady value is drawn
+  as a level line rather than pushed to the floor, and a share is always drawn 0–100
+  so a quiet processor does not look like a crisis. It reads the samples the deck's
+  sampler already took: nothing on the page asks the machine.
 
 ### Fixed — CLEAR KEY now clears the whole key, in both files
 - Clearing a key removes its **title** too, and the title's style with it. The

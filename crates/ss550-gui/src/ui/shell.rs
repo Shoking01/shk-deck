@@ -14,6 +14,7 @@ use gpui_kit::{
 };
 
 use super::page::Page;
+use super::stats;
 use super::{
     activate, body, color, dot, micro_label, muted, one_line, palette, panels, Tokens, APP_BAR_H,
     FONT_APP, FONT_CAPTION, FONT_MICRO, FONT_SUB, FONT_TITLE, PAGE_PAD, RADIUS_PILL, RADIUS_SM,
@@ -475,6 +476,7 @@ fn page_body(
     match page {
         Page::Deck => super::deck::deck_page(controller, tokens, cx).into_any_element(),
         Page::Actions => panels::actions_page(controller, tokens, cx).into_any_element(),
+        Page::Stats => stats::stats_page(controller, tokens, cx).into_any_element(),
         Page::Settings => panels::settings_page(controller, tokens, cx).into_any_element(),
     }
 }

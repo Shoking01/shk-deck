@@ -180,6 +180,24 @@ on, and is saved with the deck it belongs to:
 A binding that names a cell this build no longer has is not silently dropped: the
 window says which cell is missing and the key keeps the face it had.
 
+## Watching them in the window
+
+The **Stats** page draws one card per cell: the number, the source it came from
+(`SMU`, `ADL`, `LHM`, `ACPI`, or the detail the plugin wrote), and the last four
+minutes of samples as a sparkline — one bar per sample, two seconds apart.
+
+- A card turns **amber** past a warning line and **red** at the limit. The lines
+  are 80 and 95, and they mean the same thing to a person: a processor at 80 °C is
+  uncomfortable and one at 95 °C is about to throttle.
+- A **share** is always drawn 0–100, so a processor moving between 41 and 43 %
+  looks calm. A temperature is drawn against its own range, so its shape shows at
+  all; a value that never moves is drawn as a level line in the middle.
+- A reading that measured nothing is a **gap**, not a zero: nothing is recorded
+  and the card says the reason.
+- The page reads the samples the deck's sampler already took. Nothing on it asks
+  the machine, and a frozen number cannot pass for a live one: if the sampler or
+  the face worker stops, the page says so.
+
 ## Where the code is
 
 | path | what it holds |

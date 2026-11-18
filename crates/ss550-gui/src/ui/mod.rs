@@ -21,6 +21,7 @@ pub(crate) mod pages;
 pub(crate) mod palette;
 pub(crate) mod panels;
 pub(crate) mod shell;
+pub(crate) mod stats;
 pub(crate) mod titlecontrols;
 
 pub(crate) use page::Page;

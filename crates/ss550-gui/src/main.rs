@@ -55,6 +55,7 @@ mod apps;
 mod diagnostics;
 mod facework;
 mod favicons;
+mod history;
 mod icons;
 mod pictures;
 mod plugintile;
@@ -892,6 +893,11 @@ struct Controller {
     pub(crate) face_tiles: BTreeMap<(u16, String, String), Arc<gpui_kit::RenderImage>>,
     /// The sentence that says the face worker stopped, once it has.
     faces_gone: Option<String>,
+    /// What every measured cell has been doing, for the Stats page.
+    ///
+    /// Written from the same sample the keys are painted from, so the graph and
+    /// the key can never disagree about the last number.
+    history: history::History,
 }
 
 /// The keys the newest sample would change on the deck.
@@ -1198,6 +1204,7 @@ impl Controller {
             faces_in_flight: BTreeSet::new(),
             face_tiles: BTreeMap::new(),
             faces_gone: None,
+            history: history::History::new(),
         };
 
         // Look for the deck right away: its settle window starts the moment
@@ -3805,7 +3812,26 @@ impl Controller {
             return false;
         };
         self.samples = samples;
+        self.record_history();
         self.repaint_changed_readings()
+    }
+
+    /// Remembers what each measured cell reported, for the Stats page.
+    ///
+    /// Called once per received sample, before the keys are repainted, so the
+    /// graph and the key are always describing the same walk over the machine.
+    fn record_history(&mut self) {
+        let cells: Vec<(ss550_plugin_api::PluginId, ss550_plugin_api::CellId)> = self
+            .plugins
+            .cells()
+            .iter()
+            .map(|spec| (spec.plugin().clone(), spec.cell().clone()))
+            .collect();
+        for (plugin, cell) in &cells {
+            if let Some(reading) = self.samples.get(plugin, cell).cloned() {
+                self.history.record(plugin, cell, &reading);
+            }
+        }
     }
 
     /// Repaints only the keys whose face the newest sample changed.

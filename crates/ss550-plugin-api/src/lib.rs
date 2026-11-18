@@ -274,6 +274,12 @@ impl CellSpec {
 pub enum Reading {
     /// A number was measured.
     Value {
+        /// The number itself, in the unit its text states.
+        ///
+        /// A key draws the text, but a history graph and a threshold need the
+        /// number: parsing it back out of `"59°C"` would be guessing at what the
+        /// plugin already knew.
+        value: f32,
         /// The number as a key shows it: `42%`, `56°C`, `12.3 GB`.
         text: String,
         /// How full the bar is, `0.0..=1.0`, when the number has a bar.
@@ -300,6 +306,7 @@ impl Reading {
         }
         let clamped = value.clamp(0.0, 100.0);
         Reading::Value {
+            value: clamped,
             text: format!("{clamped:.0}%"),
             fraction: Some(clamped / 100.0),
             detail: None,
@@ -324,6 +331,7 @@ impl Reading {
             return Self::unavailable("no answer");
         }
         Reading::Value {
+            value,
             text: format!("{value:.0}{suffix}"),
             fraction: None,
             detail: None,
@@ -339,10 +347,12 @@ impl Reading {
     pub fn with_detail(self, detail: impl Into<String>) -> Self {
         match self {
             Reading::Value {
+                value,
                 text,
                 fraction,
                 detail: _,
             } => Reading::Value {
+                value,
                 text,
                 fraction,
                 detail: Some(detail.into()),
@@ -356,6 +366,18 @@ impl Reading {
         match self {
             Reading::Value { text, .. } => text,
             Reading::Unavailable { .. } => "—",
+        }
+    }
+
+    /// The number this reading measured, when it measured one.
+    ///
+    /// A key draws [`Reading::text`]; a graph and a threshold need the number,
+    /// and it is here so nothing has to parse `"59°C"` back into what the
+    /// plugin already knew.
+    pub fn value(&self) -> Option<f32> {
+        match self {
+            Reading::Value { value, .. } => Some(*value),
+            Reading::Unavailable { .. } => None,
         }
     }
 
