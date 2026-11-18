@@ -81,6 +81,15 @@ no widget. So a reading is **drawn**: label at the top, the number in the middle
 the caption under it, and a bar when the number has a scale. A percentage has a
 bar; a temperature does not, because a bar needs a scale that means something.
 
+The drawing happens on a **worker thread of its own**
+(`crates/ss550-gui/src/facework.rs`), not on the one that draws frames: shaping
+three lines and encoding a JPEG for every changed key is a burst of work, and the
+sample that triggers it arrives on the window's own tick. The worker owns a
+`TextEngine` of its own — titles keep the window's — so readings never shape
+text on the UI thread. The window paints what comes back, and its own tile draws
+the very pixels it sent to the deck, so the window and the glass cannot disagree
+about what a key is.
+
 The face is a pure function of (cell, reading, tile size), so the same reading
 always encodes the same bytes. That is what makes the repaint rule sound:
 
@@ -91,8 +100,8 @@ always encodes the same bytes. That is what makes the repaint rule sound:
 - a key bound to a plugin shows the reading and nothing else: its picture and its
   title are not drawn over it.
 
-Pressing such a key runs nothing. It refreshes the key from the newest sample and
-says what the measurement is in the status line.
+Pressing such a key runs nothing. It asks for the face again from the newest
+sample and says what the measurement is in the status line.
 
 ## Binding one
 
@@ -114,7 +123,8 @@ window says which cell is missing and the key keeps the face it had.
 | `crates/ss550-plugin-api` | the contract: ids, cells, readings, the `Plugin` trait |
 | `crates/ss550-plugins` | the catalogue, the sampler thread, and `system-stats` |
 | `crates/ss550-plugins/examples/stats_once.rs` | one walk over the machine, printed |
-| `crates/ss550-gui/src/plugintile.rs` | the face: label, number, caption, bar |
+| `crates/ss550-gui/src/plugintile.rs` | the face: proportions, label, number, caption, bar |
+| `crates/ss550-gui/src/facework.rs` | the thread that composes a face, and the queue back |
 | `crates/ss550-gui/src/ui/editor.rs` | the `LIVE STAT` list |
 
 `cargo run -p ss550-plugins --example stats_once` prints what this machine

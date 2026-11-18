@@ -41,6 +41,15 @@ pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 /// The longest the sampler sleeps without checking whether it was told to stop.
 const STOP_CHECK: Duration = Duration::from_millis(50);
 
+/// How long a stopped sampler is waited for before it is left behind.
+///
+/// A sample can be inside a WMI query or a disk refresh when it is told to stop,
+/// and those calls take no timeout of their own. The stop flag is honoured
+/// between samples, so the wait is bounded here at all: a window that is closing
+/// must not hang on another thread's provider. The thread owns everything it
+/// touches, so letting it finish alone is safe.
+const STOP_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Every plugin this build ships.
 ///
 /// Two lists, and a test holds them together
@@ -227,7 +236,17 @@ impl Sampler {
 impl Drop for Sampler {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(thread) = self.thread.take() {
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        // Waited for, but not forever: the flag is read between samples, so a
+        // thread inside a slow provider has to be given a moment — and then left
+        // to finish on its own rather than holding the window open.
+        let deadline = Instant::now() + STOP_TIMEOUT;
+        while !thread.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(STOP_CHECK);
+        }
+        if thread.is_finished() {
             let _ = thread.join();
         }
     }

@@ -14,7 +14,7 @@ use image::{Rgba, RgbaImage};
 use ss550_plugin_api::{CellSpec, Reading};
 
 use crate::render;
-use crate::titletext::TextEngine;
+use crate::titletext::{Band, TextEngine};
 
 /// The face's background: near black, so the number is the brightest thing on
 /// the key and the deck's backlight does not wash the value out.
@@ -33,44 +33,110 @@ const MISSING_INK: [u8; 3] = [0x6E, 0x6E, 0x7C];
 /// The ink of the caption under the number.
 const DETAIL_INK: [u8; 3] = [0x8E, 0x8E, 0x9C];
 
-/// Where each part of the face sits, in pixels, for one tile size.
+/// What each part of the face is, as a share of the tile.
 ///
-/// Fractions of the tile rather than constants, because a deck states its own
-/// image size and the last deck this window drove was 112 pixels and not 108.
+/// Proportions rather than pixels, because a deck states its own image size and
+/// the last two decks this window drove were 108 and 112 pixels square. The
+/// numbers below are the only place the face's shape is decided; the comment on
+/// each says what it is protecting, so tuning the face is reading four lines
+/// instead of reverse-engineering a stack of divisions.
+#[derive(Debug, Clone, Copy)]
+struct Shares {
+    /// Side margin, as a divisor of the width: the inset that keeps a word off
+    /// the deck's rounded corner.
+    margin_divisor: u32,
+    /// The label band's height, as a divisor of the tile's height: one line of
+    /// the smallest legible type.
+    label_divisor: u32,
+    /// The value band, as a percentage of the height: the number is the face, so
+    /// it gets the largest share of it.
+    value_percent: u32,
+    /// The caption band, as a divisor of the height: one line, smaller than the
+    /// label.
+    detail_divisor: u32,
+    /// The bar's height, as a divisor of the height.
+    bar_divisor: u32,
+    /// The gaps: between the label and the value, and under the value, as
+    /// percentages of the height. They exist so the three bands never touch when
+    /// a tile is at the small end of the range.
+    gap_percent: u32,
+    /// The type sizes, as divisors of the height: value, label, caption.
+    value_type_divisor: u32,
+    label_type_divisor: u32,
+    detail_type_divisor: u32,
+}
+
+/// The face's proportions, in one place.
+const SHARES: Shares = Shares {
+    margin_divisor: 16,
+    label_divisor: 6,
+    value_percent: 38,
+    detail_divisor: 8,
+    bar_divisor: 16,
+    gap_percent: 4,
+    value_type_divisor: 3,
+    label_type_divisor: 8,
+    detail_type_divisor: 13,
+};
+
+/// The smallest type the face draws, in pixels.
+///
+/// Below this a stem is thinner than a pixel and the words turn into a smudge,
+/// which is the same floor the title engine states for its own fit.
+const MIN_TYPE_PX: u16 = 7;
+
+/// Where each part of the face sits, in pixels, for one tile size.
 struct Layout {
-    margin: u32,
-    label: (u32, u32),
-    label_px: u16,
-    value: (u32, u32),
-    value_px: u16,
-    detail: (u32, u32),
-    detail_px: u16,
+    label: Band,
+    value: Band,
+    detail: Band,
+    /// The bar: its top and its height.
     bar: (u32, u32),
+    /// The face's side margin, in pixels.
+    margin: u32,
 }
 
 impl Layout {
     /// The layout a tile of this size gets.
     fn of(width: u32, height: u32) -> Self {
-        let margin = (width / 16).max(1);
-        let bar_height = (height / 16).max(3);
-        let label_height = (height / 6).max(10);
-        let detail_height = (height / 8).max(9);
-        let value_height = (height * 38 / 100).max(12);
-        let value_top = label_height + (height * 4 / 100);
-        let detail_top = value_top + value_height + (height * 3 / 100);
+        let shares = SHARES;
+        let margin = (width / shares.margin_divisor).max(1);
+        let bar_height = (height / shares.bar_divisor).max(3);
+        let label_height = (height / shares.label_divisor).max(10);
+        let detail_height = (height / shares.detail_divisor).max(9);
+        let value_height = (height * shares.value_percent / 100).max(12);
+        let gap = (height * shares.gap_percent / 100).max(1);
+
+        let value_top = label_height + gap;
+        let detail_top = value_top + value_height + gap;
         let bar_top = height
             .saturating_sub(margin + bar_height)
             .max(detail_top + detail_height);
 
-        Self {
+        // The type is a share of the *tile's* height, not of a band's: a band is
+        // a fraction of the tile, and a fraction of a fraction is not a size.
+        let type_px = |divisor: u32| {
+            u16::try_from(height / divisor)
+                .unwrap_or(u16::MAX)
+                .max(MIN_TYPE_PX)
+        };
+        let band = |top: u32, height: u32, px: u16| Band {
+            top,
+            height,
+            px,
             margin,
-            label: (margin / 2, label_height),
-            label_px: u16::try_from(height / 8).unwrap_or(u16::MAX).max(8),
-            value: (value_top, value_height),
-            value_px: u16::try_from(height / 3).unwrap_or(u16::MAX).max(10),
-            detail: (detail_top, detail_height),
-            detail_px: u16::try_from(height / 13).unwrap_or(u16::MAX).max(7),
+        };
+
+        Self {
+            label: band(margin / 2, label_height, type_px(shares.label_type_divisor)),
+            value: band(value_top, value_height, type_px(shares.value_type_divisor)),
+            detail: band(
+                detail_top,
+                detail_height,
+                type_px(shares.detail_type_divisor),
+            ),
             bar: (bar_top, bar_height),
+            margin,
         }
     }
 }
@@ -109,14 +175,7 @@ pub(crate) fn face(
         false => VALUE_INK,
     };
 
-    let drawn = text.draw_band(
-        &picture,
-        cell.label(),
-        layout.label_px,
-        layout.label,
-        family,
-        ink(label_ink),
-    );
+    let drawn = text.draw_band(&picture, cell.label(), layout.label, family, ink(label_ink));
     if let Some(next) = drawn {
         picture = next;
     }
@@ -124,7 +183,6 @@ pub(crate) fn face(
     let drawn = text.draw_band(
         &picture,
         reading.text(),
-        layout.value_px,
         layout.value,
         family,
         ink(value_ink),
@@ -138,14 +196,7 @@ pub(crate) fn face(
     // line so the two cannot both claim it.
     let caption = reading.detail().or_else(|| reading.reason());
     if let Some(caption) = caption {
-        let drawn = text.draw_band(
-            &picture,
-            caption,
-            layout.detail_px,
-            layout.detail,
-            family,
-            ink(DETAIL_INK),
-        );
+        let drawn = text.draw_band(&picture, caption, layout.detail, family, ink(DETAIL_INK));
         if let Some(next) = drawn {
             picture = next;
         }
@@ -154,21 +205,16 @@ pub(crate) fn face(
     picture
 }
 
-/// The deck's own payload for one key: the face, encoded at the deck's size.
+/// The deck's own payload for a face.
 ///
-/// `None` when the deck has not stated a size yet — there is no payload to draw
-/// into.
-pub(crate) fn compose(
+/// `None` when the deck's byte limit cannot hold it, or when the deck has not
+/// stated a size yet — there is no payload to draw into.
+pub(crate) fn encode(
     spec: deck_api::ImageSpec,
     cell: &CellSpec,
-    reading: &Reading,
-    family: &str,
-    text: &mut TextEngine,
+    picture: &RgbaImage,
 ) -> Option<Vec<u8>> {
-    let width = u32::from(spec.width()).max(1);
-    let height = u32::from(spec.height()).max(1);
-    let picture = face(width, height, cell, reading, family, text);
-    render::render_rgba(spec, cell.label(), &picture).ok()
+    render::render_rgba(spec, cell.label(), picture).ok()
 }
 
 /// Paints the track and the filled part of the bar.
@@ -302,19 +348,20 @@ mod tests {
     #[test]
     fn the_faces_this_build_produces_fit_the_decks_byte_budget() {
         // The real faces are the ones with a caption: `12 threads`, `3D`,
-        // `496.4 / 942.3 GB free`, or the reason a dash has. A budget proven
+        // `C: · 496.4 / 942.3 GB free`, or the reason a dash has. A budget proven
         // only on a bare number proves nothing about what the deck receives.
         let mut text = engine();
         let spec = deck_api::ImageSpec::new(112, 112, 4096, deck_api::ImageFormat::Jpeg);
         let faces = [
             Reading::percent(42.0).with_detail("12 threads"),
             Reading::percent(71.0).with_detail("11.3 / 15.9 GB"),
-            Reading::percent(53.0).with_detail("496.4 / 942.3 GB free"),
+            Reading::percent(53.0).with_detail("C: · 496.4 / 942.3 GB free"),
             Reading::temperature(61.0).with_detail("LHM"),
             Reading::unavailable("no sensor"),
         ];
         for reading in faces {
-            let jpeg = compose(spec, &cell(), &reading, "", &mut text).unwrap_or_else(|| {
+            let picture = face(112, 112, &cell(), &reading, "", &mut text);
+            let jpeg = encode(spec, &cell(), &picture).unwrap_or_else(|| {
                 panic!(
                     "{:?} did not fit {} bytes",
                     reading.text(),
@@ -335,8 +382,8 @@ mod tests {
     fn the_face_encodes_at_the_decks_size() {
         let mut text = engine();
         let spec = deck_api::ImageSpec::new(112, 112, 4096, deck_api::ImageFormat::Jpeg);
-        let jpeg =
-            compose(spec, &cell(), &Reading::percent(42.0), "", &mut text).expect("a payload");
+        let picture = face(112, 112, &cell(), &Reading::percent(42.0), "", &mut text);
+        let jpeg = encode(spec, &cell(), &picture).expect("a payload");
         assert!(jpeg.starts_with(&[0xFF, 0xD8]), "a JPEG starts with SOI");
         assert!(jpeg.len() <= spec.max_bytes());
     }
@@ -361,20 +408,45 @@ mod tests {
     }
 
     #[test]
+    fn the_value_is_the_largest_type_and_the_caption_the_smallest() {
+        let layout = Layout::of(112, 112);
+        assert!(
+            layout.value.px > layout.label.px,
+            "the number is the face: {} is not larger than {}",
+            layout.value.px,
+            layout.label.px
+        );
+        assert!(
+            layout.label.px > layout.detail.px,
+            "the caption is the smallest line"
+        );
+    }
+
+    #[test]
     fn every_part_of_the_face_stays_inside_the_tile() {
         // The layout is arithmetic on fractions, so the parts are checked
         // against each other: nothing overlaps the bar, and nothing leaves the
-        // image, at the two sizes a deck could state.
+        // image, at the sizes a deck could state.
         for size in [96, 108, 112, 160] {
             let layout = Layout::of(size, size);
-            assert!(layout.label.0 + layout.label.1 <= layout.value.0, "{size}");
-            assert!(layout.value.0 + layout.value.1 <= layout.detail.0, "{size}");
             assert!(
-                layout.detail.0 + layout.detail.1 <= layout.bar.0,
+                layout.label.top + layout.label.height <= layout.value.top,
+                "{size}"
+            );
+            assert!(
+                layout.value.top + layout.value.height <= layout.detail.top,
+                "{size}"
+            );
+            assert!(
+                layout.detail.top + layout.detail.height <= layout.bar.0,
                 "the caption must not sit on the bar at {size}"
             );
             assert!(layout.bar.0 + layout.bar.1 <= size, "{size}");
             assert!(layout.margin * 2 < size, "{size}");
+            // The type is a ceiling that never falls below the legible floor.
+            for band in [layout.label, layout.value, layout.detail] {
+                assert!(band.px >= MIN_TYPE_PX, "{size}");
+            }
         }
     }
 }

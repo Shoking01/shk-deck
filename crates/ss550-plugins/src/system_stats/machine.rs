@@ -50,24 +50,31 @@ impl Machine {
         // when a drive is plugged in.
         self.disks.refresh();
         let drive = system_drive();
-        let chosen = self
+        match self
             .disks
             .list()
             .iter()
             .find(|disk| is_system_disk(&disk.mount_point().to_string_lossy(), &drive))
-            // A machine that mounts something else first still has a disk; the
-            // largest one is the least surprising answer when the system drive
-            // cannot be recognised.
-            .or_else(|| {
-                self.disks
-                    .list()
-                    .iter()
-                    .max_by_key(|disk| disk.total_space())
-            });
-
-        match chosen {
-            Some(disk) => disk_reading(disk.available_space(), disk.total_space()),
-            None => Reading::unavailable("no disk listed"),
+        {
+            // The caption names the disk: the number means nothing without the
+            // volume it belongs to, and the fallback below is a different volume.
+            Some(disk) => disk_reading(disk.available_space(), disk.total_space(), &drive),
+            None => match self
+                .disks
+                .list()
+                .iter()
+                .max_by_key(|disk| disk.total_space())
+            {
+                // A machine that mounts something else first still has a disk;
+                // the largest one is the least surprising answer when the system
+                // drive cannot be recognised — and the caption says which.
+                Some(disk) => disk_reading(
+                    disk.available_space(),
+                    disk.total_space(),
+                    &disk.mount_point().to_string_lossy(),
+                ),
+                None => Reading::unavailable("no disk listed"),
+            },
         }
     }
 }
@@ -87,17 +94,38 @@ fn is_system_disk(mount_point: &str, drive: &str) -> bool {
     !drive.is_empty() && mount.starts_with(&drive)
 }
 
-/// One free-space reading, from two numbers.
+/// One free-space reading, from two numbers, with the disk it belongs to.
 ///
 /// Split out from [`Machine::disk`] so the rule — what the percentage is, what
 /// the detail line says, and what a disk that states no size gets — is testable
 /// without a disk.
-fn disk_reading(free: u64, total: u64) -> Reading {
+fn disk_reading(free: u64, total: u64, disk: &str) -> Reading {
     if total == 0 {
         return Reading::unavailable("no size stated");
     }
     let percent = (free as f64 * 100.0 / total as f64) as f32;
-    Reading::percent(percent).with_detail(format!("{:.1} / {:.1} GB free", gb(free), gb(total)))
+    Reading::percent(percent).with_detail(format!(
+        "{} · {:.1} / {:.1} GB free",
+        disk_label(disk),
+        gb(free),
+        gb(total)
+    ))
+}
+
+/// The short name of a mount point, for the caption under the number.
+///
+/// `C:\` becomes `C:`, and anything without a drive letter (a mount on a path)
+/// keeps its last segment, so the caption always says which volume answered.
+fn disk_label(mount_point: &str) -> String {
+    let trimmed = mount_point.trim().trim_end_matches(['\\', '/']);
+    if trimmed.len() == 2 && trimmed.ends_with(':') {
+        return trimmed.to_uppercase();
+    }
+    trimmed
+        .rsplit(['\\', '/'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(trimmed)
+        .to_string()
 }
 
 /// One memory reading, from two numbers.
@@ -132,19 +160,27 @@ mod tests {
     fn free_space_is_the_share_of_the_disk_that_is_still_available() {
         let total = 512 * 1024 * 1024 * 1024;
         let free = 128 * 1024 * 1024 * 1024;
-        let reading = disk_reading(free, total);
+        let reading = disk_reading(free, total, "C:\\");
         assert_eq!(
             reading.text(),
             "25%",
             "the number is the free space, not the use"
         );
-        assert_eq!(reading.detail(), Some("128.0 / 512.0 GB free"));
+        assert_eq!(reading.detail(), Some("C: · 128.0 / 512.0 GB free"));
+    }
+
+    #[test]
+    fn the_caption_names_the_volume_that_answered() {
+        assert_eq!(disk_label("C:\\"), "C:");
+        assert_eq!(disk_label("d:/"), "D:");
+        assert_eq!(disk_label("/mnt/data"), "data");
+        assert_eq!(disk_label("/"), "");
     }
 
     #[test]
     fn a_disk_or_a_machine_that_states_no_size_says_so_instead_of_dividing_by_zero() {
-        assert_eq!(disk_reading(10, 0).text(), "—");
-        assert!(disk_reading(10, 0).reason().is_some());
+        assert_eq!(disk_reading(10, 0, "C:\\").text(), "—");
+        assert!(disk_reading(10, 0, "C:\\").reason().is_some());
         assert_eq!(memory_reading(10, 0).text(), "—");
         assert!(memory_reading(10, 0).reason().is_some());
     }

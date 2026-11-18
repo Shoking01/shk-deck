@@ -21,8 +21,7 @@ use super::{
 };
 use crate::icons::{glyph_letter, Artwork};
 use crate::titlestyle::{TitleLook as _, TitlePosition, TitleStyle};
-use crate::{Controller, Paint, Slot};
-
+use crate::{key_number, Controller, Paint, Slot};
 /// The width a grid of keys may grow into before the tiles stop growing. Tiles
 /// are square, so this is also the height they aim for.
 const GRID_BUDGET: f32 = 600.;
@@ -426,16 +425,33 @@ fn grid(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
                     let number = crate::binding_number(session, index);
                     let action = number.and_then(|number| controller.store.get(number));
                     let binding = action.map(|action| SharedString::from(action.summary()));
-                    let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
+                    let key = key_number(index);
                     let appearance = keys.and_then(|keys| keys.appearance_for(key));
+                    // A key bound to a reading draws the face the deck received,
+                    // pixels and all, so the window and the glass cannot disagree
+                    // about what the key is. The frame was composed off the UI
+                    // thread and is keyed by the binding, so a page switch can
+                    // never show one cell's face on another cell's key.
+                    let reading_face = action.and_then(|action| action.plugin_cell()).and_then(
+                        |(plugin, cell)| {
+                            controller
+                                .face_tiles
+                                .get(&(key, plugin.to_string(), cell.to_string()))
+                                .cloned()
+                        },
+                    );
+                    let has_reading_face = reading_face.is_some();
                     // The picture comes from the library when the profile names
                     // one, and from the icon cache otherwise. Both were built
                     // when the deck, the profile or the binding changed, so this
                     // is a lookup and never a decode.
-                    let picture = appearance
-                        .and_then(|appearance| appearance.asset())
-                        .and_then(|name| controller.previews.get(name))
-                        .cloned()
+                    let picture = reading_face
+                        .or_else(|| {
+                            appearance
+                                .and_then(|appearance| appearance.asset())
+                                .and_then(|name| controller.previews.get(name))
+                                .cloned()
+                        })
                         .or_else(|| {
                             action
                                 .and_then(|action| controller.icons.frame(action))
@@ -443,10 +459,17 @@ fn grid(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
                         });
                     let artwork = controller.icons.artwork(action);
                     let slot = controller.slots.get(index).copied().unwrap_or(Slot::Off);
+                    // A reading's face is the reading: the profile's appearance is
+                    // not drawn over it on the deck either, so the tile passes no
+                    // appearance for that key.
+                    let face_appearance = match has_reading_face {
+                        true => None,
+                        false => appearance,
+                    };
                     cells.push(Cell {
                         index,
                         number,
-                        face: resolved_face(appearance, slot, artwork, picture.is_some()),
+                        face: resolved_face(face_appearance, slot, artwork, picture.is_some()),
                         picture,
                         glyph: action.map(glyph_letter),
                         title: keys

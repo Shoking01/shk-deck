@@ -53,6 +53,7 @@ use ui::Page;
 
 mod apps;
 mod diagnostics;
+mod facework;
 mod favicons;
 mod icons;
 mod pictures;
@@ -177,24 +178,6 @@ enum Tile {
     /// A deck only ever receives a JPEG, so a key that says something has to
     /// send one: the words are pixels, not a property of the colour.
     TitledColour(Vec<u8>),
-}
-
-/// What one key's plugin face is, before anything is sent.
-///
-/// Resolved ahead of the first byte, like [`Tile`], because a refusal halfway
-/// through a page must not leave the window and the deck disagreeing about the
-/// keys that came after it.
-enum Payload {
-    /// Not a plugin key: the key's own face decides.
-    NotAPlugin,
-    /// A face to send, with the reading it was drawn from, so the repaint rule
-    /// remembers exactly what went out.
-    Ready { jpeg: Vec<u8>, reading: Reading },
-    /// The fonts are still being read, so there is nothing to draw with yet. The
-    /// repaint that follows the scan draws it.
-    Pending,
-    /// A binding this build cannot draw, and the sentence that says why.
-    Failed(String),
 }
 
 /// Decides one key's face, before anything is sent.
@@ -891,6 +874,24 @@ struct Controller {
     /// costs no bytes on the link, so a percentage that has not moved does not
     /// send a JPEG.
     drawn_readings: Vec<Option<Reading>>,
+    /// The thread that composes a face, and the faces it hands back.
+    ///
+    /// Shaping three lines and encoding a JPEG per changed key is not work for
+    /// the thread that draws, so it happens there and arrives here as bytes.
+    faces: facework::FaceWorker,
+    /// The keys whose face is being composed right now.
+    ///
+    /// A key with a job in flight is not queued again: the sample that arrives
+    /// while it is being drawn is one the next sample will pick up, and queueing
+    /// it twice would paint the older face second.
+    faces_in_flight: BTreeSet<u16>,
+    /// The window's own tile for a reading, by the key and the binding it shows.
+    ///
+    /// Keyed by the binding as well as the key so a page switch cannot draw one
+    /// cell's face on another cell's key: a stale entry simply never matches.
+    pub(crate) face_tiles: BTreeMap<(u16, String, String), Arc<gpui_kit::RenderImage>>,
+    /// The sentence that says the face worker stopped, once it has.
+    faces_gone: Option<String>,
 }
 
 /// The keys the newest sample would change on the deck.
@@ -1193,6 +1194,10 @@ impl Controller {
             samples: Samples::new(),
             sampler_gone: None,
             drawn_readings: Vec::new(),
+            faces: facework::FaceWorker::start(),
+            faces_in_flight: BTreeSet::new(),
+            face_tiles: BTreeMap::new(),
+            faces_gone: None,
         };
 
         // Look for the deck right away: its settle window starts the moment
@@ -1304,6 +1309,10 @@ impl Controller {
         self.slots = vec![Slot::Off; key_count];
         self.pressed = vec![false; key_count];
         self.drawn_readings = vec![None; key_count];
+        // A deck change is a new tile size, so every face composed for the old
+        // one is worthless, and a job in flight belongs to a deck that is gone.
+        self.face_tiles.clear();
+        self.faces_in_flight.clear();
         if !key_exists(&session, self.selected_key) {
             self.selected_key = KeyNumber::default();
         }
@@ -1555,12 +1564,10 @@ impl Controller {
                     .map(titletext::TextEngine::families)
                     .unwrap_or_default();
                 // The words can be drawn now, so the keys that were painted
-                // without them are recomposed and repainted — once. A key bound
-                // to a plugin is one of them: its face is words too.
+                // without them are recomposed and repainted — once. Readings are
+                // not here: their faces have a font of their own, on the worker.
                 this.rebuild_icons();
-                let mut again = this.titled_keys();
-                again.extend(this.reading_keys());
-                for key in again {
+                for key in this.titled_keys() {
                     this.repaint_key(key);
                 }
                 cx.notify();
@@ -1996,7 +2003,7 @@ impl Controller {
         // the plan needs the cache and the font mutably.
         let titles: Vec<Option<String>> = (0..key_count)
             .map(|index| {
-                let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
+                let key = key_number(index);
                 self.current_keys()
                     .and_then(|keys| keys.title(key))
                     .map(str::to_string)
@@ -2004,7 +2011,7 @@ impl Controller {
             .collect();
         let actions: Vec<Option<Action>> = (0..key_count)
             .map(|index| {
-                let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
+                let key = key_number(index);
                 self.action_for(key).cloned()
             })
             .collect();
@@ -2012,13 +2019,13 @@ impl Controller {
         // app's default otherwise.
         let styles: Vec<titlestyle::TitleStyle> = (0..key_count)
             .map(|index| {
-                let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
+                let key = key_number(index);
                 self.style_for(key)
             })
             .collect();
         let mut plans: Vec<Tile> = Vec::with_capacity(key_count);
         for index in 0..key_count {
-            let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
+            let key = key_number(index);
             plans.push(plan_tile(
                 appearances.get(&key),
                 actions[index].as_ref(),
@@ -2031,16 +2038,21 @@ impl Controller {
         }
 
         // A key bound to a plugin shows the reading instead of the face its
-        // appearance would give it. Decided here, before the session is
-        // borrowed, so a refusal halfway through the page cannot leave the deck
-        // and the window disagreeing about the keys that came after it.
-        let mut faces: Vec<Payload> = Vec::with_capacity(key_count);
-        for action in actions.iter() {
-            let payload = match action.as_ref() {
-                Some(action) => self.plugin_face(action),
-                None => Payload::NotAPlugin,
+        // appearance would give it. The face is composed off this thread, so the
+        // key is queued here and painted by `collect_faces` when its bytes
+        // arrive; a sentence about a missing cell is taken now, before the first
+        // byte of the page goes out.
+        let mut painted = vec![slot; key_count];
+        for (index, entry) in painted.iter_mut().enumerate() {
+            let Some(action) = actions.get(index).and_then(Option::as_ref) else {
+                continue;
             };
-            faces.push(payload);
+            if !action.is_reading() {
+                continue;
+            }
+            let key = key_number(index);
+            self.queue_face(key, action);
+            *entry = self.slots.get(index).copied().unwrap_or(slot);
         }
 
         let Some(session) = self.session.as_mut() else {
@@ -2048,72 +2060,47 @@ impl Controller {
         };
 
         let mut failure = None;
-        let mut painted = vec![slot; key_count];
-        let mut drawn: Vec<(usize, Reading)> = Vec::new();
-        // A key whose reading cannot be drawn — a cell this build no longer has,
-        // or a face the deck's size cannot hold — is one key's problem. The rest
-        // of the page is still valid, so it is painted and the sentence is kept
-        // for last: stopping here would leave every key after it showing whatever
-        // the previous page or profile left on the glass.
-        let mut unreadable: Option<String> = None;
         for (index, plan) in plans.iter().enumerate() {
-            let result = match &faces[index] {
-                Payload::Ready { jpeg, .. } => Self::paint_over_black(session, index, jpeg),
-                Payload::Pending => {
-                    // Nothing can be drawn yet: the key keeps what it had, and
-                    // the repaint after the font scan draws the reading.
-                    painted[index] = self.slots.get(index).copied().unwrap_or(slot);
-                    continue;
-                }
-                Payload::Failed(message) => {
-                    if unreadable.is_none() {
-                        unreadable = Some(message.clone());
+            // A key bound to a reading was queued above and is painted when its
+            // face arrives, so its old face stays as it is until then. Nothing
+            // here can fail for it, and nothing here may stop the page for it.
+            if actions
+                .get(index)
+                .and_then(Option::as_ref)
+                .is_some_and(Action::is_reading)
+            {
+                painted[index] = self.slots.get(index).copied().unwrap_or(slot);
+                continue;
+            }
+            let result = match plan {
+                Tile::Asset { name, title, style } => {
+                    let tile = asset_tile(
+                        &self.assets,
+                        self.tiles.as_mut(),
+                        spec,
+                        name,
+                        title.as_deref(),
+                        style,
+                        &mut self.text,
+                    );
+                    match tile {
+                        Ok(jpeg) => Self::paint_over_black(session, index, &jpeg),
+                        Err(message) => Err(PaintFailure::Picture(message)),
                     }
-                    painted[index] = self.slots.get(index).copied().unwrap_or(slot);
-                    continue;
                 }
-                Payload::NotAPlugin => match plan {
-                    Tile::Asset { name, title, style } => {
-                        let tile = asset_tile(
-                            &self.assets,
-                            self.tiles.as_mut(),
-                            spec,
-                            name,
-                            title.as_deref(),
-                            style,
-                            &mut self.text,
-                        );
-                        match tile {
-                            Ok(jpeg) => Self::paint_over_black(session, index, &jpeg),
-                            Err(message) => Err(PaintFailure::Picture(message)),
-                        }
-                    }
-                    Tile::Art(picture) => Self::paint_over_black(session, index, picture),
-                    Tile::TitledColour(picture) => Self::paint_over_black(session, index, picture),
-                    Tile::Colour(rgb) => session.paint(index, *rgb).map_err(PaintFailure::Session),
-                },
+                Tile::Art(picture) => Self::paint_over_black(session, index, picture),
+                Tile::TitledColour(picture) => Self::paint_over_black(session, index, picture),
+                Tile::Colour(rgb) => session.paint(index, *rgb).map_err(PaintFailure::Session),
             };
 
             if let Err(error) = result {
                 failure = Some(error);
                 break;
             }
-            if let Payload::Ready { reading, .. } = &faces[index] {
-                drawn.push((index, reading.clone()));
-            }
-            painted[index] = match &faces[index] {
-                Payload::Ready { .. } => Slot::Image,
-                _ => match plan {
-                    Tile::Asset { .. } | Tile::Art(_) | Tile::TitledColour(_) => Slot::Image,
-                    Tile::Colour(_) => slot,
-                },
+            painted[index] = match plan {
+                Tile::Asset { .. } | Tile::Art(_) | Tile::TitledColour(_) => Slot::Image,
+                Tile::Colour(_) => slot,
             };
-        }
-
-        // What the deck now shows, remembered per key: the next sample compares
-        // against this, and only a clip that changed is sent again.
-        for (index, reading) in drawn {
-            self.mark_drawn(index, reading);
         }
 
         match failure {
@@ -2122,15 +2109,10 @@ impl Controller {
             None => {
                 let shown = painted.iter().filter(|slot| **slot == Slot::Image).count();
                 self.slots = painted;
-                self.note = match unreadable {
-                    // The one sentence a page with a key it cannot draw keeps,
-                    // because the rest of the page was painted and the user needs
-                    // to know which key did not.
-                    Some(message) => message.into(),
-                    None if shown == 0 => {
-                        format!("All {key_count} keys painted {}.", slot_name(slot)).into()
-                    }
-                    None => format!("{shown} of {key_count} keys show what they run.").into(),
+                self.note = if shown == 0 {
+                    format!("All {key_count} keys painted {}.", slot_name(slot)).into()
+                } else {
+                    format!("{shown} of {key_count} keys show what they run.").into()
                 };
             }
         }
@@ -2562,10 +2544,11 @@ impl Controller {
         }
 
         self.heartbeat();
-        // The newest walk over the machine, and the keys it moved. The sample was
-        // measured on another thread; painting it happens here, on the one that
-        // talks to the deck.
+        // The newest walk over the machine, the keys it moved, and the faces that
+        // are ready to paint. Both happen here, on the thread that owns the deck:
+        // the measurement and the drawing ran on threads of their own.
         self.pump_samples();
+        self.collect_faces();
     }
 
     /// Handles an unexpected disconnect with exponential backoff.
@@ -3124,12 +3107,14 @@ impl Controller {
         };
 
         // Recompose every variant whose style came from the default, then
-        // repaint those keys. A key that shows a reading is drawn with the same
-        // family, so it moves with the default too.
+        // repaint those keys. A key that shows a reading is drawn in the same
+        // family, and its face lives on the worker, so it is asked for again from
+        // there rather than composed here.
         self.rebuild_icons();
-        let mut again = self.inherited_title_keys();
-        again.extend(self.reading_keys());
-        for key in again {
+        for key in self.inherited_title_keys() {
+            self.repaint_key(key);
+        }
+        for key in self.reading_keys() {
             self.repaint_key(key);
         }
         cx.notify();
@@ -3641,50 +3626,135 @@ impl Controller {
             .map_err(PaintFailure::Session)
     }
 
-    /// The face a key bound to a plugin shows, drawn from the newest sample.
+    /// Asks the face worker for one key's face, from the newest sample.
     ///
-    /// Resolved before the session is borrowed, like every other payload: the
-    /// reading, the cell and the font are read here, and the bytes are ready
-    /// before the first one goes out.
-    fn plugin_face(&mut self, action: &Action) -> Payload {
+    /// Answers whether a job was queued. Nothing is composed here: the worker
+    /// shapes the words and encodes the JPEG, and `collect_faces` paints what
+    /// comes back. A key whose cell this build no longer has, or a window with
+    /// no deck to state a tile size, is a sentence instead of a job.
+    fn queue_face(&mut self, key: u16, action: &Action) -> bool {
         let Some((plugin, cell)) = action.plugin_cell() else {
-            return Payload::NotAPlugin;
+            return false;
         };
-        let Some(spec) = self.session.as_ref().map(session::DeckSession::image_spec) else {
-            return Payload::Failed(
-                "Connect a deck to draw a reading: the tile size comes from it.".to_string(),
-            );
+        let Some(image) = self.session.as_ref().map(session::DeckSession::image_spec) else {
+            self.note = "Connect a deck to draw a reading: the tile size comes from it.".into();
+            return false;
         };
         // A binding can outlive the build that wrote it: a cell that is no longer
         // here is a sentence, not a key that quietly stops moving.
-        let Some(specs) = self.plugins.find(plugin, cell).cloned() else {
-            return Payload::Failed(format!(
+        let Some(spec) = self.plugins.find(plugin, cell).cloned() else {
+            self.note = format!(
                 "\"{cell}\" is not a cell this build has. Bind the key to a plugin it lists."
-            ));
+            )
+            .into();
+            return false;
+        };
+        if !self.faces.is_alive() {
+            self.report_faces_gone();
+            return false;
+        }
+        if self.faces_in_flight.contains(&key) {
+            return false;
+        }
+        let Some(plugin) = ss550_plugin_api::PluginId::parse(plugin).ok() else {
+            return false;
+        };
+        let Some(cell) = ss550_plugin_api::CellId::parse(cell).ok() else {
+            return false;
         };
         let reading = self
             .samples
-            .get_named(plugin, cell)
+            .get_named(plugin.as_str(), cell.as_str())
             .cloned()
             // The first sample of a session has not arrived yet: the key shows
             // the dash it will show only until the machine answers.
             .unwrap_or_else(|| Reading::unavailable("no answer"));
 
-        let family = self.title_style.family.clone();
-        let Some(text) = self.text.as_mut() else {
-            // Words need a font, and the scan is asked for from the loop that has
-            // a context to spawn with. Until it answers the key keeps what it had.
-            if !self.text_scan {
-                self.fonts_wanted = true;
-            }
-            return Payload::Pending;
+        let job = facework::FaceJob {
+            key,
+            plugin,
+            cell,
+            spec,
+            reading,
+            family: self.title_style.family.clone(),
+            image,
         };
-        match plugintile::compose(spec, &specs, &reading, &family, text) {
-            Some(jpeg) => Payload::Ready { jpeg, reading },
-            None => Payload::Failed(
-                "This deck's tile could not hold the reading as a picture.".to_string(),
-            ),
+        if self.faces.submit(job) {
+            self.faces_in_flight.insert(key);
+            true
+        } else {
+            // The queue is full: the key keeps its old face and stays due, and
+            // the next sample queues it again.
+            false
         }
+    }
+
+    /// Paints every face the worker has finished.
+    ///
+    /// Called from the maintenance tick. A face that arrives for a binding the
+    /// key no longer wears is dropped: a page switch while the worker was drawing
+    /// must not paint one cell's number on another cell's key.
+    fn collect_faces(&mut self) -> bool {
+        let finished: Vec<facework::FaceDone> =
+            std::iter::from_fn(|| self.faces.try_recv()).collect();
+        let mut changed = false;
+        for done in finished {
+            self.faces_in_flight.remove(&done.key);
+            let index = key_index(done.key);
+            let bound = self
+                .action_for(done.key)
+                .and_then(Action::plugin_cell)
+                .map(|(plugin, cell)| (plugin.to_string(), cell.to_string()));
+            let expected = Some((done.plugin.to_string(), done.cell.to_string()));
+            if bound != expected {
+                continue;
+            }
+
+            // The window's tile draws the same pixels the deck receives, so the
+            // two cannot disagree about what the key is.
+            if let Some(image) = self.session.as_ref().map(session::DeckSession::image_spec) {
+                if let Ok(frame) = render::preview_frame_rgba(image, &done.picture) {
+                    self.face_tiles.insert(
+                        (done.key, done.plugin.to_string(), done.cell.to_string()),
+                        Arc::new(gpui_kit::RenderImage::new([frame])),
+                    );
+                }
+            }
+
+            match done.jpeg {
+                Ok(jpeg) => {
+                    let Some(session) = self.session.as_mut() else {
+                        continue;
+                    };
+                    if let Err(failure) = Self::paint_over_black(session, index, &jpeg) {
+                        match failure {
+                            PaintFailure::Session(error) => self.report(error),
+                            PaintFailure::Picture(message) => self.note = message.into(),
+                        }
+                        continue;
+                    }
+                    if let Some(entry) = self.slots.get_mut(index) {
+                        *entry = Slot::Image;
+                    }
+                    self.mark_drawn(index, done.reading);
+                }
+                Err(message) => self.note = message.into(),
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    /// Says once that the face worker stopped.
+    fn report_faces_gone(&mut self) {
+        if self.faces_gone.is_some() {
+            return;
+        }
+        self.faces_gone = Some(
+            "The face worker stopped: the readings on the keys are the last ones it drew."
+                .to_string(),
+        );
+        self.note = self.faces_gone.clone().unwrap_or_default().into();
     }
 
     /// Remembers what one key's plugin face drew, so the next sample is compared
@@ -3733,14 +3803,14 @@ impl Controller {
             .map_or(0, session::DeckSession::key_count);
         let actions: Vec<Option<Action>> = (0..key_count)
             .map(|index| {
-                let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
+                let key = key_number(index);
                 self.action_for(key).cloned()
             })
             .collect();
         let due = readings_to_repaint(&actions, &self.drawn_readings, &self.samples);
         let mut changed = false;
         for index in due {
-            let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
+            let key = key_number(index);
             changed |= self.repaint_key(key);
         }
         changed
@@ -3748,8 +3818,8 @@ impl Controller {
 
     /// The keys on this page that show a plugin reading.
     ///
-    /// The font scan needs them: their face is words like any title, so the
-    /// repaint that follows the scan has to include them.
+    /// Used by the one action that changes how a face is drawn without the
+    /// reading moving: a new title family is a new face for every gauge.
     fn reading_keys(&self) -> Vec<u16> {
         let count = self
             .session
@@ -3779,42 +3849,11 @@ impl Controller {
             .map(str::to_string);
         let action = self.action_for(key).cloned();
         // A key bound to a plugin shows the reading and nothing else: its
-        // appearance and its title are not drawn over it, because the number is
-        // the whole point of the key.
+        // appearance and its title are not drawn over it. The face is composed on
+        // the worker, so this asks for it and returns — `collect_faces` paints it.
         if let Some(action) = action.as_ref() {
-            match self.plugin_face(action) {
-                Payload::NotAPlugin => {}
-                Payload::Ready { jpeg, reading } => {
-                    let index = usize::from(key.saturating_sub(1));
-                    let Some(session) = self.session.as_mut() else {
-                        return true;
-                    };
-                    return match Self::paint_over_black(session, index, &jpeg) {
-                        Ok(()) => {
-                            if let Some(entry) = self.slots.get_mut(index) {
-                                *entry = Slot::Image;
-                            }
-                            self.mark_drawn(index, reading);
-                            true
-                        }
-                        Err(PaintFailure::Session(error)) => {
-                            self.report(error);
-                            false
-                        }
-                        Err(PaintFailure::Picture(message)) => {
-                            self.note = message.into();
-                            false
-                        }
-                    };
-                }
-                // The face cannot be drawn yet, so nothing was painted: the
-                // repaint after the font scan draws it, and a caller that asks
-                // "did this key change?" is told the truth.
-                Payload::Pending => return false,
-                Payload::Failed(message) => {
-                    self.note = message.into();
-                    return false;
-                }
+            if action.is_reading() {
+                return self.queue_face(key, action);
             }
         }
         // The key's own style, or the app's default: one resolution, used by the
@@ -3832,7 +3871,7 @@ impl Controller {
             &mut self.icons,
             &mut self.text,
         );
-        let index = usize::from(key.saturating_sub(1));
+        let index = key_index(key);
         let spec = self.session.as_ref().map(session::DeckSession::image_spec);
 
         let Some(session) = self.session.as_mut() else {
@@ -3936,6 +3975,22 @@ impl Controller {
             diagnostics::record(&format!("render {} in {} ms", self.frames, ms_text(cost)));
         }
     }
+}
+
+/// The key number a zero-based position addresses.
+///
+/// One spelling for the conversion, because the window mixes the two spaces:
+/// the deck and the bindings speak key numbers from one, and every loop over the
+/// grid speaks positions from zero. A number past the deck's own range is
+/// clamped rather than wrapped, so a wrong index can never address a different
+/// key.
+pub(crate) fn key_number(index: usize) -> u16 {
+    u16::try_from(index.saturating_add(1)).unwrap_or(u16::MAX)
+}
+
+/// The zero-based position a key number addresses.
+pub(crate) fn key_index(key: u16) -> usize {
+    usize::from(key.saturating_sub(1))
 }
 
 fn slot_name(slot: Slot) -> &'static str {

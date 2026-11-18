@@ -19,9 +19,10 @@ messages; the file below is a human summary, not a substitute for
   not simply answer: the plugin reads LibreHardwareMonitor's WMI namespace when
   it is running, then the ACPI thermal zone, and says `—` with a reason when
   neither answers. See `docs/plugins.md`.
-- A reading is redrawn only when its face changed, at most once per two-second
-  sample, and never on the thread that draws: measuring a machine is not
-  something a frame can wait for.
+- A reading is drawn off the thread that draws frames, on a worker with a font of
+  its own, and redrawn only when its face changed, at most once per two-second
+  sample. The window's key tile shows exactly the pixels the deck received, so
+  the two cannot disagree about what a key is.
 - The editor gained a fourth kind, `LIVE STAT`, which lists the cells of this
   build and binds one the same way an app or a URL is bound.
 

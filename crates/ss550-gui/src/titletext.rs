@@ -67,6 +67,24 @@ const INK: Color = Color::rgba(0xff, 0xff, 0xff, 0xff);
 /// What is left of a channel under the scrim: 0.38, in 255ths.
 const SCRIM_KEEP: u16 = 97;
 
+/// A strip of a picture that one line of text is centred in.
+///
+/// The four values only mean anything together — a size without a band has
+/// nowhere to sit, and a band without a margin draws into the deck's rounded
+/// corner — so they travel as one value instead of as four positional arguments
+/// a caller can transpose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Band {
+    /// The band's top edge, in pixels.
+    pub(crate) top: u32,
+    /// The band's height, in pixels. The type steps down to fit it.
+    pub(crate) height: u32,
+    /// The size the words are asked for; a ceiling, never an order.
+    pub(crate) px: u16,
+    /// The side inset, in pixels, that keeps words off the tile's edge.
+    pub(crate) margin: u32,
+}
+
 /// A font database, a glyph cache, and the two calls that turn words into
 /// pixels.
 ///
@@ -205,8 +223,7 @@ impl TextEngine {
         &mut self,
         picture: &RgbaImage,
         text: &str,
-        px: u16,
-        band: (u32, u32),
+        band: Band,
         family: &str,
         ink: Color,
     ) -> Option<RgbaImage> {
@@ -219,18 +236,21 @@ impl TextEngine {
             return None;
         }
 
-        let margin = (width / 16).max(1);
+        // The band owns its inset: the face that built it also draws its bar to
+        // that same margin, so the two cannot disagree about how far in the
+        // content starts.
+        let margin = band.margin.min(width / 2);
         let box_width = width.saturating_sub(margin * 2).max(1);
         let family = match family.is_empty() {
             true => Family::SansSerif,
             false => Family::Name(family),
         };
-        let (band_top, band_height) = band;
+        let (band_top, band_height) = (band.top, band.height);
 
         // The size is a ceiling that only steps down: the caller states the size
         // it wants, and a band too short for it gets smaller words instead of
         // clipped ones.
-        let mut chosen = px.max(MIN_FIT_PX);
+        let mut chosen = band.px.max(MIN_FIT_PX);
         let mut block = self.measure_family(&text, family, chosen, box_width);
         while block > f32::from(u16::try_from(band_height).unwrap_or(u16::MAX))
             && chosen > MIN_FIT_PX

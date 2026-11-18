@@ -104,6 +104,36 @@ The user's own words for the outcome (verbatim, from the request):
   the three-source temperature chain and why a dash beats a fabricated number,
   the GPU-engine rule (busiest type, not the sum), the repaint rule, and where
   each piece of code lives.
+- **T8 — the face leaves the UI thread.** A worker (`crates/ss550-gui/src/facework.rs`)
+  owns its own `TextEngine` and composes faces from a queue; the window only
+  paints what arrives in `collect_faces`. Route: inline. **Done.** Two tests
+  compose a real face through the worker (bytes, pixels, and a tile too small to
+  hold one). The `Drop` that stops it closes the job channel *before* joining:
+  the first version joined while the sender still lived, which is a thread that
+  can never be told to leave, and one test run hung on it.
+- **T9 — a bounded shutdown.** `Sampler::drop` waits for the stop flag but not
+  forever: a provider wedged in a WMI call must not hold the window open.
+  Route: inline. **Done.** `STOP_TIMEOUT` (500 ms) bounds the wait; the thread
+  owns everything it touches, so it is left to finish alone.
+- **T10 — one key-number conversion.** `key_number`/`key_index` replace the four
+  spellings, including `unwrap_or(u16::MAX)` inventing key 65535. Route: inline.
+  **Done.** One helper each, clamped rather than wrapped.
+- **T11 — one painted face.** `collect_faces` is the only place a reading is
+  painted, so the page paint and the press path can never disagree about how a
+  face reaches the deck. Route: inline. **Done.** `Payload` is gone: a reading
+  key is *queued*, never composed or painted inline, and an answer for a binding
+  the key no longer wears is dropped.
+- **T12 — the window shows the reading.** The tile draws the same pixels the
+  deck received, keyed by the binding so a page switch cannot show one cell's
+  face on another cell's key. Route: inline. **Done.** `face_tiles` is keyed by
+  `(key, plugin, cell)` and the tile passes no appearance for a reading key, so
+  the profile cannot paint over a gauge.
+- **T13 — the caption names the disk, and the face explains itself.**
+  `disk.free` says which volume answered (`C: · 496.4 / 942.3 GB free`); the
+  layout's proportions, floors and the shared margin live in one named table
+  (`Shares`, and a `Band` that carries its own margin) instead of scattered
+  divisions. Route: inline. **Done.** Checked by eye: the six real faces were
+  encoded and looked at, and the disk caption fits its band on one line.
 
 ## Log
 
@@ -183,3 +213,16 @@ The user's own words for the outcome (verbatim, from the request):
   paint sequence between `repaint_key` and the page paint, the spread of
   index-conversion spellings, and the documented layout arithmetic in
   `plugintile.rs`.
+- **L7** (user, verbatim): "Podemos solventar lo que quedo abierto?". All six
+  open items were closed as T8–T13 above. The one that mattered most was the
+  face leaving the UI thread: composing a gauge is three text-shaping passes with
+  a per-pixel step-down loop plus a JPEG encode, and it used to happen on the
+  window's tick for every changed key. It now happens on a worker with its own
+  font database, and the window only paints what arrives. Two things fell out of
+  that change: the window's own tile shows the same pixels the deck received
+  (the two used to disagree about a reading key), and `Payload` — the type that
+  existed only to carry a face composed inline — is gone with it.
+  One mistake made and fixed inside this task: `FaceWorker::drop` joined the
+  thread while the job channel was still open, so the worker could never leave
+  its `recv()`; a test run hung and had to be killed. The sender is now taken
+  first, and the channel closing is the whole stop signal.
