@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use ss550_plugin_api::{CellId, CellSpec, Plugin, PluginId, Reading};
 
+pub(crate) mod clock;
 pub mod system_stats;
 
 pub use system_stats::{temperature_hint, SystemStats};
@@ -58,15 +59,54 @@ const STOP_TIMEOUT: Duration = Duration::from_millis(500);
 /// built while the window opens — while the sampler must build every plugin it
 /// measures. [`built_in_descriptions`] is the first list, this is the second.
 fn built_in_plugins() -> Vec<Box<dyn Plugin>> {
-    vec![Box::new(SystemStats::new())]
+    vec![Box::new(SystemStats::new()), Box::new(clock::Clock::new())]
 }
 
-/// The cells of every plugin this build ships, without building one.
+/// One plugin as the window sees it before anything is measured: what it calls
+/// itself, and the cells it offers.
+///
+/// The palette needs the name — one draggable row per plugin is what a person
+/// recognises — and the editor needs the cells. Neither may build a plugin.
+#[derive(Debug, Clone)]
+pub struct PluginGroup {
+    id: String,
+    name: &'static str,
+    cells: Vec<CellSpec>,
+}
+
+impl PluginGroup {
+    /// The plugin's stable id, e.g. `clock`.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The name a person reads, e.g. `Clock`.
+    pub fn name(&self) -> &str {
+        self.name
+    }
+
+    /// The cells this plugin offers, in the order the editor lists them.
+    pub fn cells(&self) -> &[CellSpec] {
+        &self.cells
+    }
+}
+
+/// Every plugin this build ships, named, without building one.
 ///
 /// This is what the window lists, so it must stay free of I/O: a plugin's
-/// `describe` is a table of names, not a measurement.
-fn built_in_descriptions() -> Vec<Vec<CellSpec>> {
-    vec![SystemStats::describe()]
+/// `describe` is a table of names, not a measurement. The id is read from the
+/// cells themselves — a plugin states it once, in the cells it hands out.
+fn built_in_descriptions() -> Vec<PluginGroup> {
+    [
+        (system_stats::NAME, SystemStats::describe()),
+        (clock::NAME, clock::Clock::describe()),
+    ]
+    .into_iter()
+    .filter_map(|(name, cells)| {
+        let id = cells.first()?.plugin().as_str().to_string();
+        Some(PluginGroup { id, name, cells })
+    })
+    .collect()
 }
 
 /// What the window needs to know about the plugins without measuring anything.
@@ -75,6 +115,7 @@ fn built_in_descriptions() -> Vec<Vec<CellSpec>> {
 /// editor binds them, and the sampler gets the plugins themselves.
 #[derive(Debug, Clone, Default)]
 pub struct Catalogue {
+    groups: Vec<PluginGroup>,
     cells: Vec<CellSpec>,
 }
 
@@ -87,8 +128,29 @@ impl Catalogue {
     /// thread, and `the_catalogue_lists_exactly_what_the_plugin_measures` holds
     /// the two lists together.
     pub fn built_in() -> Self {
-        let cells = built_in_descriptions().into_iter().flatten().collect();
-        Self { cells }
+        let groups = built_in_descriptions();
+        let cells = groups
+            .iter()
+            .flat_map(|group| group.cells.iter().cloned())
+            .collect();
+        Self { groups, cells }
+    }
+
+    /// Every plugin this build ships, in the order the palette lists them.
+    ///
+    /// One row per plugin, not per cell: a person drags "Clock", not "the
+    /// seconds of the clock".
+    pub fn groups(&self) -> &[PluginGroup] {
+        &self.groups
+    }
+
+    /// The cells of one plugin, or an empty slice when this build has no such
+    /// plugin.
+    pub fn cells_of(&self, plugin: &str) -> &[CellSpec] {
+        self.groups
+            .iter()
+            .find(|group| group.id() == plugin)
+            .map_or(&[], |group| group.cells())
     }
 
     /// Every cell, in the order the editor lists them.
@@ -315,12 +377,28 @@ mod tests {
                 ("system-stats", "gpu.temp"),
                 ("system-stats", "ram.usage"),
                 ("system-stats", "disk.free"),
+                ("clock", "hours"),
+                ("clock", "minutes"),
+                ("clock", "seconds"),
             ]
         );
         assert!(catalogue.knows("system-stats", "disk.free"));
         assert!(!catalogue.knows("system-stats", "disk.used"));
         assert!(!catalogue.knows("other-plugin", "cpu.usage"));
         assert!(catalogue.find("system-stats", "cpu.temp").is_some());
+        // A plugin is one row in the palette, whatever it measures: the drift
+        // this pins is a palette with nine rows and a person looking for "Clock".
+        let names: Vec<(&str, &str, usize)> = catalogue
+            .groups()
+            .iter()
+            .map(|group| (group.id(), group.name(), group.cells().len()))
+            .collect();
+        assert_eq!(
+            names,
+            [("system-stats", "System stats", 6), ("clock", "Clock", 3)]
+        );
+        assert_eq!(catalogue.cells_of("clock").len(), 3);
+        assert!(catalogue.cells_of("no-such-plugin").is_empty());
     }
 
     #[test]
@@ -330,7 +408,19 @@ mod tests {
         let described = SystemStats::describe();
         let built = SystemStats::new();
         assert_eq!(described, built.cells().to_vec());
-        assert_eq!(Catalogue::built_in().cells(), described.as_slice());
+        assert_eq!(
+            Catalogue::built_in().cells_of("system-stats"),
+            described.as_slice()
+        );
+
+        // And the same for the clock, which measures the time and nothing else.
+        let described = clock::Clock::describe();
+        let built = clock::Clock::new();
+        assert_eq!(described, built.cells().to_vec());
+        assert_eq!(
+            Catalogue::built_in().cells_of("clock"),
+            described.as_slice()
+        );
     }
 
     #[test]

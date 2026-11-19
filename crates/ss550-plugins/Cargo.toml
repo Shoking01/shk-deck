@@ -11,6 +11,7 @@ ss550-plugin-api = { path = "../ss550-plugin-api" }
 # CPU usage, memory and free space: the numbers a machine can answer without
 # asking for permission. Only the two feature sets this crate reads are
 # compiled in.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 sysinfo = { version = "0.40", default-features = false, features = ["system", "disk"] }
 
 # The GPU counters and the thermal sources live in WMI, not in a Win32 call:

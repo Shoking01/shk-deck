@@ -338,6 +338,33 @@ impl Reading {
         }
     }
 
+    /// A reading whose text is its own, for something that is not a number with
+    /// a unit.
+    ///
+    /// A clock's `07` is the case: the leading zero is the reading, and
+    /// `whole(7.0, "")` would show `7` — a different thing to look at. The number
+    /// travels beside the text because a history graph and a threshold still want
+    /// it, exactly as in [`Reading::whole`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let minute = ss550_plugin_api::Reading::spelled("07", 7.0);
+    /// assert_eq!(minute.text(), "07");
+    /// assert_eq!(minute.value(), Some(7.0));
+    /// ```
+    pub fn spelled(text: impl Into<String>, value: f32) -> Self {
+        if !value.is_finite() {
+            return Self::unavailable("no answer");
+        }
+        Reading::Value {
+            value,
+            text: text.into(),
+            fraction: None,
+            detail: None,
+        }
+    }
+
     /// A reading nothing measured, with the reason.
     pub fn unavailable(why: impl Into<String>) -> Self {
         Reading::Unavailable { why: why.into() }
@@ -490,6 +517,28 @@ mod tests {
 
     fn cell(text: &str) -> CellId {
         CellId::parse(text).expect("a usable cell id")
+    }
+
+    #[test]
+    fn a_reading_can_spell_its_own_text_and_keep_the_number_beside_it() {
+        // A clock shows `07`, and `whole` would show `7`: the leading zero is the
+        // reading, so the text is the plugin's to write.
+        let minute = Reading::spelled("07", 7.0);
+        assert_eq!(minute.text(), "07");
+        assert_eq!(minute.value(), Some(7.0));
+        assert!(
+            minute.same_face(&Reading::spelled("07", 7.0)),
+            "the same text is the same face"
+        );
+        assert!(
+            !minute.same_face(&Reading::spelled("08", 8.0)),
+            "a different minute is a repaint"
+        );
+        // A reading with no number at all is still the unavailable kind.
+        assert!(matches!(
+            Reading::spelled("--", f32::NAN),
+            Reading::Unavailable { .. }
+        ));
     }
 
     #[test]
