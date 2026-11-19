@@ -9,6 +9,17 @@ use crate::keys::KeyCombo;
 use crate::profiles::MAX_PAGE_NAME_CHARS;
 use crate::{ActionError, KeyComboError};
 
+/// Whether `text` is an address the shell resolves rather than a file.
+///
+/// A packaged app (`shell:AppsFolder\<AppUserModelId>`) and a registered URI
+/// (`steam://rungameid/…`) are both started by handing the address over, and
+/// neither is a path anything can be read from. One rule, in one place: the
+/// window asks it before reading a picture, and the tray crate before asking the
+/// shell for one.
+pub fn is_shell_address(text: &str) -> bool {
+    text.starts_with("shell:") || text.contains("://")
+}
+
 /// What a key does when it is pressed.
 ///
 /// The catalogue is deliberately small — a program to run, a URL to open, or a
@@ -325,6 +336,23 @@ impl Action {
         }
     }
 
+    /// What a key bound to this action should wear as its picture.
+    ///
+    /// A program starts itself, so its own file is its picture. A launch that
+    /// hands the shell an **address** instead — a packaged app, a registered URI —
+    /// wears the picture of that address: the program it runs is `explorer.exe`,
+    /// and Explorer's folder on a key that opens Minecraft is a lie about what the
+    /// key does. `None` for every action that is not a launch; those draw a glyph.
+    pub fn picture(&self) -> Option<&std::path::Path> {
+        match self {
+            Action::Launch { program, args } => match args.first() {
+                Some(first) if is_shell_address(first) => Some(std::path::Path::new(first)),
+                _ => Some(program),
+            },
+            _ => None,
+        }
+    }
+
     /// The full description, for the status line.
     pub fn describe(&self) -> String {
         match self {
@@ -452,6 +480,66 @@ fn strip_wrapping_quotes(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_launch_that_hands_the_shell_an_address_wears_that_address() {
+        // The picker binds a packaged app as `explorer.exe` with its address: the
+        // key must wear the app's mark, not Explorer's folder.
+        let packaged = Action::Launch {
+            program: std::path::PathBuf::from(r"C:\Windows\explorer.exe"),
+            args: vec![
+                r"shell:AppsFolder\Microsoft.4297127D64EC6_8wekyb3d8bbwe!Minecraft".to_string(),
+            ],
+        };
+        assert_eq!(
+            packaged.picture(),
+            Some(std::path::Path::new(
+                r"shell:AppsFolder\Microsoft.4297127D64EC6_8wekyb3d8bbwe!Minecraft"
+            ))
+        );
+
+        let game = Action::Launch {
+            program: std::path::PathBuf::from(r"C:\Windows\explorer.exe"),
+            args: vec!["steam://rungameid/993090".to_string()],
+        };
+        assert_eq!(
+            game.picture(),
+            Some(std::path::Path::new("steam://rungameid/993090"))
+        );
+    }
+
+    #[test]
+    fn a_launch_that_runs_a_program_wears_the_program() {
+        // An argument that is not an address is a parameter: the picture is still
+        // the program's own.
+        let with_arguments = Action::Launch {
+            program: std::path::PathBuf::from(r"C:\Program Files\Brave\brave.exe"),
+            args: vec!["--incognito".to_string()],
+        };
+        assert_eq!(
+            with_arguments.picture(),
+            Some(std::path::Path::new(r"C:\Program Files\Brave\brave.exe"))
+        );
+
+        let plain = Action::Launch {
+            program: std::path::PathBuf::from(r"C:\Program Files\Brave\brave.exe"),
+            args: Vec::new(),
+        };
+        assert_eq!(
+            plain.picture(),
+            Some(std::path::Path::new(r"C:\Program Files\Brave\brave.exe"))
+        );
+
+        // A key that opens a URL or sends a keystroke has no program to wear; the
+        // grid draws its glyph instead.
+        assert_eq!(
+            Action::OpenUrl {
+                url: "https://example.com".to_string()
+            }
+            .picture(),
+            None
+        );
+    }
 
     #[test]
     fn accepts_urls_with_a_scheme() {

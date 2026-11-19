@@ -162,9 +162,10 @@ pub fn program_icon(path: &Path) -> Option<IconPixels> {
 ///
 /// The list the picker offers holds both: a Start Menu entry is a path, and a
 /// packaged app or a game a launcher registered is an address the shell resolves.
+/// The rule is the engine's — one place decides what an address is, so a binding
+/// and a picker row cannot disagree about it.
 fn is_shell_address(path: &Path) -> bool {
-    let text = path.to_string_lossy();
-    text.starts_with("shell:") || text.contains("://")
+    ss550_engine::is_shell_address(&path.to_string_lossy())
 }
 
 /// Straight RGBA from a top-down DIB whose pixels are B, G, R, A.

@@ -228,9 +228,12 @@ impl IconCache {
         let mut letters: Vec<char> = Vec::new();
         for face in faces {
             let action = face.action;
-            if let Action::Launch { program, .. } = action {
-                if !programs.contains(program) {
-                    programs.push(program.clone());
+            // The picture belongs to what the key starts, not to the program that
+            // starts it: a packaged app is `explorer.exe` with an address, and
+            // Explorer's folder is not the Minecraft launcher.
+            if let Some(picture) = action.picture() {
+                if !programs.iter().any(|known| known == picture) {
+                    programs.push(picture.to_path_buf());
                 }
             }
             if let Action::OpenUrl { url } = action {
@@ -369,24 +372,24 @@ impl IconCache {
     pub(crate) fn artwork(&self, action: Option<&Action>) -> Artwork {
         match action {
             None => Artwork::None,
-            Some(Action::Launch { program, .. }) => match self.icons.get(program) {
-                Some(Some(_)) => Artwork::Icon,
-                _ => Artwork::Glyph,
+            Some(action) => match action.picture() {
+                Some(picture) => match self.icons.get(picture) {
+                    Some(Some(_)) => Artwork::Icon,
+                    _ => Artwork::Glyph,
+                },
+                None => match action {
+                    Action::OpenUrl { url } => match self.site_art(url) {
+                        Some(_) => Artwork::Icon,
+                        None => Artwork::Glyph,
+                    },
+                    // A keystroke and a navigation key have nothing of their own
+                    // to draw: the tile shows the initial of what they do, which
+                    // for navigation is the page's name. A plugin key's face is
+                    // the reading itself, which this cache does not compose, so
+                    // the grid draws the glyph and the deck receives the reading.
+                    _ => Artwork::Glyph,
+                },
             },
-            Some(Action::OpenUrl { url }) => match self.site_art(url) {
-                Some(_) => Artwork::Icon,
-                None => Artwork::Glyph,
-            },
-            // A keystroke and a navigation key have nothing of their own to
-            // draw: the tile shows the initial of what they do, which for
-            // navigation is the page's name. A plugin key's face is the reading
-            // itself, which this cache does not compose, so the grid draws the
-            // glyph and the deck receives the reading.
-            Some(Action::Keys { .. })
-            | Some(Action::Folder { .. })
-            | Some(Action::Back)
-            | Some(Action::Profile { .. })
-            | Some(Action::Plugin { .. }) => Artwork::Glyph,
         }
     }
 
@@ -473,14 +476,25 @@ impl IconCache {
     /// which picture a key wears.
     fn base_key(&self, action: &Action) -> Option<Base> {
         let letter = glyph_letter(action);
-        match action {
-            Action::Launch { program, .. } => match self.icons.get(program) {
-                Some(Some(_)) => Some(Base::Program(program.clone())),
+        // The picture belongs to what the key starts. A packaged app is an
+        // address the shell resolves, not the `explorer.exe` that hands it over:
+        // asking about the program would put Explorer's folder on the key.
+        if let Some(picture) = action.picture() {
+            return match self.icons.get(picture) {
+                Some(Some(_)) => Some(Base::Program(picture.to_path_buf())),
                 _ => self
                     .glyphs
                     .contains_key(&letter)
                     .then_some(Base::Glyph(letter)),
-            },
+            };
+        }
+        match action {
+            // A launch without a picture answered above only when the shell had
+            // one; a program whose icon could not be read draws its initial.
+            Action::Launch { .. } => self
+                .glyphs
+                .contains_key(&letter)
+                .then_some(Base::Glyph(letter)),
             Action::OpenUrl { url } => {
                 if let Some(host) = favicons::host_of(url) {
                     if matches!(self.sites.get(&host), Some(Some(_))) {
@@ -562,10 +576,13 @@ impl IconCache {
 /// empty.
 pub(crate) fn glyph_letter(action: &Action) -> char {
     match action {
-        Action::Launch { program, .. } => {
-            // The text is borrowed only for the length of this arm: the answer
-            // is one character, not a slice of a path that may be owned.
-            let text = program.to_string_lossy();
+        Action::Launch { .. } => {
+            // The address when there is one: a packaged app's key reads `M` for
+            // Minecraft, not `E` for the explorer.exe that starts it.
+            let text = action
+                .picture()
+                .map(|picture| picture.to_string_lossy().to_string())
+                .unwrap_or_default();
             first_letter(last_segment(&text))
         }
         Action::OpenUrl { url } => first_letter(host_of(url)),
