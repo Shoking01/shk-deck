@@ -14,10 +14,17 @@
 //! privilege it still starts, reports that it cannot read the chip, and stays
 //! useful for nothing — which is a sentence in its log, not a crash.
 //!
+//! It has **no window**. A console sitting on the desktop all day would be a
+//! program asking to be closed, so the binary is built for the Windows GUI
+//! subsystem: the logon task starts it and nothing appears. Started from a
+//! terminal it still prints, because it inherits that terminal's handles — the
+//! subsystem decides whether a *new* console is created, not whether output works.
+//!
 //! ```text
-//! ss550-sensor-helper            # serve on the fixed port
+//! ss550-sensor-helper            # serve on the fixed port, silently
 //! ss550-sensor-helper --once     # read once, print, exit (support tool)
 //! ```
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};

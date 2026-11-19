@@ -1,15 +1,46 @@
-# Registers the sensor helper as a logon task with highest privileges, so it can
-# open PawnIO's driver while Sh-Deck itself stays unprivileged.
+# Installs the sensor helper and registers it as a logon task with highest
+# privileges, so it can open PawnIO's driver while Sh-Deck itself stays
+# unprivileged.
+#
+# One command, run elevated, and it does the whole job:
+#
+#   Start-Process powershell -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -File <this file>"
+#
+# It stops the helper that is running (the file is locked while it serves), copies
+# the binary beside the controller, registers the task again and starts it. The
+# helper has no window: it is built for the Windows GUI subsystem, so the logon
+# task produces no console, no tray icon and nothing to close.
+param(
+    [string]$Source = ""
+)
+
+$ErrorActionPreference = "Stop"
 $log = Join-Path $env:TEMP "sensor-helper-install.log"
 try {
-    Get-Process -Name "ss550-sensor-helper" -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Sleep -Milliseconds 500
-
-    $exe = Join-Path $env:LOCALAPPDATA "Programs\ss550\ss550-sensor-helper.exe"
-    if (-not (Test-Path $exe)) {
-        "missing: $exe" | Set-Content $log
+    if (-not $Source) {
+        # Beside the script, or a build of this repository.
+        $here = $PSScriptRoot
+        $repo = Join-Path $here "..\..\..\.."
+        $candidates = @(
+            (Join-Path $here "ss550-sensor-helper.exe"),
+            (Join-Path $repo "target\release\ss550-sensor-helper.exe"),
+            (Join-Path $repo "target\debug\ss550-sensor-helper.exe")
+        )
+        $Source = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    }
+    if (-not $Source -or -not (Test-Path $Source)) {
+        "missing: no ss550-sensor-helper.exe to install (looked beside the script and in target\release, target\debug)" | Set-Content $log
         exit 1
     }
+
+    # The running helper holds its own file open, so it goes first.
+    Get-Process -Name "ss550-sensor-helper" -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Milliseconds 800
+
+    $folder = Join-Path $env:LOCALAPPDATA "Programs\ss550"
+    New-Item -ItemType Directory -Force -Path $folder | Out-Null
+    $exe = Join-Path $folder "ss550-sensor-helper.exe"
+    Copy-Item (Resolve-Path $Source) $exe -Force
 
     $action = New-ScheduledTaskAction -Execute $exe
     $trigger = New-ScheduledTaskTrigger -AtLogOn
@@ -17,7 +48,8 @@ try {
 
     Register-ScheduledTask -TaskName "Sh-Deck sensors" -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
     Start-ScheduledTask -TaskName "Sh-Deck sensors"
-    "registered and started: $exe" | Set-Content $log
+    "installed $Source`nregistered and started: $exe" | Set-Content $log
 } catch {
     "failed: $($_.Exception.Message)" | Set-Content $log
+    exit 1
 }

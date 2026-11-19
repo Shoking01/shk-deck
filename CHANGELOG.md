@@ -44,6 +44,12 @@ messages; the file below is a human summary, not a substitute for
   in the colour the Stats page would give it: white, amber past the warning line,
   red past the limit, both now the user's. No hover needed; the tooltip is still
   there for the whole sentence.
+- The **sensor helper has no window**: the binary is built for the Windows GUI
+  subsystem, so the logon task no longer leaves a console on the desktop. It is
+  still a process — the processor's thermal register only opens to an elevated
+  one — but it is invisible, about 300 KB, and reachable only on loopback. The
+  installer now copies the binary itself, so one elevated command redoes the
+  whole thing.
 - With the window closed, the **tray icon's tooltip says what the machine is doing**:
   `Sh-Deck · CPU 20% · CPU °C 55°C · GPU 63% · GPU °C 62°C · RAM 55% · DISK 52%`, or the
   link's state when there is no deck. Renamed only when the sentence changes,

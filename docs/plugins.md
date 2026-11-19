@@ -114,10 +114,32 @@ So the privilege lives in a separate, tiny program:
 - It is registered as a logon task with highest privileges
   (`resources/install-sensor-helper.ps1`, once, with one UAC prompt), so it
   starts with the session and never asks again.
+- **It has no window.** The binary is built for the Windows GUI subsystem, so the
+  logon task produces no console, no tray icon and nothing to close: it is a
+  process you only find in Task Manager, about 300 KB of it. Started from a
+  terminal it still prints (`--once` is the support tool), because a subsystem
+  decides whether a *new* console is created, not whether output works; from
+  PowerShell, redirect it (`ss550-sensor-helper --once > out.txt`) since a program
+  without a console is not waited for.
 - Sh-Deck and the window stay **unprivileged**. The plugin asks the helper first,
   falls back to opening the driver itself (which works if the app happened to be
   started elevated), and then to LibreHardwareMonitor — and the key's caption says
   which answered: `SMU`, `SMU`, or `LHM`.
+
+**Why it is a second process at all.** The processor's thermal register sits behind
+a kernel driver, and that driver opens only to an elevated process. There are
+three places that privilege can live:
+
+| where | the app itself | consequences |
+|---|---|---|
+| in Sh-Deck | runs elevated | every window bug, every plugin, every URL fetch and every file the app writes becomes administrator; drag and drop from a normal Explorer stops working |
+| in a helper (this) | stays unprivileged | one ~300 KB process with no window, reachable only on loopback, answering one number |
+| nowhere | no CPU temperature | the key shows a dash with a reason, and LibreHardwareMonitor is the only route |
+
+The middle one is what this project chose, and `AGENTS.md` states it as a rule:
+the window stays unprivileged. A Windows *service* would be the tidier home for the
+same privilege — no logon task, restarts by itself, no console even in theory — and
+it is the upgrade path if the task ever proves flaky.
 
 The channel is loopback TCP, which is not authenticated: any local process could
 read the number (a temperature is not a secret) and one could bind the port first

@@ -187,6 +187,17 @@ registered, so the SDK alone answers nothing.
   bitmap as characters so a digit can be looked at before it ships. Three digits
   fall back to thin dots rather than vanishing at the hundreds. 65 tray tests, 194
   GUI tests, and the tray's ignored rename test re-run: passing.
+- **T18 — no terminal on the desktop.** `ss550-sensor-helper` is built for the
+  Windows GUI subsystem, so the logon task creates no console at all; the
+  installer now copies the binary itself instead of assuming someone had, so one
+  elevated command redoes the whole installation. Route: inline. **Done.** The
+  built exe's PE subsystem field reads 2 (GUI) where the installed one read 3
+  (console) — that is the mechanism, checked at the binary, not inferred. Run
+  unelevated, a new instance never produced a window handle in 2 s of polling and
+  exited with two explanatory lines on stderr; `--once` still prints when the
+  output is redirected. **Not yet live**: the running helper holds its own file
+  open, so replacing it needs one elevated run of the script — the running process
+  keeps its console until then.
 
 ## Log
 
