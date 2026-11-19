@@ -8,10 +8,17 @@ use sysinfo::{Disks, System};
 
 use ss550_plugin_api::Reading;
 
+/// What a reading says when the counters behind it never opened.
+///
+/// `sysinfo` 0.40 made both constructors fallible — an enumeration the platform
+/// refuses, a session that may not look — and nothing in this program can fix
+/// that. A dash with a reason is what every other absent sensor gets.
+const NO_COUNTERS: &str = "the machine's counters did not open";
+
 /// The machine's own counters, kept between samples.
 pub(crate) struct Machine {
-    system: System,
-    disks: Disks,
+    system: Option<System>,
+    disks: Option<Disks>,
 }
 
 impl Machine {
@@ -21,50 +28,54 @@ impl Machine {
     /// here and the sampler's warm-up does the second: without it the first
     /// sample of every session would read a confident zero.
     pub(crate) fn new() -> Self {
-        let mut system = System::new_all();
-        system.refresh_cpu_usage();
         Self {
-            system,
-            disks: Disks::new_with_refreshed_list(),
+            system: System::new_all().ok().map(|mut system| {
+                system.refresh_cpu_usage();
+                system
+            }),
+            disks: Disks::new_with_refreshed_list().ok(),
         }
     }
 
     /// How busy every core is together, with the number of threads beside it.
     pub(crate) fn cpu(&mut self) -> Reading {
-        self.system.refresh_cpu_usage();
-        let threads = self.system.cpus().len();
-        let busy = self.system.global_cpu_usage();
+        let Some(system) = self.system.as_mut() else {
+            return Reading::unavailable(NO_COUNTERS);
+        };
+        system.refresh_cpu_usage();
+        let threads = system.cpus().len();
+        let busy = system.global_cpu_usage();
         Reading::percent(busy).with_detail(format!("{threads} threads"))
     }
 
     /// How much memory is in use, in percent and in gigabytes.
     pub(crate) fn memory(&mut self) -> Reading {
-        self.system.refresh_memory();
-        memory_reading(self.system.used_memory(), self.system.total_memory())
+        let Some(system) = self.system.as_mut() else {
+            return Reading::unavailable(NO_COUNTERS);
+        };
+        system.refresh_memory();
+        memory_reading(system.used_memory(), system.total_memory())
     }
 
     /// How much room is free on the disk Windows is installed on.
     pub(crate) fn disk(&mut self) -> Reading {
+        let Some(disks) = self.disks.as_mut() else {
+            return Reading::unavailable(NO_COUNTERS);
+        };
         // Refreshing the listed disks, not the list: enumerating storage on
         // every sample is a walk of the machine for a number that only changes
-        // when a drive is plugged in.
-        self.disks.refresh();
+        // when a drive is plugged in. `false` is that rule, said in the argument
+        // 0.40 added.
+        disks.refresh(false);
         let drive = system_drive();
-        match self
-            .disks
-            .list()
+        match disks
             .iter()
             .find(|disk| is_system_disk(&disk.mount_point().to_string_lossy(), &drive))
         {
             // The caption names the disk: the number means nothing without the
             // volume it belongs to, and the fallback below is a different volume.
             Some(disk) => disk_reading(disk.available_space(), disk.total_space(), &drive),
-            None => match self
-                .disks
-                .list()
-                .iter()
-                .max_by_key(|disk| disk.total_space())
-            {
+            None => match disks.iter().max_by_key(|disk| disk.total_space()) {
                 // A machine that mounts something else first still has a disk;
                 // the largest one is the least surprising answer when the system
                 // drive cannot be recognised — and the caption says which.

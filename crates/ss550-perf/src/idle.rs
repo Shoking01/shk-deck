@@ -102,10 +102,14 @@ const INTERVAL: Duration = Duration::from_millis(500);
 /// Watches `pid` for `window` and returns what it cost.
 pub fn measure(pid: u32, window: Duration) -> Result<Report, String> {
     let pid = Pid::from_u32(pid);
-    let mut system = System::new();
-    let kind = ProcessRefreshKind::new().with_cpu().with_memory();
+    let mut system =
+        System::new().map_err(|error| format!("the process list did not open: {error}"))?;
+    let kind = ProcessRefreshKind::nothing().with_cpu().with_memory();
 
-    if system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), kind) == 0 {
+    // `true` removes a process that has gone since the last look, which is what
+    // the watcher wants: a pid that dies mid-window must leave the list rather
+    // than be reported from its last breath.
+    if system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, kind) == 0 {
         return Err(format!(
             "no process with pid {pid} is running; start the controller first"
         ));
@@ -116,7 +120,7 @@ pub fn measure(pid: u32, window: Duration) -> Result<Report, String> {
     let mut report = Report::default();
     while started.elapsed() < window {
         std::thread::sleep(INTERVAL);
-        system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), kind);
+        system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, kind);
         let Some(process) = system.process(pid) else {
             return Err(format!("pid {pid} left during the measurement"));
         };
