@@ -16,7 +16,13 @@
 //!   of `PawnIOLib.dll` and an AMD module blob (LGPL-2.1, shipped with its
 //!   notices), and never writes a register.
 //!
+//! Both sensors are Windows: the driver and the library exist nowhere else, so the
+//! types that talk to them do too. The helper protocol in [`helper`] is plain
+//! loopback and compiles anywhere.
+//!
 //! ```
+//! # #[cfg(windows)]
+//! # fn main() {
 //! use ss550_sensors::Gpu;
 //!
 //! // `None` on a machine whose driver does not install ADL, or without a
@@ -24,6 +30,11 @@
 //! if let Some(gpu) = Gpu::open() {
 //!     let _ = gpu.temperature();
 //! }
+//! # }
+//! // An empty program where the card's library does not exist, so this example is
+//! // still compiled — and checked — on every platform the workspace is built on.
+//! # #[cfg(not(windows))]
+//! # fn main() {}
 //! ```
 //!
 //! Every call is read-only, and every failure is an `Option`, never a panic:
