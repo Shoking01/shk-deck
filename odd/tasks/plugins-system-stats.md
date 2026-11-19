@@ -199,6 +199,17 @@ registered, so the SDK alone answers nothing.
   and it was gone 90 s later. The binary was replaced while its task was stopped,
   so the installed exe is now the GUI-subsystem build: `MainWindowTitle` empty
   where the old one showed its own path.
+- **T20 — the release, and nothing left running at logon.** The installer script had
+  two defects that only the elevated run exposed: `..\..\..\..` missed the
+  repository root by one level, so it never found a binary to install, and Windows
+  PowerShell 5.1 cannot pipe an `if`, so the script failed to parse before that.
+  Both fixed, then run elevated. Route: inline. **Done.** The registered task now
+  reads `<Triggers />` — nothing starts it at logon — and the helper it left behind
+  answered with `pid 6888, no window`. The window was then built for release and
+  started with `--hidden`, exactly as the sign-in entry does: it refreshed the
+  installed copy (`Get-FileHash` equal to `target\release\ss550-gui.exe`),
+  connected (`15 keys · 5 columns · 112x112 images`, first frame after 257 ms) and
+  started the helper on its own first sample.
 
 ## Log
 
@@ -304,3 +315,4 @@ registered, so the SDK alone answers nothing.
   sample that needs a processor temperature, gone ninety seconds after nothing
   asks. The stats themselves were already where they were wanted — the Stats page
   in the window and the cells bound to the deck's keys — and are unchanged.
+- **L11** (user, verbatim): "Puedes ejecutar ese proceso y proceder a hacer el release de esta nueva versión con las stats para que sea la que se abre de inicio". Done as T20: the elevated script run, and the release build installed as the sign-in copy.

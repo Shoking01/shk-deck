@@ -18,9 +18,10 @@ $ErrorActionPreference = "Stop"
 $log = Join-Path $env:TEMP "sensor-helper-install.log"
 try {
     if (-not $Source) {
-        # Beside the script, or a build of this repository.
+        # Beside the script, or a build of this repository (resources -> crate ->
+        # crates -> repository root).
         $here = $PSScriptRoot
-        $repo = Join-Path $here "..\..\..\.."
+        $repo = Join-Path $here "..\..\.."
         $candidates = @(
             (Join-Path $here "ss550-sensor-helper.exe"),
             (Join-Path $repo "target\release\ss550-sensor-helper.exe"),
@@ -55,11 +56,13 @@ try {
     Start-ScheduledTask -TaskName "Sh-Deck sensors"
     Start-Sleep -Seconds 2
     $up = Get-Process -Name "ss550-sensor-helper" -ErrorAction SilentlyContinue
-    if ($up) {
+    # Windows PowerShell cannot pipe an `if`, so the text is built first.
+    $report = if ($up) {
         "installed $Source`nregistered and started: $exe`nthe helper answered: pid $($up.Id), no window"
     } else {
         "installed $Source`nregistered: $exe (did not start; run it from Sh-Deck)"
-    } | Set-Content $log
+    }
+    $report | Set-Content $log
 } catch {
     "failed: $($_.Exception.Message)" | Set-Content $log
     exit 1
