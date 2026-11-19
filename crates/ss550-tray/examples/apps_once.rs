@@ -41,6 +41,13 @@ fn main() {
         if !app.arguments().is_empty() {
             println!("          args: {}", app.arguments().join(" "));
         }
+        // The picture is the second half of "why is this row missing something":
+        // an entry with no icon draws its initial on the key.
+        let icon = match ss550_tray::appicon::program_icon(app.target()) {
+            Some(icon) => format!("{}x{}", icon.width(), icon.height()),
+            None => "none".to_string(),
+        };
+        println!("          icon: {icon}");
     }
 
     println!(

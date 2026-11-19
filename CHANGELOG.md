@@ -24,7 +24,12 @@ messages; the file below is a human summary, not a substitute for
   list used to collapse each family into a single row.
 - `cargo run -p ss550-tray --example apps_once` prints what the scan found, with
   an optional name filter: it answers "why is this application not in the list"
-  without a debugger.
+  without a debugger — including whether its icon could be read.
+- The **picture of a packaged app** comes from the shell's image factory
+  (`IShellItemImageFactory`), not from a file's resources: an app registered in
+  `AppsFolder` has no file whose icon could be read, so Calculator, the Store and
+  the Minecraft launcher were drawing a bare initial. They now draw their own
+  mark, at the 256-pixel size the shell keeps.
 
 
 - A cell states which **face** its key wears: `Gauge` (the label, the number, the
