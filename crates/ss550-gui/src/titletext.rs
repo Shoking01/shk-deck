@@ -393,8 +393,10 @@ fn scrim(
     for y in y0.min(height)..y1.min(height) {
         for x in x0.min(width)..x1.min(width) {
             let pixel = picture.get_pixel_mut(x, y);
-            for channel in 0..3 {
-                pixel.0[channel] = ((u16::from(pixel.0[channel]) * SCRIM_KEEP) / 255) as u8;
+            // The three colour channels are dimmed; alpha is left alone, so the
+            // band darkens the picture instead of cutting a hole in it.
+            for channel in pixel.0.iter_mut().take(3) {
+                *channel = ((u16::from(*channel) * SCRIM_KEEP) / 255) as u8;
             }
         }
     }
