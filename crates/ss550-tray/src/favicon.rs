@@ -58,6 +58,11 @@
 //! }
 //! ```
 
+// The three budgets below belong to the WinINet fetch, which is compiled out off
+// Windows; nothing else reads them there, and their values are still a statement
+// worth keeping beside the code that would use them.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 /// The largest body this module accepts, in bytes.
 ///
 /// A favicon is a handful of kilobytes. A few hundred kilobytes is generous for

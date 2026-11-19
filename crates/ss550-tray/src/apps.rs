@@ -224,14 +224,23 @@ mod tests {
         }
     }
 
+    /// A path inside a Start Menu folder, built the way the host spells it.
+    ///
+    /// Not typed as `C:\Start Menu\...`: a backslash is a separator only on
+    /// Windows, so on Linux and macOS those literals are one long file name and
+    /// these tests would be asking a different question from the one they name.
+    fn start_menu(name: &str) -> PathBuf {
+        PathBuf::from("Start Menu").join(name)
+    }
+
     #[test]
     fn the_name_is_the_stem_and_not_the_file_name() {
         assert_eq!(
-            application_name(&PathBuf::from(r"C:\Start Menu\Brave.lnk")).as_deref(),
+            application_name(&start_menu("Brave.lnk")).as_deref(),
             Some("Brave")
         );
         assert_eq!(
-            application_name(&PathBuf::from(r"C:\Start Menu\Notepad.EXE")).as_deref(),
+            application_name(&start_menu("Notepad.EXE")).as_deref(),
             Some("Notepad"),
             "the extension's case does not change what it is"
         );
@@ -239,18 +248,9 @@ mod tests {
 
     #[test]
     fn a_file_that_is_not_an_application_has_no_name() {
-        assert_eq!(
-            application_name(&PathBuf::from(r"C:\Start Menu\readme.txt")),
-            None
-        );
-        assert_eq!(
-            application_name(&PathBuf::from(r"C:\Start Menu\.lnk")),
-            None
-        );
-        assert_eq!(
-            application_name(&PathBuf::from(r"C:\Start Menu\Brave")),
-            None
-        );
+        assert_eq!(application_name(&start_menu("readme.txt")), None);
+        assert_eq!(application_name(&start_menu(".lnk")), None);
+        assert_eq!(application_name(&start_menu("Brave")), None);
     }
 
     #[test]
