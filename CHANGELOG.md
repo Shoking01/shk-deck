@@ -7,7 +7,26 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
-### Added — the clock's key is a number, and it wears the key's font
+### Added — the application picker lists what the shell knows, not only the Start Menu
+- The `CHOOSE AN APP` list now includes **packaged apps** — Settings, Calculator,
+  Photos, Paint, Terminal, the Microsoft Store, and anything else registered in
+  the shell's `AppsFolder` — which have no shortcut to walk to. A key starts one
+  by handing `shell:AppsFolder\<AppUserModelId>` to the shell, and the picker
+  fills `ARGUMENTS` with exactly that.
+- The same walk now adds a **file the folder publishes** (`Riot Client`) and a
+  **registered URI** a launcher installs (`steam://rungameid/…`), so a game
+  without an executable of its own is a row like any other. Web pages (`https://`)
+  are deliberately left out: `OPEN URL` is the action for those.
+- A shortcut's **arguments** are read and carried with it, and two shortcuts are
+  one application only when they start the same program *the same way*. Visual
+  Studio's six developer prompts are one `cmd.exe` with six argument lines, and
+  VLC's "skinned" and "reset preferences" entries are one `vlc.exe` twice; the
+  list used to collapse each family into a single row.
+- `cargo run -p ss550-tray --example apps_once` prints what the scan found, with
+  an optional name filter: it answers "why is this application not in the list"
+  without a debugger.
+
+
 - A cell states which **face** its key wears: `Gauge` (the label, the number, the
   caption and the bar — what a percentage wants) or `Number` (the number alone,
   centred and as large as the tile allows). `clock` asks for `Number`, so its keys

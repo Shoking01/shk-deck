@@ -1,9 +1,11 @@
 //! The applications installed on this PC, as the `RUN APP` editor offers them.
 //!
 //! The list comes from [`ss550_tray::installed_apps`], which walks the Start Menu
-//! and resolves every shortcut it finds. This module adds the one thing the tray
-//! crate does not do — the picture each entry is drawn with — and the state the
-//! picker needs while it is being scanned.
+//! and resolves every shortcut it finds, then adds the apps the shell keeps in
+//! `AppsFolder` — Settings, Calculator, anything from the Store, and the games a
+//! launcher registers with it. This module adds the one thing the tray crate does
+//! not do — the picture each entry is drawn with — and the state the picker needs
+//! while it is being scanned.
 //!
 //! ## When the work happens
 //!
@@ -35,8 +37,12 @@ pub(crate) struct AppChoice {
     /// What goes in the field. The shortcut when there is one, so the runner
     /// hands it to the shell exactly as Explorer would.
     pub(crate) program: PathBuf,
-    /// The program behind it, shown under the name so two entries that look
-    /// alike can be told apart.
+    /// The arguments that go with it, one per entry. Empty for a Start Menu
+    /// entry; a packaged app is named entirely by its only argument.
+    pub(crate) arguments: Vec<String>,
+    /// The program behind it, or the shell's own address for a packaged app.
+    /// What the icon is read from, and what the row shows under the name so two
+    /// entries that look alike can be told apart.
     pub(crate) target: PathBuf,
     /// The application's own icon, read once at scan time.
     pub(crate) icon: Option<Arc<RenderImage>>,
@@ -95,7 +101,8 @@ pub(crate) fn scan() -> Vec<AppChoice> {
         .into_iter()
         .map(|app| AppChoice {
             name: app.name().to_string(),
-            program: app.shortcut().to_path_buf(),
+            program: app.program().to_path_buf(),
+            arguments: app.arguments().to_vec(),
             target: app.target().to_path_buf(),
             // The program, not the shortcut: the scan already resolved the link,
             // and asking about the shortcut again would be a second COM object
@@ -136,6 +143,7 @@ mod tests {
         AppChoice {
             name: name.to_string(),
             program: PathBuf::from(format!("C:\\Start Menu\\{name}.lnk")),
+            arguments: Vec::new(),
             target: PathBuf::from(target),
             icon: None,
         }

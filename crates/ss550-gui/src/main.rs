@@ -3014,11 +3014,18 @@ impl Controller {
         };
         let name = choice.name.clone();
         let program = choice.program.clone();
+        let arguments = choice.arguments.join("\n");
+        // The picture is the application's, not the launcher's: a packaged app is
+        // started by `explorer.exe`, so asking about the program would put
+        // Explorer's icon on a key that opens Settings.
+        let icon_source = choice.target.clone();
         let text = program.display().to_string();
 
         self.program_input
             .update(cx, |state, cx| state.set_value(text, window, cx));
-        self.draft_program = Some(program);
+        self.args_input
+            .update(cx, |state, cx| state.set_value(arguments, window, cx));
+        self.draft_program = Some(icon_source);
         self.rebuild_icons();
         self.app_picker_open = false;
         // The next time the list opens it opens whole: the search was for the

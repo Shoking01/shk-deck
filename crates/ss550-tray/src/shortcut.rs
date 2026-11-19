@@ -55,6 +55,15 @@ pub(crate) fn resolve(path: &Path) -> Option<PathBuf> {
     platform::resolve(path)
 }
 
+/// The arguments a shortcut starts its target with, already split.
+///
+/// Empty for a link that states none, `None` when the link cannot be read at all.
+/// A shortcut is not only a path: six Visual Studio prompts are one `cmd.exe`
+/// with six argument lines, and without this they are one row in the list.
+pub(crate) fn arguments(path: &Path) -> Option<Vec<String>> {
+    platform::arguments(path)
+}
+
 /// The path whose icon stands for `path`: the target of a shortcut, or `path`.
 ///
 /// The answer is never `None`. A link that does not resolve — a stale shortcut,
@@ -224,6 +233,80 @@ mod platform {
         Some(PathBuf::from(String::from_utf16_lossy(&buffer[..end])))
     }
 
+    /// The arguments one shortcut starts its target with, when it has any.
+    ///
+    /// A `.lnk` is not just a path: Visual Studio's six developer prompts are all
+    /// `cmd.exe` with different arguments, and VLC's "skinned" and "reset
+    /// preferences" entries are the same `vlc.exe` twice. Without this, the list
+    /// collapses them into one row and the other five are unreachable.
+    pub(super) fn arguments(path: &Path) -> Option<Vec<String>> {
+        enter()?;
+
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        // SAFETY: the same call as `resolve`: a constant class id, no outer
+        // object, and both interfaces are released before this returns.
+        let link: IShellLinkW =
+            unsafe { CoCreateInstance(&ShellLink, None::<&IUnknown>, CLSCTX_INPROC_SERVER) }
+                .ok()?;
+        let file: IPersistFile = link.cast().ok()?;
+        // SAFETY: a live nul-terminated string, read-only, never written back.
+        unsafe { file.Load(PCWSTR(wide.as_ptr()), STGM_READ) }.ok()?;
+
+        let mut buffer = [0u16; PATH_CHARS];
+        // SAFETY: the buffer is a live array whose length is passed with it.
+        unsafe { link.GetArguments(&mut buffer) }.ok()?;
+
+        drop(file);
+        drop(link);
+
+        let end = buffer
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(buffer.len());
+        Some(split_arguments(&String::from_utf16_lossy(&buffer[..end])))
+    }
+
+    /// Splits a shortcut's argument line into the arguments it starts with.
+    ///
+    /// Windows stores the line as it was typed in the shortcut's properties, so
+    /// the rule that matters is the shell's own: text inside double quotes is one
+    /// argument with the quotes removed, and everything else is split on
+    /// whitespace. A quote that never closes takes the rest of the line, which is
+    /// the reading a person would have meant.
+    fn split_arguments(line: &str) -> Vec<String> {
+        let mut arguments = Vec::new();
+        let mut current = String::new();
+        let mut quoted = false;
+        let mut started = false;
+        for character in line.chars() {
+            match character {
+                '"' => {
+                    quoted = !quoted;
+                    started = true;
+                }
+                whitespace if whitespace.is_whitespace() && !quoted => {
+                    if started {
+                        arguments.push(std::mem::take(&mut current));
+                        started = false;
+                    }
+                }
+                kept => {
+                    current.push(kept);
+                    started = true;
+                }
+            }
+        }
+        if started {
+            arguments.push(current);
+        }
+        arguments
+    }
+
     /// Writes a new link that starts `target`.
     ///
     /// The wide buffers live in this frame and outlive every call that is handed
@@ -278,6 +361,10 @@ mod platform {
     use std::path::{Path, PathBuf};
 
     pub(super) fn resolve(_path: &Path) -> Option<PathBuf> {
+        None
+    }
+
+    pub(super) fn arguments(_path: &Path) -> Option<Vec<String>> {
         None
     }
 }
