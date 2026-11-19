@@ -42,13 +42,24 @@ try {
     $exe = Join-Path $folder "ss550-sensor-helper.exe"
     Copy-Item (Resolve-Path $Source) $exe -Force
 
+    # No trigger: the task is started by Sh-Deck when it needs a temperature and
+    # ends on its own a minute after the window is gone (or immediately, if the
+    # window asks it to). A privileged process that starts at logon and stays is a
+    # process nobody remembers to close.
     $action = New-ScheduledTaskAction -Execute $exe
-    $trigger = New-ScheduledTaskTrigger -AtLogOn
     $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
 
-    Register-ScheduledTask -TaskName "Sh-Deck sensors" -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+    Register-ScheduledTask -TaskName "Sh-Deck sensors" -Action $action -Principal $principal -Force | Out-Null
+
+    # Prove the registration works once, then leave nothing running.
     Start-ScheduledTask -TaskName "Sh-Deck sensors"
-    "installed $Source`nregistered and started: $exe" | Set-Content $log
+    Start-Sleep -Seconds 2
+    $up = Get-Process -Name "ss550-sensor-helper" -ErrorAction SilentlyContinue
+    if ($up) {
+        "installed $Source`nregistered and started: $exe`nthe helper answered: pid $($up.Id), no window"
+    } else {
+        "installed $Source`nregistered: $exe (did not start; run it from Sh-Deck)"
+    } | Set-Content $log
 } catch {
     "failed: $($_.Exception.Message)" | Set-Content $log
     exit 1

@@ -105,11 +105,6 @@ pub(crate) fn run(
                 TrayMessage::SetTooltip(text) => {
                     let _ = tray.set_tooltip(Some(text));
                 }
-                TrayMessage::SetIcon(pixels) => {
-                    if let Ok(icon) = Icon::from_rgba(pixels, ICON_SIZE, ICON_SIZE) {
-                        let _ = tray.set_icon(Some(icon));
-                    }
-                }
             }
         }
 

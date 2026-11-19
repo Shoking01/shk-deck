@@ -59,6 +59,69 @@ pub fn is_running() -> bool {
     ask().is_some()
 }
 
+/// The task the installer registers for the helper.
+///
+/// It has **no trigger**: nothing starts it at logon, and nothing leaves it
+/// running after the window is gone. Sh-Deck asks for it, and it goes away on its
+/// own once nothing is asking — see [`IDLE`] in the helper binary.
+pub const TASK: &str = "Sh-Deck sensors";
+
+/// How long between two attempts to start the task.
+///
+/// The sampler walks the machine every two seconds; spawning a process that often
+/// because a task is not installed would be worse than the dash it is trying to
+/// avoid.
+const START_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// When the task was last asked to start, so a failure is not retried every tick.
+static LAST_START: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// Asks Windows to start the helper, if it is worth asking right now.
+///
+/// This is how the privileged process gets to be part of Sh-Deck without Sh-Deck
+/// being privileged: the task is registered once with highest privileges, and an
+/// ordinary process can *run* a task it owns without a prompt. The answer is
+/// whether the request was made, not whether the helper came up — nobody can
+/// promise that from here, and [`is_running`] is what tells.
+pub fn ensure_running() -> bool {
+    if is_running() {
+        return true;
+    }
+    let mut guard = LAST_START
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.is_some_and(|at| at.elapsed() < START_BACKOFF) {
+        return false;
+    }
+    *guard = Some(std::time::Instant::now());
+    drop(guard);
+    schtasks(&["/run", "/tn", TASK])
+}
+
+/// Asks Windows to stop the helper now, instead of waiting for it to notice.
+pub fn stop() -> bool {
+    schtasks(&["/end", "/tn", TASK])
+}
+
+/// Runs `schtasks` with the arguments, without a console of its own.
+fn schtasks(arguments: &[&str]) -> bool {
+    let mut command = std::process::Command::new("schtasks");
+    command
+        .args(arguments)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // A console flashing up on the desktop for a task command would be
+        // exactly the window this whole design exists to avoid.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command.status().is_ok_and(|status| status.success())
+}
+
 /// One request, one answer.
 fn ask() -> Option<String> {
     let address: SocketAddr = format!("127.0.0.1:{PORT}").to_socket_addrs().ok()?.next()?;

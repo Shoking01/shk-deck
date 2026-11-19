@@ -6461,6 +6461,7 @@ dependencies = [
  "ss550-engine",
  "ss550-plugin-api",
  "ss550-plugins",
+ "ss550-sensors",
  "ss550-tray",
  "thiserror 2.0.21",
 ]

@@ -28,6 +28,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -40,63 +41,91 @@ const SAMPLE: Duration = Duration::from_secs(1);
 /// How long a client may take to send its request.
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long the helper keeps existing without being asked anything.
+///
+/// Longer than the app's own sample period by a wide margin, so a slow frame or a
+/// suspended machine does not kill the source, and short enough that nothing
+/// privileged outlives the window for long.
+const IDLE: u64 = 90_000;
+
 fn main() {
     if std::env::args().any(|argument| argument == "--once") {
         match Cpu::open() {
-            Some(cpu) => println!(
+            Some(cpu) => say(&format!(
                 "{HEADER} cpu={}",
                 cpu.temperature()
                     .map_or("-".to_string(), |value| format!("{value:.1}"))
-            ),
-            None => println!("{HEADER} cpu=- (PawnIO's driver refused this process)"),
+            )),
+            None => say(&format!(
+                "{HEADER} cpu=- (PawnIO's driver refused this process)"
+            )),
         }
         return;
     }
 
     let reading = Arc::new(Mutex::new(None));
+    let asked = Arc::new(AtomicU64::new(now_millis()));
     {
         let reading = Arc::clone(&reading);
+        let asked = Arc::clone(&asked);
         std::thread::Builder::new()
             .name("sensor-helper-sampler".to_string())
-            .spawn(move || sample(reading))
+            .spawn(move || sample(reading, asked))
             .expect("the sampling thread must start");
     }
 
+    // A read per connection, so the socket can wait for ever; the watchdog is
+    // what ends the process when Sh-Deck stops asking.
     let listener = match TcpListener::bind(("127.0.0.1", PORT)) {
         Ok(listener) => listener,
         Err(error) => {
             // Another copy is already answering, which is the good outcome.
-            eprintln!("ss550-sensor-helper: cannot listen on {PORT}: {error}");
+            warn(&format!(
+                "ss550-sensor-helper: cannot listen on {PORT}: {error}"
+            ));
             return;
         }
     };
-    println!("ss550-sensor-helper: listening on 127.0.0.1:{PORT}");
+    warn(&format!(
+        "ss550-sensor-helper: listening on 127.0.0.1:{PORT}"
+    ));
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                asked.store(now_millis(), Ordering::Relaxed);
                 let value = *reading
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if let Err(error) = answer(stream, value) {
-                    eprintln!("ss550-sensor-helper: could not answer: {error}");
+                    warn(&format!("ss550-sensor-helper: could not answer: {error}"));
                 }
             }
-            Err(error) => eprintln!("ss550-sensor-helper: connection failed: {error}"),
+            Err(error) => warn(&format!("ss550-sensor-helper: connection failed: {error}")),
         }
     }
 }
 
-/// Reads the processor on a loop until the process ends.
-fn sample(reading: Arc<Mutex<Option<f32>>>) {
+/// Reads the processor on a loop, and leaves when nothing has asked for a while.
+///
+/// The helper belongs to the controller, not to the machine: Sh-Deck starts it,
+/// Sh-Deck's samples keep it alive, and a minute after the window is gone it
+/// stops existing. A privileged process outliving the thing that needs it is a
+/// process nobody remembers to close.
+fn sample(reading: Arc<Mutex<Option<f32>>>, asked: Arc<AtomicU64>) {
     let mut cpu = Cpu::open();
     if cpu.is_none() {
-        eprintln!(
-            "ss550-sensor-helper: PawnIO refused this process; run it elevated (a scheduled task with highest privileges)"
-        );
+        warn("ss550-sensor-helper: PawnIO refused this process; run it elevated (a scheduled task with highest privileges)");
     }
 
     loop {
+        let since = now_millis().saturating_sub(asked.load(Ordering::Relaxed));
+        if since > IDLE {
+            warn(&format!(
+                "ss550-sensor-helper: nothing has asked for {IDLE} ms; leaving"
+            ));
+            std::process::exit(0);
+        }
         let value = match cpu.as_mut() {
             Some(cpu) => cpu.temperature(),
             None => None,
@@ -106,6 +135,31 @@ fn sample(reading: Arc<Mutex<Option<f32>>>) {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = value;
         std::thread::sleep(SAMPLE);
     }
+}
+
+/// Milliseconds since an arbitrary point, for the idle check.
+fn now_millis() -> u64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// Says something on stdout, and does not care whether anyone is listening.
+///
+/// The binary has no console, so the handles are null when the logon task starts
+/// it, and `println!` panics when the write fails — a panic here is a helper that
+/// dies silently and a temperature that stops arriving. These lines are for a
+/// redirected run (`ss550-sensor-helper --once > out.txt`), not for a desktop.
+fn say(text: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stdout(), "{text}");
+}
+
+/// The same, for the lines that are diagnostics.
+fn warn(text: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{text}");
 }
 
 /// Answers one client: it says `GET` (or anything), it gets the reading.

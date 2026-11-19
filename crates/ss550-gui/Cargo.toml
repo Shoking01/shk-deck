@@ -28,6 +28,7 @@ ss550-driver = { path = "../ss550-driver" }
 ss550-engine = { path = "../ss550-engine" }
 ss550-plugin-api = { path = "../ss550-plugin-api" }
 ss550-plugins = { path = "../ss550-plugins" }
+ss550-sensors = { path = "../ss550-sensors" }
 ss550-tray = { path = "../ss550-tray" }
 raw-window-handle = "0.6"
 thiserror = "2.0"

@@ -176,17 +176,6 @@ Ryzen Master SDK's files are installed, but its driver
 (`AMDRyzenMasterDriver.sys`) is **not** in `System32\drivers` and no service is
 registered, so the SDK alone answers nothing.
 
-- **T17 — the number in the icon.** `ss550_tray::icon::badge_with_digits` draws one
-  to three digits on a rounded dark badge, and the window decides which number: the
-  **hottest** temperature, tinted by the same `thresholds` the Stats page uses.
-  Redrawn only when the digits or the colour change. Route: inline. **Done.**
-  Checked live on this taskbar: `58` in white under the defaults, then `59` in amber
-  after writing `degrees: warn 30` — badge and card obey one rule. The first
-  drawing used two-pixel dots and the shell's non-integer downscale turned them
-  grey; four-pixel dots survive it, and `examples/icon_preview.rs` prints the
-  bitmap as characters so a digit can be looked at before it ships. Three digits
-  fall back to thin dots rather than vanishing at the hundreds. 65 tray tests, 194
-  GUI tests, and the tray's ignored rename test re-run: passing.
 - **T18 — no terminal on the desktop.** `ss550-sensor-helper` is built for the
   Windows GUI subsystem, so the logon task creates no console at all; the
   installer now copies the binary itself instead of assuming someone had, so one
@@ -198,6 +187,18 @@ registered, so the SDK alone answers nothing.
   output is redirected. **Not yet live**: the running helper holds its own file
   open, so replacing it needs one elevated run of the script — the running process
   keeps its console until then.
+- **T19 — the helper belongs to the window.** The task is registered with **no
+  trigger**; Sh-Deck starts it when a processor temperature is wanted
+  (`helper::ensure_running`, with a thirty-second back-off so a missing task is not
+  a spawned process every two seconds) and stops it on a tray quit
+  (`helper::stop`). The helper itself leaves after ninety seconds of no requests,
+  which also covers a window that crashed. Route: inline. **Done.** Proved live,
+  unelevated throughout: `schtasks /end` and `/run` both answer SUCCESS without a
+  prompt on this Highest task; starting the window brought the helper up in 2 s
+  with `window=0`, key #12 read `55 °C SMU`; killing the window (not a clean quit)
+  and it was gone 90 s later. The binary was replaced while its task was stopped,
+  so the installed exe is now the GUI-subsystem build: `MainWindowTitle` empty
+  where the old one showed its own path.
 
 ## Log
 
@@ -292,3 +293,14 @@ registered, so the SDK alone answers nothing.
   first, and the channel closing is the whole stop signal.
 - **L8** (user, verbatim): "Vamos con el Tooltip". T15.
 - **L9** (user, verbatim): "Procede con el umbral". T16.
+- **L10** (user, verbatim): "Mi objetivo es. Que tengamos las stats dentro de la
+  app y obviamente visibles en la deck fisica. Que corran con SH-Deck y no sea un
+  proceso visible ni una ventana abierta ni corriendo en la barra de
+  herramientas. Y volver al logo anterior en lugar de la temp mas alta".
+  The tray number was reverted: `badge_with_digits`, `set_icon` and
+  `tray_number` are gone, and the notification area carries the application's own
+  badge again. The tooltip stays. The helper was kept and made to follow the
+  window instead of the session: no trigger on its task, started by the first
+  sample that needs a processor temperature, gone ninety seconds after nothing
+  asks. The stats themselves were already where they were wanted — the Stats page
+  in the window and the cells bound to the deck's keys — and are unchanged.

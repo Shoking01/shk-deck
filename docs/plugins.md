@@ -111,16 +111,23 @@ So the privilege lives in a separate, tiny program:
   the processor once a second, and answers one question on
   `127.0.0.1:47821`: `ss550-sensors/1 cpu=59.0`. It accepts no command, writes no
   file and touches no hardware beyond reading that register.
-- It is registered as a logon task with highest privileges
-  (`resources/install-sensor-helper.ps1`, once, with one UAC prompt), so it
-  starts with the session and never asks again.
-- **It has no window.** The binary is built for the Windows GUI subsystem, so the
-  logon task produces no console, no tray icon and nothing to close: it is a
-  process you only find in Task Manager, about 300 KB of it. Started from a
-  terminal it still prints (`--once` is the support tool), because a subsystem
-  decides whether a *new* console is created, not whether output works; from
-  PowerShell, redirect it (`ss550-sensor-helper --once > out.txt`) since a program
-  without a console is not waited for.
+- It is registered **once** as a task with highest privileges and **no trigger**
+  (`resources/install-sensor-helper.ps1`, one UAC prompt). Nothing starts it at
+  logon: Sh-Deck asks for it when it needs a temperature, which an ordinary
+  process can do for a task it owns — no prompt, ever again.
+- **It belongs to the window.** When the window starts, the first sample that
+  needs a processor temperature starts the helper (it appears in about two
+  seconds). Ninety seconds after nothing asks — the window closed, or crashed —
+  the helper leaves on its own; quitting from the tray ends it immediately. Proved
+  live: killed the window, the helper was gone 90 s later, and gone from Task
+  Manager without a click.
+- **It has no window.** The binary is built for the Windows GUI subsystem, so
+  there is no console, no tray icon, nothing to close: a process you only find in
+  Task Manager, about 240 KB of it. Started from a terminal it still prints
+  (`--once` is the support tool), because a subsystem decides whether a *new*
+  console is created, not whether output works; from PowerShell, redirect it
+  (`ss550-sensor-helper --once > out.txt`) since a program without a console is
+  not waited for.
 - Sh-Deck and the window stay **unprivileged**. The plugin asks the helper first,
   falls back to opening the driver itself (which works if the app happened to be
   started elevated), and then to LibreHardwareMonitor — and the key's caption says
@@ -138,8 +145,8 @@ three places that privilege can live:
 
 The middle one is what this project chose, and `AGENTS.md` states it as a rule:
 the window stays unprivileged. A Windows *service* would be the tidier home for the
-same privilege — no logon task, restarts by itself, no console even in theory — and
-it is the upgrade path if the task ever proves flaky.
+same privilege — no task to run on demand, restarts by itself, no console even in
+theory — and it is the upgrade path if the scheduled task ever proves flaky.
 
 The channel is loopback TCP, which is not authenticated: any local process could
 read the number (a temperature is not a secret) and one could bind the port first

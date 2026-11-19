@@ -40,16 +40,13 @@ messages; the file below is a human summary, not a substitute for
   the two cannot disagree about what a key is.
 - The editor gained a fourth kind, `LIVE STAT`, which lists the cells of this
   build and binds one the same way an app or a URL is bound.
-- The **tray icon wears the hottest temperature**, two big digits on a dark badge,
-  in the colour the Stats page would give it: white, amber past the warning line,
-  red past the limit, both now the user's. No hover needed; the tooltip is still
-  there for the whole sentence.
-- The **sensor helper has no window**: the binary is built for the Windows GUI
-  subsystem, so the logon task no longer leaves a console on the desktop. It is
-  still a process — the processor's thermal register only opens to an elevated
-  one — but it is invisible, about 300 KB, and reachable only on loopback. The
-  installer now copies the binary itself, so one elevated command redoes the
-  whole thing.
+- The **sensor helper belongs to the window**: it is registered once as a task with
+  highest privileges and **no trigger**, started by Sh-Deck when it needs a
+  temperature, and gone within ninety seconds of the window closing (or at once,
+  when the window quits). It has no window either — the binary is built for the
+  Windows GUI subsystem — so the privileged process is only ever visible in Task
+  Manager. The installer copies the binary itself, so one elevated command redoes
+  the whole thing.
 - With the window closed, the **tray icon's tooltip says what the machine is doing**:
   `Sh-Deck · CPU 20% · CPU °C 55°C · GPU 63% · GPU °C 62°C · RAM 55% · DISK 52%`, or the
   link's state when there is no deck. Renamed only when the sentence changes,
