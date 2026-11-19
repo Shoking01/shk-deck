@@ -94,7 +94,9 @@ fn metric_card(
     let cell = spec.cell().clone();
     let reading = controller.samples.get(&plugin, &cell).cloned();
     let series = controller.history.series(&plugin, &cell);
-    let severity = reading.as_ref().map_or(Severity::Quiet, history::severity);
+    let severity = reading.as_ref().map_or(Severity::Quiet, |reading| {
+        crate::thresholds::severity(reading, &controller.thresholds)
+    });
     let ink = tone(severity, tokens);
 
     let value = reading

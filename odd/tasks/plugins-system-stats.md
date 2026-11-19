@@ -142,6 +142,32 @@ The user's own words for the outcome (verbatim, from the request):
   prints, on this machine, `cpu.temp — no sensor` plus the sentence naming
   LibreHardwareMonitor and the missing ACPI zone.
 
+- **T15 — the numbers outside the window.** `tray_text` composes
+  `Sh-Deck · CPU 20% · …` from the same snapshot the keys are painted from, and
+  `refresh_tray_tooltip` renames the icon only when the sentence changes, bounded
+  to 120 of the 127 characters a taskbar tooltip shows; a tray that stops
+  answering is dropped once with a sentence instead of being retried every tick.
+  Route: inline. **Done.** The pure part has a test (readings, dashes, all three
+  link states, the bound); the hop to the icon thread has an ignored test in
+  `ss550-tray` that spawns a real icon and renames it twice, run here and passing.
+  The live tooltip cannot be read back — Windows 11 hides taskbar buttons from UI
+  Automation, which was tried and returned zero — so the evidence is the two
+  tests, not a screenshot. Commit `35d7ef0`.
+- **T16 — the lines are the user's.** `crates/ss550-gui/src/thresholds.rs`:
+  `Lines`/`Thresholds`/`Kind`, a hand-written JSON round trip that ships with the
+  project's taste for small, readable files, `severity(reading, &limits)` in place
+  of the constants that used to live in `history`, and a `THRESHOLDS` card in
+  **Settings** with `WARN − 80 +  LIMIT − 95 +` per kind. Route: inline. **Done.**
+  193 GUI tests, of which five are the new model's (defaults in order, a pair
+  clamped into its kind and kept in order, a reading judged by the lines in force,
+  the file reading back what was written, and a file that is not the shape this
+  build writes). Checked live: a `thresholds.json` of 5/10 turned every Stats card
+  red; three presses of `+` on a share warning stopped at 9 with the limit at 10;
+  the status line said `Thresholds saved.`; and a file of garbage reported itself
+  inside the card in amber while the defaults took over — that last one used to
+  vanish in under a second, because the deck connecting overwrites the status
+  line. This commit.
+
 Probe (this machine, for the record): `atiadlxx.dll` loads and exports
 `ADL2_Main_Control_Create` and `ADL2_New_QueryPMLogData_Get`, so the **GPU**
 temperature is readable natively. `MSAcpi_ThermalZoneTemperature` exists as a
@@ -241,3 +267,5 @@ registered, so the SDK alone answers nothing.
   thread while the job channel was still open, so the worker could never leave
   its `recv()`; a test run hung and had to be killed. The sender is now taken
   first, and the channel closing is the whole stop signal.
+- **L8** (user, verbatim): "Vamos con el Tooltip". T15.
+- **L9** (user, verbatim): "Procede con el umbral". T16.

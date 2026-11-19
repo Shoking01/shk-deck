@@ -186,9 +186,13 @@ The **Stats** page draws one card per cell: the number, the source it came from
 (`SMU`, `ADL`, `LHM`, `ACPI`, or the detail the plugin wrote), and the last four
 minutes of samples as a sparkline — one bar per sample, two seconds apart.
 
-- A card turns **amber** past a warning line and **red** at the limit. The lines
-  are 80 and 95, and they mean the same thing to a person: a processor at 80 °C is
-  uncomfortable and one at 95 °C is about to throttle.
+- A card turns **amber** past a warning line and **red** at the limit. Those two
+  lines are the user's, not this program's: **Settings → Thresholds** edits them,
+  one pair for percentages (judged out of a hundred) and one for temperatures (in
+  degrees), and they are saved to `thresholds.json` beside the profiles. The
+  warning line is always kept below the limit, so a pair cannot be made to say
+  nothing; a file this build cannot read is reported in the same card and the
+  defaults (80 and 95) are used instead.
 - A **share** is always drawn 0–100, so a processor moving between 41 and 43 %
   looks calm. A temperature is drawn against its own range, so its shape shows at
   all; a value that never moves is drawn as a level line in the middle.

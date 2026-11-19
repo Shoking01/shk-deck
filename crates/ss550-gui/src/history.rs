@@ -5,10 +5,11 @@
 //! actually asks — *is it rising?* — so the window keeps the last few minutes of
 //! each cell.
 //!
-//! The model is deliberately small and pure: a ring of numbers per cell, a
-//! severity per kind of measurement, and nothing about pixels. The page that
-//! draws it is `ui::stats`, and it can be tested without a window because the
-//! rules are here.
+//! The model is deliberately small and pure: a ring of numbers per cell, the
+//! shape of a series, and nothing about pixels. The page that draws it is
+//! `ui::stats`, and it can be tested without a window because the rules are
+//! here. What counts as *bad* is not decided here: those lines belong to the
+//! user and live in `thresholds`.
 
 use std::collections::BTreeMap;
 
@@ -30,54 +31,6 @@ pub(crate) enum Severity {
     Warn,
     /// At or past the limit.
     Alarm,
-}
-
-/// The two lines a kind of measurement is judged by.
-///
-/// Percentages and temperatures share the same numbers because they mean the same
-/// thing to a person over a desk: a processor at 80 °C is uncomfortable and one at
-/// 95 °C is about to throttle; a chip at 80 % load is busy and one at 95 % is
-/// saturated. A value with no scale — a count, a size — is never judged.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Thresholds {
-    /// At or above this, the reading is marked.
-    pub(crate) warn: f32,
-    /// At or above this, it is marked hard.
-    pub(crate) alarm: f32,
-}
-
-/// The thresholds a reading is judged by, from what the reading itself says.
-pub(crate) fn thresholds_for(reading: &Reading) -> Option<Thresholds> {
-    // A percentage and a temperature are the two kinds that carry a scale a
-    // person reads at a glance; a size in gigabytes does not.
-    let text = reading.text();
-    if text.ends_with('%') {
-        return Some(Thresholds {
-            warn: 80.0,
-            alarm: 95.0,
-        });
-    }
-    if text.contains('°') {
-        return Some(Thresholds {
-            warn: 80.0,
-            alarm: 95.0,
-        });
-    }
-    None
-}
-
-/// How bad one reading is.
-pub(crate) fn severity(reading: &Reading) -> Severity {
-    let (Some(value), Some(limits)) = (reading.value(), thresholds_for(reading)) else {
-        return Severity::Quiet;
-    };
-    if value >= limits.alarm {
-        Severity::Alarm
-    } else if value >= limits.warn {
-        Severity::Warn
-    } else {
-        Severity::Quiet
-    }
 }
 
 /// The history of one cell: the numbers it reported, oldest first.
@@ -173,22 +126,6 @@ mod tests {
         let mut history = History::new();
         history.record(&plugin, &cell, &Reading::unavailable("no sensor"));
         assert!(history.series(&plugin, &cell).is_empty());
-    }
-
-    #[test]
-    fn percentages_and_temperatures_are_judged_and_sizes_are_not() {
-        assert_eq!(severity(&Reading::percent(42.0)), Severity::Quiet);
-        assert_eq!(severity(&Reading::percent(80.0)), Severity::Warn);
-        assert_eq!(severity(&Reading::percent(96.0)), Severity::Alarm);
-        assert_eq!(severity(&Reading::temperature(59.0)), Severity::Quiet);
-        assert_eq!(severity(&Reading::temperature(82.0)), Severity::Warn);
-        assert_eq!(severity(&Reading::temperature(99.0)), Severity::Alarm);
-        // A size has no scale a person reads at a threshold.
-        let size = Reading::whole(12.0, " GB");
-        assert_eq!(thresholds_for(&size), None);
-        assert_eq!(severity(&size), Severity::Quiet);
-        // And an unavailable reading is never alarmed about.
-        assert_eq!(severity(&Reading::unavailable("none")), Severity::Quiet);
     }
 
     #[test]

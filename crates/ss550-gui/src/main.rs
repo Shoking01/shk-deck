@@ -62,6 +62,7 @@ mod plugintile;
 mod provider;
 mod render;
 mod session;
+mod thresholds;
 mod titlestyle;
 mod titletext;
 mod ui;
@@ -942,6 +943,18 @@ struct Controller {
     /// Written from the same sample the keys are painted from, so the graph and
     /// the key can never disagree about the last number.
     history: history::History,
+    /// The lines the Stats page paints a card by, and the Settings page edits.
+    ///
+    /// Loaded once at start and changed only from that page, where a click saves
+    /// it and the page is redrawn with the new value.
+    thresholds: thresholds::Thresholds,
+    /// What went wrong the last time the lines were read or written, said inside
+    /// the card that owns them.
+    ///
+    /// The status line is not the place for it: the deck connecting overwrites that
+    /// line within a second, and a message about a saved setting that vanishes
+    /// before it is read has not been said.
+    thresholds_note: Option<String>,
     /// The tooltip the tray icon is showing right now.
     ///
     /// The tray is renamed only when this changes: a message to another thread
@@ -1167,6 +1180,10 @@ impl Controller {
         // that exists and cannot be read replaces the startup note: the user's
         // choice was lost, and that matters more than "looking for the deck".
         let (title_style, title_style_note) = titlestyle::load();
+        // The lines the Stats page paints by. A file that cannot be read is a
+        // sentence in the status line, not a refusal to start.
+        let (thresholds, thresholds_note) = thresholds::load();
+        let startup_note = thresholds_note.clone().or(title_style_note);
 
         let mut controller = Self {
             session: None,
@@ -1175,7 +1192,7 @@ impl Controller {
             } else {
                 Link::Connecting
             },
-            note: title_style_note
+            note: startup_note
                 .unwrap_or_else(|| match worker_error {
                     Some(err) => err,
                     None if blind => "Started without looking for a deck.".into(),
@@ -1255,6 +1272,8 @@ impl Controller {
             face_tiles: BTreeMap::new(),
             faces_gone: None,
             history: history::History::new(),
+            thresholds,
+            thresholds_note,
             tray_tooltip: String::new(),
         };
 
@@ -3867,6 +3886,27 @@ impl Controller {
         self.samples = samples;
         self.record_history();
         self.repaint_changed_readings()
+    }
+
+    /// Applies new lines for the Stats page and saves them.
+    ///
+    /// The file is written first, so the sentence the status line carries is about
+    /// the save and not about a redraw: a write that failed leaves the value in
+    /// force for this run, and the user is told it will not survive a restart.
+    fn set_thresholds(&mut self, thresholds: thresholds::Thresholds, cx: &mut Context<Self>) {
+        if self.thresholds == thresholds {
+            return;
+        }
+        self.thresholds = thresholds;
+        let saved = thresholds::save(&self.thresholds);
+        self.note = match &saved {
+            Ok(()) => "Thresholds saved.".into(),
+            Err(error) => format!("Thresholds changed but not saved: {error}").into(),
+        };
+        // The card keeps the bad news as well: the status line is overwritten the
+        // next time the deck reports in, and this one has to survive that.
+        self.thresholds_note = saved.err();
+        cx.notify();
     }
 
     /// Keeps the tray icon's tooltip saying what the machine is doing.
