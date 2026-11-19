@@ -80,6 +80,16 @@ pub fn command_for(action: &Action) -> Result<CommandSpec, ActionError> {
         Action::Keys { keys } => Err(ActionError::KeysNotAProgram {
             keys: keys.to_string(),
         }),
+        // A reading is drawn where the keys are drawn: the runner has no window
+        // and no place to put one.
+        Action::Plugin { cell, .. } => Err(ActionError::ReadingIsNotRunnable {
+            action: format!("STAT {cell}"),
+        }),
+        // Navigation changes what the deck is showing, which is the window's
+        // business: it owns the page stack and the keys drawn from it.
+        other => Err(ActionError::NavigationIsNotRunnable {
+            action: other.summary(),
+        }),
     }
 }
 
@@ -136,6 +146,7 @@ fn label_for(action: &Action) -> String {
         // started, so this arm is not reachable; it is here so the match stays
         // total, and it names the combination rather than inventing a label.
         Action::Keys { keys } => keys.to_string(),
+        other => other.summary(),
     }
 }
 
@@ -154,6 +165,9 @@ fn start_error(action: &Action, source: std::io::Error) -> ActionError {
         // failure is reported as what it is instead of a made-up launch.
         Action::Keys { keys } => ActionError::KeysNotAProgram {
             keys: keys.to_string(),
+        },
+        other => ActionError::NavigationIsNotRunnable {
+            action: other.summary(),
         },
     }
 }

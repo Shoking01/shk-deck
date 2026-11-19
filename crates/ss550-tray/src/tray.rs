@@ -170,3 +170,19 @@ impl Drop for TrayHost {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TrayHost;
+
+    #[test]
+    #[ignore = "spawns a notification-area icon on this desktop"]
+    fn the_icon_can_be_renamed_while_it_runs() {
+        // The message travels to the thread that owns the icon and is applied
+        // there; `set_tooltip` answering `Ok` is that hop succeeding, which is the
+        // half the window depends on when it says what the machine is doing.
+        let tray = TrayHost::spawn("Sh-Deck").expect("an icon on this desktop");
+        assert!(tray.set_tooltip("Sh-Deck - CPU 55 C").is_ok());
+        assert!(tray.set_tooltip("Sh-Deck - connected").is_ok());
+    }
+}

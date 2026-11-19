@@ -21,6 +21,8 @@
 use std::io::Cursor;
 use std::time::Duration;
 
+use hidapi::HidApi;
+
 use deck_api::{
     ButtonState as SeamButtonState, Capabilities, Deck, DeckError, DeckOperation, Geometry,
     ImageFormat, ImageSpec, KeyEvent, KeyId, Transport, TransportError, VALUE_MAX, VALUE_MIN,
@@ -92,6 +94,39 @@ impl Ss550Deck {
         Device::connect_with_timeout(timeout).map(Self::from_device)
     }
 
+    /// Connects with a caller-owned [`HidApi`], waiting up to `timeout` for the
+    /// deck's boot to settle.
+    ///
+    /// Hold one of these for the life of the process: every fresh `HidApi` is a
+    /// full walk of the machine's HID devices, and this is the reuse that turns
+    /// a reconnect into a cheap question instead.
+    pub fn connect_with_api_timeout(
+        api: &mut HidApi,
+        timeout: Duration,
+    ) -> Result<Self, Ss550Error> {
+        Device::connect_with_api_timeout(api, timeout).map(Self::from_device)
+    }
+
+    /// Opens the deck at a device path the caller already knows.
+    ///
+    /// The cheap half of discovery: no bus walk, one named device. See
+    /// [`Device::connect_at_path_with`] for why holding one [`HidApi`] matters.
+    pub fn connect_at_path(
+        api: &HidApi,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<Self, Ss550Error> {
+        Device::connect_at_path_with(api, path, timeout).map(Self::from_device)
+    }
+
+    /// The device path this deck was opened from, when the platform has one.
+    ///
+    /// Persist it: the next start can pass it to
+    /// [`Ss550Deck::connect_at_path`] and skip discovery entirely.
+    pub fn device_path(&self) -> Option<String> {
+        self.device.device_path()
+    }
+
     /// Wraps a caller-supplied transport instead of a device.
     ///
     /// This is the seam made usable without hardware: the tests and the
@@ -139,7 +174,11 @@ impl Ss550Deck {
         Self::from_device(Device::over_transport(transport))
     }
 
-    fn from_device(device: Device) -> Self {
+    /// Wraps a device the caller already opened.
+    ///
+    /// Used by [crate::Locator], which keeps the HID context and the path
+    /// between attempts.
+    pub(crate) fn from_device(device: Device) -> Self {
         Self { device }
     }
 

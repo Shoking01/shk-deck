@@ -27,23 +27,40 @@ use ss550_engine::{AssetLibrary, AssetName};
 
 /// Copies `path` into `library` and answers the name the key should show.
 ///
+/// A name the library already holds is **not** a failure: the file the user
+/// picked is, by its name, the picture the library already has, and refusing it
+/// would tell them "no" for choosing something they can see in their own folder.
+/// It answers [`Imported::AlreadyHeld`] so the window can say what happened and
+/// show it anyway; the bytes already there are left alone.
+///
 /// # Errors
 ///
-/// The engine's own sentence, unchanged. It is what the status line shows, and
-/// it already says which of the refusals happened — the name is unusable, the
-/// file is not a file, it is over the size limit, or the library already holds
-/// that name — in the user's words rather than this crate's. Restating it here
-/// would be a second copy of the rules that could drift from the first.
-pub(crate) fn import(library: &AssetLibrary, path: &Path) -> Result<AssetName, String> {
-    library
-        .import(path)
-        .map(|asset| asset.name)
-        .map_err(|error| error.to_string())
+/// The engine's own sentence, unchanged, for every other refusal — the name is
+/// unusable, the file is not a file, or it is over the size limit. It is what the
+/// status line shows, and it already names the problem in the user's words.
+pub(crate) fn import(library: &AssetLibrary, path: &Path) -> Result<Imported, String> {
+    match library.import(path) {
+        Ok(asset) => Ok(Imported::New(asset.name)),
+        Err(ss550_engine::AssetError::Exists(name)) => {
+            let name = AssetName::parse(name).map_err(|error| error.to_string())?;
+            Ok(Imported::AlreadyHeld(name))
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// What an import did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Imported {
+    /// The file was copied in under this name.
+    New(AssetName),
+    /// The library already had a file under this name; nothing was copied.
+    AlreadyHeld(AssetName),
 }
 
 #[cfg(test)]
 mod tests {
-    use super::import;
+    use super::{import, Imported};
     use ss550_engine::AssetLibrary;
     use std::fs;
     use std::path::PathBuf;
@@ -68,8 +85,11 @@ mod tests {
         fs::write(&source, b"pretend this is a png").expect("a file to import");
         let library = AssetLibrary::new(scratch.join("assets"));
 
-        let name = import(&library, &source).expect("the file is imported");
+        let imported = import(&library, &source).expect("the file is imported");
 
+        let Imported::New(name) = imported else {
+            panic!("a new file is a new name");
+        };
         assert_eq!(name.as_str(), "live.png");
         assert!(
             library.resolve(&name).is_file(),
@@ -78,19 +98,21 @@ mod tests {
     }
 
     #[test]
-    fn a_name_the_library_already_holds_is_refused_and_nothing_is_replaced() {
-        // The dialog can hand back a file the library already has, and an import
-        // never overwrites a picture the user curated. The engine's sentence is
-        // the one the status line shows, so it is the one asserted here.
+    fn a_name_the_library_already_holds_is_shown_not_refused() {
+        // The library here holds thousands of pictures the user dropped in, so
+        // picking one of them again is the normal case, not an error: the key
+        // should show the picture they chose. Nothing is overwritten.
         let scratch = scratch("exists");
         let source = scratch.join("live.png");
         fs::write(&source, b"first").expect("a file to import");
         let library = AssetLibrary::new(scratch.join("assets"));
-        let first = import(&library, &source).expect("the first import");
+        let Imported::New(first) = import(&library, &source).expect("the first import") else {
+            panic!("the first import is a new name");
+        };
 
-        let error = import(&library, &source).expect_err("the second import is refused");
+        let imported = import(&library, &source).expect("the second import is not an error");
 
-        assert!(error.contains("already holds"), "{error}");
+        assert_eq!(imported, Imported::AlreadyHeld(first.clone()));
         assert_eq!(
             fs::read(library.resolve(&first)).expect("the library copy"),
             b"first",

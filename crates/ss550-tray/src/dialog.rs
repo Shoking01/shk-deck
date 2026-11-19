@@ -19,15 +19,32 @@
 //!
 //! `GetOpenFileNameW` runs the dialog's own message loop on the calling thread
 //! and returns when the user answers. It is therefore a click, never a frame:
-//! the caller blocks while the dialog is up, and the window behind it does not
-//! repaint until it closes. That is how a modal dialog behaves, and it is why
-//! nothing here is called from a render.
+//! the caller blocks while the dialog is up.
+//!
+//! ## Which thread opens it
+//!
+//! A thread that already owns a message loop — the one a window toolkit
+//! dispatches on — must not be the one that calls this. The dialog pumps its own
+//! loop, so messages arrive at the outer toolkit from inside a call the outer
+//! loop made: a second, re-entrant dispatch on a thread that is already inside
+//! one. GPUI answers that with a panic (the app is borrowed twice), and any
+//! toolkit with the same invariant answers it the same way.
+//!
+//! So the window opens this on a worker thread and reads the answer back as
+//! state. [`open_image_owned_by`] takes the window the dialog is modal to, so it
+//! still disables the right window and centres on it.
 //!
 //! # Example
 //!
 //! ```no_run
-//! // Called from a click: this blocks until the user answers.
-//! if let Some(path) = ss550_tray::dialog::open_image() {
+//! // Opened on a worker thread: the dialog pumps its own message loop, so the
+//! // thread that dispatches the window's messages must not be the one that
+//! // calls it.
+//! let (sender, answer) = std::sync::mpsc::channel();
+//! std::thread::spawn(move || {
+//!     let _ = sender.send(ss550_tray::dialog::open_image_owned_by(None));
+//! });
+//! if let Some(path) = answer.recv().ok().flatten() {
 //!     println!("importing {}", path.display());
 //! }
 //! ```
@@ -63,10 +80,52 @@ pub const FILTER_LABEL: &str = "Pictures";
 ///
 /// # Blocking
 ///
-/// This does not return until the user answers, so it must be called from a
-/// click and never from a frame.
+/// This does not return until the user answers: it runs the dialog's own modal
+/// message loop on the calling thread. A window that owns an event loop must
+/// therefore call it from a worker thread — see the module documentation for
+/// why — and read the answer back as state. [`open_image_owned_by`] is the same
+/// call with a window for the dialog to be modal to.
 pub fn open_image() -> Option<PathBuf> {
-    platform::open_image()
+    open_image_owned_by(None)
+}
+
+/// [`open_image`], with the window the dialog belongs to.
+///
+/// `owner` is the native handle of the window the dialog is modal to: Windows
+/// disables it while the dialog is up and puts the dialog in front of it, which
+/// is what stops the user from painting a key while they are choosing the
+/// picture for it. `None` behaves exactly like [`open_image`] — the dialog
+/// stands on its own, which is the right answer for a caller with no window.
+///
+/// The handle is an `isize`, the same currency [`crate::hide_window`] and
+/// [`crate::show_window`] take, so a caller needs no platform handle type to ask
+/// for a dialog. A handle that no longer names a window is not a failure: the
+/// dialog opens without an owner.
+///
+/// # Example
+///
+/// ```no_run
+/// # let hwnd = 0isize;
+/// // On a worker thread; the answer comes back as state.
+/// let path = ss550_tray::dialog::open_image_owned_by(Some(hwnd));
+/// # let _ = path;
+/// ```
+pub fn open_image_owned_by(owner: Option<isize>) -> Option<PathBuf> {
+    platform::open_image(owner)
+}
+
+/// Enables the window that owned the dialog, and brings it back to the front.
+///
+/// Windows disables an owner window while a modal dialog is up and enables it
+/// again when the dialog ends. This dialog runs on a thread of its own, so the
+/// window enables itself explicitly once the answer is in hand: if the worker
+/// died between the two, the owner would stay disabled for the life of the
+/// process, and a disabled window ignores the mouse without saying why.
+///
+/// Called with `None` it does nothing, so a build without a window can call it
+/// unconditionally.
+pub fn release_owner(owner: Option<isize>) {
+    platform::release_owner(owner);
 }
 
 /// The file patterns the dialog accepts, as one filter entry spells them.
@@ -108,6 +167,7 @@ mod platform {
     use std::path::PathBuf;
 
     use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::UI::Controls::Dialogs::{
         CommDlgExtendedError, GetOpenFileNameW, COMMON_DLG_ERRORS, OFN_EXPLORER, OFN_FILEMUSTEXIST,
@@ -126,7 +186,7 @@ mod platform {
     const PATH_UNITS: usize = 1024;
 
     /// Opens the dialog and reads the path it answered with.
-    pub(super) fn open_image() -> Option<PathBuf> {
+    pub(super) fn open_image(owner: Option<isize>) -> Option<PathBuf> {
         // The Pictures folder is a known folder, and the shell answers those
         // through COM. A thread that cannot enter an apartment still gets the
         // dialog — it just opens in the working directory.
@@ -138,6 +198,14 @@ mod platform {
 
         let mut dialog = OPENFILENAMEW {
             lStructSize: size_of::<OPENFILENAMEW>() as u32,
+            // The window the dialog is modal to. It may belong to another
+            // thread — that is how a dialog is opened from a worker without
+            // giving up the window it belongs to — and a null handle is the
+            // documented "no owner", which is what `None` means here.
+            hwndOwner: match owner {
+                Some(hwnd) => HWND(hwnd as *mut c_void),
+                None => HWND::default(),
+            },
             lpstrFilter: PCWSTR(filter.as_ptr()),
             // One-based: the first entry of the filter block, which is the only
             // one there is.
@@ -173,6 +241,30 @@ mod platform {
         // is whatever was there before, which is nothing.
         let length = buffer.iter().position(|unit| *unit == 0)?;
         Some(PathBuf::from(OsString::from_wide(&buffer[..length])))
+    }
+
+    /// Enables the owner window again, and brings it forward.
+    ///
+    /// `EnableWindow` is the call that undoes the disable Windows performs when
+    /// a modal dialog opens on an owner. Doing it here means the window cannot
+    /// stay disabled because the dialog's thread ended before Windows would
+    /// have re-enabled it.
+    pub(super) fn release_owner(owner: Option<isize>) {
+        use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+        use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+
+        let Some(hwnd) = owner else {
+            return;
+        };
+        // SAFETY: the handle is the one the window passed in; both calls take
+        // it by value and only act on the window it names. A handle that is no
+        // longer valid makes both fail, and the results are ignored on purpose:
+        // there is nothing to repair in that case.
+        unsafe {
+            let hwnd = HWND(hwnd as *mut c_void);
+            let _ = EnableWindow(hwnd, true);
+            let _ = SetForegroundWindow(hwnd);
+        }
     }
 
     /// Writes the dialog's own error code to stderr, in a build that has one.
@@ -233,9 +325,12 @@ mod platform {
     ///
     /// The window keeps working: a key with no picture shows its colour, and the
     /// button that would open a dialog answers "no file was chosen".
-    pub(super) fn open_image() -> Option<PathBuf> {
+    pub(super) fn open_image(_owner: Option<isize>) -> Option<PathBuf> {
         None
     }
+
+    /// No modal dialog, so no owner was ever disabled.
+    pub(super) fn release_owner(_owner: Option<isize>) {}
 }
 
 #[cfg(test)]

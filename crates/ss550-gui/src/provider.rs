@@ -28,13 +28,16 @@ pub enum ConnectError {
     Other(String),
 }
 
-/// Opens the deck, waiting up to `timeout` for its boot to settle.
+/// Opens the deck through the process's locator, waiting up to `timeout`.
 ///
 /// The returned deck has not been woken yet: the first paint, clear or
 /// brightness change wakes it, once, through the seam's own idempotent
 /// `initialize`. A deck that is never painted is never woken.
-pub fn connect(timeout: Duration) -> Result<Ss550Deck, ConnectError> {
-    Ss550Deck::connect_with_timeout(timeout).map_err(ConnectError::from)
+pub fn connect(
+    locator: &mut ss550_driver::Locator,
+    timeout: Duration,
+) -> Result<Ss550Deck, ConnectError> {
+    locator.connect(timeout).map_err(ConnectError::from)
 }
 
 impl From<Ss550Error> for ConnectError {

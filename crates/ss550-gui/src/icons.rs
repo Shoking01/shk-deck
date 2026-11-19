@@ -1,7 +1,9 @@
 //! The picture a key shows for the thing it runs.
 //!
 //! A key bound to a program draws that program's own icon, read out of the file
-//! by [`ss550_tray::appicon`]. A program whose icon cannot be read, a URL and a
+//! by [`ss550_tray::appicon`]. A key bound to a URL draws the site's own icon,
+//! fetched once by [`ss550_tray::favicon`] and kept in [`crate::favicons`]. A
+//! program whose icon cannot be read, a URL whose site has no icon, and a
 //! keystroke fall back to the initial of what they run, drawn on the accent
 //! colour: a key that runs something is never a blank tile.
 //!
@@ -13,11 +15,26 @@
 //! lookups over that map, so a frame that draws the grid never asks Windows for
 //! anything and never touches an encoder.
 //!
+//! The one thing `prepare` cannot do is fetch: a request is a network call, and
+//! it runs on the background executor through [`crate::favicons::fetch`], coming
+//! back as state through [`IconCache::finish_site`].
+//!
 //! ## Why the deck gets the same picture
 //!
 //! The deck's tile and the window's tile are the same artwork fitted to the same
 //! image spec — [`crate::render`] builds both from one entry point — because a
 //! key that shows one thing and sends another is a bug the user cannot see.
+//!
+//! ## The title is drawn, not converted
+//!
+//! A key may carry a title, and the deck only ever receives a JPEG: the words
+//! have to be pixels before the encoder sees them. [`compose_title`] hands them
+//! to [`crate::titletext::TextEngine`], which shapes them in a font the system
+//! has, at the pixel size the user chose, and rasterises the glyphs onto the
+//! composed picture — so a title can be any text the font can spell, accents
+//! and lower case included. Nothing is rasterised inside [`IconCache::frame`]:
+//! the pair (picture, title) is composed once in [`IconCache::prepare`], on the
+//! change that made it necessary.
 //!
 //! ## Example
 //!
@@ -28,7 +45,7 @@
 //! let picture = icons.frame(&action);
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -37,7 +54,10 @@ use gpui_kit::RenderImage;
 use image::{imageops, Rgba, RgbaImage};
 use ss550_engine::Action;
 
+use crate::favicons;
 use crate::render;
+use crate::titlestyle::TitleStyle;
+use crate::titletext::TextEngine;
 
 /// The side of a glyph when there is no deck to state an image size.
 const GLYPH_SIDE: u32 = 32;
@@ -65,7 +85,8 @@ const GLYPH_INK: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
 pub(crate) enum Artwork {
     /// The key runs nothing, so it has nothing of its own to show.
     None,
-    /// The program's own icon, extracted from the file.
+    /// The icon of what the key runs: a program's, read out of the file, or a
+    /// site's, fetched once and kept.
     Icon,
     /// The initial of what the key runs, on the accent colour.
     Glyph,
@@ -79,6 +100,48 @@ struct Art {
     tile: Option<Vec<u8>>,
 }
 
+/// The picture a title is composed onto, and the untitled tile built from it.
+///
+/// The pixels are kept because a title can arrive after the icon was read: a
+/// titled variant is composed from these, so typing a title never asks Windows
+/// for the same icon a second time.
+struct BaseArt {
+    /// The composed pixels, at the deck's own tile size.
+    picture: RgbaImage,
+    /// What the tile draws and sends when the key has no title.
+    art: Art,
+}
+
+/// Which picture a key's face is built from, before any title is drawn on it.
+///
+/// Two keys that run the same program share one base and, when they carry the
+/// same words, one titled variant: a title changes the payload, not the icon.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Base {
+    /// A program's own icon, keyed by its path.
+    Program(PathBuf),
+    /// A site's icon, keyed by its host.
+    Site(String),
+    /// The initial of what the key runs.
+    Glyph(char),
+}
+
+/// One key's face as [`IconCache::prepare`] needs it: what it runs, what it
+/// says, and how it says it.
+///
+/// The title is per key while the icon is per program, so the two are separate
+/// facts and the cache keys its work by both — plus the style, because two keys
+/// can say the same words in two fonts and those are two pictures.
+#[derive(Clone)]
+pub(crate) struct KeyArt<'a> {
+    /// What the key runs.
+    pub action: &'a Action,
+    /// The words the profile gives the key, when it gives any.
+    pub title: Option<&'a str>,
+    /// How those words are drawn: the key's own style, or the app's default.
+    pub style: TitleStyle,
+}
+
 /// Every picture the deck's bindings need, built once per change.
 pub(crate) struct IconCache {
     /// The image size the pictures were built for. A different deck is a
@@ -86,10 +149,28 @@ pub(crate) struct IconCache {
     spec: Option<ImageSpec>,
     /// One entry per program path. A `None` remembers a program with no
     /// readable icon, so a rebind does not ask Windows for it again.
-    icons: BTreeMap<PathBuf, Option<Art>>,
+    icons: BTreeMap<PathBuf, Option<BaseArt>>,
+    /// One entry per site, keyed by host. A `None` remembers a site that has no
+    /// icon to give — offline, or nothing at any of the paths a site publishes
+    /// one on — so the key draws its initial and no second request is made.
+    ///
+    /// The entry is the **host's**, not the URL's: two bindings to the same site
+    /// share one picture, and a rebind to another host leaves this one alone.
+    sites: BTreeMap<String, Option<BaseArt>>,
+    /// Hosts a fetch is already in flight for, so a second pass over the
+    /// bindings does not start a second request for the same site.
+    pending: BTreeSet<String>,
     /// One entry per initial, so two keys that start with the same letter share
     /// a picture instead of encoding it twice.
-    glyphs: BTreeMap<char, Art>,
+    glyphs: BTreeMap<char, BaseArt>,
+    /// One entry per (picture, words, style): the base picture with the words
+    /// drawn into it, encoded for this deck.
+    ///
+    /// The style is part of the key, not a setting of the cache: two keys can say
+    /// the same words in two fonts, and they are two pictures. Built by
+    /// [`IconCache::prepare`] on the change that made it necessary, and read by
+    /// [`IconCache::tile`] at paint time — never composed in a frame.
+    titled: BTreeMap<(Base, String, TitleStyle), Art>,
 }
 
 impl IconCache {
@@ -98,41 +179,65 @@ impl IconCache {
         Self {
             spec: None,
             icons: BTreeMap::new(),
+            sites: BTreeMap::new(),
+            pending: BTreeSet::new(),
             glyphs: BTreeMap::new(),
+            titled: BTreeMap::new(),
         }
     }
 
     /// Builds every picture `actions` needs, and forgets the rest.
     ///
-    /// This is the whole of the work: one icon extraction per program path and
-    /// one glyph per distinct initial. Called on a rebind, a profile switch and a
-    /// deck change — never from a frame.
+    /// This is the whole of the work: one icon extraction per program path, one
+    /// cached file read per site, and one glyph per distinct initial. Called on a
+    /// rebind, a profile switch and a deck change — never from a frame.
+    ///
+    /// Nothing here reaches the network: a site with no file on disk stays out of
+    /// the map, and [`IconCache::begin_site`] is what turns that absence into a
+    /// request on the background executor.
     ///
     /// `draft` is the program the editor is about to bind. It is not a binding
     /// yet, but the key's face is decided by it, so its icon is read here — once,
     /// on the change that made it the draft — and the editor draws it before
     /// SAVE BINDING is pressed. It is kept in the cache for the same reason the
     /// bound ones are: the tile and the deck will want exactly this picture.
+    ///
+    /// `text` is the font the titles are drawn with. `None` means no engine has
+    /// been built yet, and the titled variants are left to the rebuild that
+    /// follows it: a key without its words is better than a scan of the system's
+    /// fonts on a start that has no titles to draw.
     pub(crate) fn prepare(
         &mut self,
         spec: Option<ImageSpec>,
-        actions: &[Action],
+        faces: &[KeyArt<'_>],
         draft: Option<&Path>,
+        text: Option<&mut TextEngine>,
     ) {
         if spec != self.spec {
             // Every fitted frame and every encoded payload was built for the
             // old image size, so none of them can be served to this deck.
             self.icons.clear();
+            self.sites.clear();
             self.glyphs.clear();
+            self.titled.clear();
             self.spec = spec;
         }
 
         let mut programs: Vec<PathBuf> = Vec::new();
+        let mut hosts: Vec<String> = Vec::new();
         let mut letters: Vec<char> = Vec::new();
-        for action in actions {
+        for face in faces {
+            let action = face.action;
             if let Action::Launch { program, .. } = action {
                 if !programs.contains(program) {
                     programs.push(program.clone());
+                }
+            }
+            if let Action::OpenUrl { url } = action {
+                if let Some(host) = favicons::host_of(url) {
+                    if !hosts.contains(&host) {
+                        hosts.push(host);
+                    }
                 }
             }
             let letter = glyph_letter(action);
@@ -151,6 +256,7 @@ impl IconCache {
         // A binding that was removed takes its picture with it: the cache is
         // the set of things the deck can run now, not a history of them.
         self.icons.retain(|path, _| programs.contains(path));
+        self.sites.retain(|host, _| hosts.contains(host));
         self.glyphs.retain(|letter, _| letters.contains(letter));
 
         for program in programs {
@@ -160,6 +266,24 @@ impl IconCache {
             let art = build_icon(self.spec, &program);
             self.icons.insert(program, art);
         }
+        // A site's icon is read from the file an earlier run kept, and only for
+        // a host this cache has never answered for. A host with no file stays
+        // absent, which is what tells the controller to fetch it.
+        let config = (!hosts.is_empty()).then(ss550_engine::config_dir);
+        for host in hosts {
+            if self.sites.contains_key(&host) {
+                continue;
+            }
+            let picture = config
+                .as_deref()
+                .and_then(|config| favicons::cached(config, &host));
+            if let Some(art) = picture
+                .as_ref()
+                .and_then(|picture| build_site(self.spec, &host, picture))
+            {
+                self.sites.insert(host, Some(art));
+            }
+        }
         for letter in letters {
             if self.glyphs.contains_key(&letter) {
                 continue;
@@ -167,6 +291,75 @@ impl IconCache {
             let art = build_glyph(self.spec, letter);
             self.glyphs.insert(letter, art);
         }
+
+        // The title is part of the payload, so every (picture, title) pair the
+        // profile asks for is composed once, here. The pixels come from the
+        // base art built above: a title arriving later never reads the icon or
+        // the site's file again, and the same pair is never composed twice.
+        //
+        // With no text engine there is no font to draw with, and the pairs are
+        // not built: the keys fall back to their untitled picture until the
+        // caller has one. That is what keeps a profile with no titles from
+        // paying to read the system's fonts at all.
+        let mut wanted: BTreeSet<(Base, String, TitleStyle)> = BTreeSet::new();
+        for face in faces {
+            let Some(title) = face.title.map(str::trim).filter(|title| !title.is_empty()) else {
+                continue;
+            };
+            if let Some(base) = self.base_key(face.action) {
+                wanted.insert((base, title.to_string(), face.style.clone()));
+            }
+        }
+        // A title that was cleared — or redrawn in another font — takes its
+        // variant with it, exactly as an unbound program takes its picture: the
+        // style is part of the key, so a new style is a new variant.
+        self.titled.retain(|key, _| wanted.contains(key));
+        let Some(text) = text else {
+            return;
+        };
+        for key in wanted {
+            if self.titled.contains_key(&key) {
+                continue;
+            }
+            let Some(picture) = self.base_picture(&key.0) else {
+                continue;
+            };
+            let composed = compose_title(picture, &key.1, &key.2, text);
+            self.titled.insert(key, art(self.spec, &composed, "title"));
+        }
+    }
+
+    /// Whether `host` has no answer yet, marking it as being fetched.
+    ///
+    /// `false` means one of three ordinary things: the site's icon is already in
+    /// the cache, a fetch is already in flight, or the site was asked and had
+    /// none to give. None of them is worth a second request.
+    pub(crate) fn begin_site(&mut self, host: &str) -> bool {
+        if self.sites.contains_key(host) || self.pending.contains(host) {
+            return false;
+        }
+        self.pending.insert(host.to_string());
+        true
+    }
+
+    /// Records what a fetch found for `host`.
+    ///
+    /// `None` is a site with no icon — offline, a `404`, an SVG — and it is
+    /// remembered as a miss, the way a program with no readable icon is: the key
+    /// draws its initial, and the site is not asked again in this session.
+    pub(crate) fn finish_site(&mut self, host: &str, picture: Option<&RgbaImage>) {
+        self.pending.remove(host);
+        let art = picture.and_then(|picture| build_site(self.spec, host, picture));
+        self.sites.insert(host.to_string(), art);
+    }
+
+    /// Whether the cache holds a picture for `host`.
+    ///
+    /// The grid asks this through [`IconCache::artwork`]; this is the same fact
+    /// without the picture, for the tests that pin the cache's bookkeeping.
+    #[cfg(test)]
+    pub(crate) fn has_site(&self, host: &str) -> bool {
+        matches!(self.sites.get(host), Some(Some(_)))
     }
 
     /// What the tile should draw for `action`, when the profile says nothing.
@@ -180,7 +373,20 @@ impl IconCache {
                 Some(Some(_)) => Artwork::Icon,
                 _ => Artwork::Glyph,
             },
-            Some(Action::OpenUrl { .. } | Action::Keys { .. }) => Artwork::Glyph,
+            Some(Action::OpenUrl { url }) => match self.site_art(url) {
+                Some(_) => Artwork::Icon,
+                None => Artwork::Glyph,
+            },
+            // A keystroke and a navigation key have nothing of their own to
+            // draw: the tile shows the initial of what they do, which for
+            // navigation is the page's name. A plugin key's face is the reading
+            // itself, which this cache does not compose, so the grid draws the
+            // glyph and the deck receives the reading.
+            Some(Action::Keys { .. })
+            | Some(Action::Folder { .. })
+            | Some(Action::Back)
+            | Some(Action::Profile { .. })
+            | Some(Action::Plugin { .. }) => Artwork::Glyph,
         }
     }
 
@@ -199,29 +405,151 @@ impl IconCache {
         self.icons
             .get(program)
             .and_then(Option::as_ref)
-            .map(|art| &art.frame)
+            .map(|base| &base.art.frame)
     }
 
-    /// The payload the deck receives for `action`, once it stated a size.
-    pub(crate) fn tile(&self, action: &Action) -> Option<&[u8]> {
-        self.art(action).and_then(|art| art.tile.as_deref())
-    }
-
-    /// The picture one action has: its program's icon first, its initial second.
+    /// The picture the deck receives for `action`, once it stated a size.
     ///
-    /// A program whose icon could not be read falls through to its initial, so a
-    /// key that runs something always has a picture — and the deck receives the
-    /// one the tile draws.
+    /// With a title, this is the variant the title was composed into; without
+    /// one, the untitled base. A title the cache was never told about falls back
+    /// to the base rather than leaving the key blank — the paint that needed it
+    /// ran before the cache was rebuilt.
+    pub(crate) fn tile(
+        &self,
+        action: &Action,
+        title: Option<&str>,
+        style: &TitleStyle,
+    ) -> Option<&[u8]> {
+        let titled = title
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .and_then(|title| {
+                let base = self.base_key(action)?;
+                self.titled.get(&(base, title.to_string(), style.clone()))
+            });
+        titled
+            .or_else(|| self.art(action))
+            .and_then(|art| art.tile.as_deref())
+    }
+
+    /// The deck's payload for a flat colour that carries a title.
+    ///
+    /// A key with no picture has no base art to draw on, and the deck only ever
+    /// receives a JPEG: the words are drawn into a block on the colour itself.
+    /// `None` when there is no title, or no deck has stated an image size.
+    pub(crate) fn titled_colour(
+        &mut self,
+        rgb: [u8; 3],
+        title: Option<&str>,
+        style: &TitleStyle,
+        text: &mut Option<TextEngine>,
+    ) -> Option<Vec<u8>> {
+        let title = title.map(str::trim).filter(|title| !title.is_empty())?;
+        let spec = self.spec?;
+        let width = u32::from(spec.width()).max(1);
+        let height = u32::from(spec.height()).max(1);
+        let picture = RgbaImage::from_pixel(width, height, Rgba([rgb[0], rgb[1], rgb[2], 0xff]));
+        // While the fonts are still being read there are no words to draw, and
+        // the key keeps its flat colour rather than pretending to have a title.
+        let text = crate::titletext::ready(text)?;
+        let composed = compose_title(&picture, title, style, text);
+        render::render_rgba(spec, "title", &composed).ok()
+    }
+
+    /// The picture one action has: the icon of what it runs first, its initial
+    /// second.
+    ///
+    /// A program whose icon could not be read, and a site with no icon to give,
+    /// fall through to the initial, so a key that runs something always has a
+    /// picture — and the deck receives the one the tile draws.
     fn art(&self, action: &Action) -> Option<&Art> {
+        self.base_art(&self.base_key(action)?)
+    }
+
+    /// Which base picture `action` resolves to, or `None` when none was built.
+    ///
+    /// This is the one statement of the order — icon, then initial — that both
+    /// the frame and the titled variant read, so the two cannot disagree about
+    /// which picture a key wears.
+    fn base_key(&self, action: &Action) -> Option<Base> {
         let letter = glyph_letter(action);
         match action {
-            Action::Launch { program, .. } => self
-                .icons
-                .get(program)
-                .and_then(Option::as_ref)
-                .or_else(|| self.glyphs.get(&letter)),
-            Action::OpenUrl { .. } | Action::Keys { .. } => self.glyphs.get(&letter),
+            Action::Launch { program, .. } => match self.icons.get(program) {
+                Some(Some(_)) => Some(Base::Program(program.clone())),
+                _ => self
+                    .glyphs
+                    .contains_key(&letter)
+                    .then_some(Base::Glyph(letter)),
+            },
+            Action::OpenUrl { url } => {
+                if let Some(host) = favicons::host_of(url) {
+                    if matches!(self.sites.get(&host), Some(Some(_))) {
+                        return Some(Base::Site(host));
+                    }
+                }
+                self.glyphs
+                    .contains_key(&letter)
+                    .then_some(Base::Glyph(letter))
+            }
+            Action::Keys { .. } => self
+                .glyphs
+                .contains_key(&letter)
+                .then_some(Base::Glyph(letter)),
+            // A navigation key draws the initial of the page or profile it
+            // names: the tile is never blank, and the letter says where it
+            // goes. A plugin key draws the initial of the cell it measures, in
+            // the window; the deck receives the reading itself.
+            Action::Folder { .. }
+            | Action::Back
+            | Action::Profile { .. }
+            | Action::Plugin { .. } => self
+                .glyphs
+                .contains_key(&letter)
+                .then_some(Base::Glyph(letter)),
         }
+    }
+
+    /// The untitled art one base holds.
+    fn base_art(&self, base: &Base) -> Option<&Art> {
+        match base {
+            Base::Program(path) => self
+                .icons
+                .get(path)
+                .and_then(Option::as_ref)
+                .map(|base| &base.art),
+            Base::Site(host) => self
+                .sites
+                .get(host)
+                .and_then(Option::as_ref)
+                .map(|base| &base.art),
+            Base::Glyph(letter) => self.glyphs.get(letter).map(|base| &base.art),
+        }
+    }
+
+    /// The pixels one base was composed at, which a title is drawn onto.
+    fn base_picture(&self, base: &Base) -> Option<&RgbaImage> {
+        match base {
+            Base::Program(path) => self
+                .icons
+                .get(path)
+                .and_then(Option::as_ref)
+                .map(|base| &base.picture),
+            Base::Site(host) => self
+                .sites
+                .get(host)
+                .and_then(Option::as_ref)
+                .map(|base| &base.picture),
+            Base::Glyph(letter) => self.glyphs.get(letter).map(|base| &base.picture),
+        }
+    }
+
+    /// The site's icon for `url`, when the cache holds one.
+    fn site_art(&self, url: &str) -> Option<&Art> {
+        let host = favicons::host_of(url)?;
+        self.sites
+            .get(&host)
+            .and_then(Option::as_ref)
+            .map(|base| &base.art)
     }
 }
 
@@ -244,6 +572,15 @@ pub(crate) fn glyph_letter(action: &Action) -> char {
         // `BaseKey`'s own spelling is what the tile shows: `M`, `7`, `F24`,
         // `Enter`. The initial of that is the initial of the key.
         Action::Keys { keys } => first_letter(&keys.base_key().to_string()),
+        // A navigation key says where it goes: the tile draws the initial of the
+        // page or the profile it names, so it is never blank and the letter
+        // points at the destination.
+        Action::Folder { page } => first_letter(page),
+        Action::Profile { name } => first_letter(name),
+        Action::Back => 'B',
+        // A reading has no picture of its own: the initial of the cell it
+        // measures is what the window's tile draws in its place.
+        Action::Plugin { cell, .. } => first_letter(cell),
     }
 }
 
@@ -293,8 +630,14 @@ fn art(spec: Option<ImageSpec>, picture: &RgbaImage, name: &str) -> Art {
     }
 }
 
+/// [`art`], keeping the pixels a title will be drawn onto later.
+fn base_art(spec: Option<ImageSpec>, picture: RgbaImage, name: &str) -> BaseArt {
+    let art = art(spec, &picture, name);
+    BaseArt { picture, art }
+}
+
 /// The icon of one program, or `None` when the file has none to read.
-fn build_icon(spec: Option<ImageSpec>, program: &Path) -> Option<Art> {
+fn build_icon(spec: Option<ImageSpec>, program: &Path) -> Option<BaseArt> {
     let pixels = ss550_tray::appicon::program_icon(program)?;
     if pixels.is_blank() {
         return None;
@@ -313,7 +656,29 @@ fn build_icon(spec: Option<ImageSpec>, program: &Path) -> Option<Art> {
     // The path, not the file name: a refusal names what the user can go and
     // look at, and two programs can share a file name.
     let name = program.to_string_lossy();
-    Some(art(spec, &picture, &name))
+    Some(base_art(spec, picture, &name))
+}
+
+/// The icon of one site, composed for the tile the way a program's is.
+///
+/// The picture is already decoded — [`crate::favicons`] did that off the UI
+/// thread — so this is the compose and the encode, and nothing else. A site
+/// icon is drawn on the same margin budget as a program icon, because the two
+/// sit side by side in the same grid and a key is not a browser tab.
+fn build_site(spec: Option<ImageSpec>, host: &str, picture: &RgbaImage) -> Option<BaseArt> {
+    let (width, height) = picture.dimensions();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    if picture.pixels().all(|pixel| pixel[3] == 0) {
+        return None;
+    }
+    let side = spec.map_or(width.max(height), |spec| {
+        u32::from(spec.width().max(spec.height())).max(1)
+    });
+    let composed = compose_icon(picture, side);
+    // The host, so a refusal names the site the user can go and look at.
+    Some(base_art(spec, composed, host))
 }
 
 /// The share of the tile the icon covers; the rest is the margin.
@@ -436,14 +801,14 @@ fn opaque(picture: &image::RgbImage) -> RgbaImage {
 }
 
 /// The initial of what a key runs, drawn on the accent colour.
-fn build_glyph(spec: Option<ImageSpec>, letter: char) -> Art {
+fn build_glyph(spec: Option<ImageSpec>, letter: char) -> BaseArt {
     let side = spec
         .map_or(GLYPH_SIDE, |spec| {
             u32::from(spec.width().max(spec.height())).max(1)
         })
         .min(GLYPH_MAX_SIDE);
     let picture = glyph_image(letter, side);
-    art(spec, &picture, "glyph")
+    base_art(spec, picture, "glyph")
 }
 
 /// One initial, centred on a square of accent colour.
@@ -477,6 +842,27 @@ fn glyph_image(letter: char, side: u32) -> RgbaImage {
         }
     }
     picture
+}
+
+/// Draws `title` onto a copy of `picture`.
+///
+/// The words go into the pixels the encoder receives, not into the window's
+/// layout: the deck has no text, only a JPEG. The family, the size in pixels and
+/// the position all come from the style, and [`TextEngine`] does the shaping,
+/// the wrapping and the down-step when the words do not fit the box they were
+/// given — so a title too long for its size still steps down rather than being
+/// cut off.
+///
+/// A title that is nothing but spacing answers its own picture unchanged, which
+/// is what keeps a cleared title from paying for an encoder pass.
+pub(crate) fn compose_title(
+    picture: &RgbaImage,
+    title: &str,
+    style: &TitleStyle,
+    text: &mut TextEngine,
+) -> RgbaImage {
+    text.draw(picture, title, style)
+        .unwrap_or_else(|| picture.clone())
 }
 
 /// The seven rows of one initial, five dots wide, top row first.
@@ -541,9 +927,11 @@ const GLYPHS: &[(char, [u8; 7])] = &[
 #[cfg(test)]
 mod tests {
     use super::{
-        compose_icon, first_letter, glyph_image, glyph_letter, glyph_rows, host_of, last_segment,
-        Artwork, GLYPHS, GLYPH_ACCENT,
+        compose_icon, compose_title, first_letter, glyph_image, glyph_letter, glyph_rows, host_of,
+        last_segment, Artwork, KeyArt, GLYPHS, GLYPH_ACCENT,
     };
+    use crate::titlestyle::{TitlePosition, TitleStyle};
+    use crate::titletext::test_engine as engine;
     use ss550_engine::Action;
     use std::path::PathBuf;
 
@@ -551,6 +939,33 @@ mod tests {
         Action::Launch {
             program: PathBuf::from(program),
             args: Vec::new(),
+        }
+    }
+
+    /// One key's face with no title, which is what every untitled key asks for.
+    fn face(action: &Action) -> KeyArt<'_> {
+        KeyArt {
+            action,
+            title: None,
+            style: TitleStyle::default(),
+        }
+    }
+
+    /// One key's face carrying `title`, in the default style.
+    fn titled<'a>(action: &'a Action, title: &'a str) -> KeyArt<'a> {
+        KeyArt {
+            action,
+            title: Some(title),
+            style: TitleStyle::default(),
+        }
+    }
+
+    /// The same face, drawn in another style.
+    fn styled<'a>(action: &'a Action, title: &'a str, style: TitleStyle) -> KeyArt<'a> {
+        KeyArt {
+            action,
+            title: Some(title),
+            style,
         }
     }
 
@@ -695,6 +1110,292 @@ mod tests {
         assert_eq!(glyph_rows('m'), glyph_rows('M'));
     }
 
+    /// The brightest channel value in `picture` inside `y0..y1`.
+    fn brightest(picture: &image::RgbaImage, y0: u32, y1: u32) -> u8 {
+        let (_, height) = picture.dimensions();
+        (y0.min(height)..y1.min(height))
+            .flat_map(|y| (0..picture.width()).map(move |x| (x, y)))
+            .map(|(x, y)| picture.get_pixel(x, y).0[0])
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_title_is_drawn_into_the_pixels_the_deck_receives() {
+        // The words are pixels, not a layout: the JPEG the deck receives is the
+        // only place a title can live. A white tile makes the two effects
+        // separable — the scrim darkens the band, the glyphs lay white on it.
+        let base = image::RgbaImage::from_pixel(72, 72, image::Rgba([0xFF, 0xFF, 0xFF, 0xFF]));
+        let composed = compose_title(&base, "OBS", &TitleStyle::default(), &mut engine());
+
+        assert_eq!(composed.dimensions(), base.dimensions());
+        assert_eq!(
+            composed.get_pixel(0, 0).0,
+            base.get_pixel(0, 0).0,
+            "the top of the tile is not under the band"
+        );
+        assert!(
+            composed.get_pixel(0, 71).0[0] < 0x80,
+            "the band is darker than the colour it covers"
+        );
+        assert!(
+            brightest(&composed, 60, 72) > 0xC0,
+            "the words are white on the band"
+        );
+    }
+
+    #[test]
+    fn a_colour_key_gets_a_block_because_white_on_white_is_unreadable() {
+        // A flat colour has no picture to darken, so the words stand on their
+        // own block in the middle — and a white key is still readable.
+        let base = image::RgbaImage::from_pixel(72, 72, image::Rgba([0xE4, 0xE4, 0xE7, 0xFF]));
+        let composed = compose_title(
+            &base,
+            "MUTE",
+            &TitleStyle {
+                position: TitlePosition::Middle,
+                ..TitleStyle::default()
+            },
+            &mut engine(),
+        );
+
+        // The corners are the colour, untouched: the block is centred.
+        assert_eq!(composed.get_pixel(0, 0).0, [0xE4, 0xE4, 0xE7, 0xFF]);
+        assert!(
+            composed.get_pixel(0, 36).0[0] < 0x90,
+            "the block behind the words is dark"
+        );
+        assert!(
+            brightest(&composed, 24, 48) > 0xC0,
+            "the words are white on it"
+        );
+    }
+
+    #[test]
+    fn a_title_that_is_only_spaces_is_no_title_at_all() {
+        // Nothing is drawn, so nothing is darkened and no encoder pass is paid
+        // for: a cleared title answers the picture it was given.
+        let base = glyph_image('O', 72);
+        for empty in ["", "   ", "\t"] {
+            let composed = compose_title(&base, empty, &TitleStyle::default(), &mut engine());
+            assert_eq!(composed, base, "{empty:?} changed the picture");
+        }
+    }
+
+    #[test]
+    fn a_long_title_is_drawn_rather_than_cut_off() {
+        // The engine's cap, at the default size, on a tile narrower than the
+        // one it was written for: the fit steps down and the words still land.
+        let base = image::RgbaImage::from_pixel(72, 72, image::Rgba([0xFF, 0xFF, 0xFF, 0xFF]));
+        let title: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123".to_string();
+        assert_eq!(title.chars().count(), ss550_engine::MAX_TITLE_CHARS);
+
+        let composed = compose_title(&base, &title, &TitleStyle::default(), &mut engine());
+
+        assert_eq!(composed.dimensions(), base.dimensions());
+        assert!(
+            brightest(&composed, 55, 72) > 0xC0,
+            "the whole title is drawn somewhere in the band"
+        );
+    }
+
+    #[test]
+    fn a_one_letter_title_is_drawn_as_well_as_a_long_one() {
+        let base = image::RgbaImage::from_pixel(72, 72, image::Rgba([0xFF, 0xFF, 0xFF, 0xFF]));
+        let composed = compose_title(&base, "X", &TitleStyle::default(), &mut engine());
+        assert!(brightest(&composed, 0, 72) > 0xC0);
+    }
+
+    #[test]
+    fn a_style_change_changes_a_titled_keys_payload() {
+        // The style is part of the picture, like the words: a key redrawn in
+        // another style must not be served the variant composed under the old one.
+        let spec = deck_api::ImageSpec::new(72, 72, 4_096, deck_api::ImageFormat::Jpeg);
+        let action = Action::keys("ctrl+m").expect("a valid combination");
+        let mut cache = super::IconCache::new();
+        let mut text = engine();
+        let bottom_style = TitleStyle::default();
+        let top_style = TitleStyle {
+            position: TitlePosition::Top,
+            ..TitleStyle::default()
+        };
+
+        cache.prepare(
+            Some(spec),
+            &[styled(&action, "mute", bottom_style.clone())],
+            None,
+            Some(&mut text),
+        );
+        let bottom = cache
+            .tile(&action, Some("mute"), &bottom_style)
+            .expect("a titled initial is a picture")
+            .to_vec();
+
+        cache.prepare(
+            Some(spec),
+            &[styled(&action, "mute", top_style.clone())],
+            None,
+            Some(&mut text),
+        );
+        let top = cache
+            .tile(&action, Some("mute"), &top_style)
+            .expect("the recomposed variant")
+            .to_vec();
+
+        assert_ne!(bottom, top, "the style reaches the encoder");
+        assert!(top.len() <= spec.max_bytes());
+        // And the variant composed under the old style is gone, not merely
+        // shadowed: the key falls back to its untitled picture for that style.
+        assert_eq!(
+            cache.tile(&action, Some("mute"), &bottom_style),
+            cache.tile(&action, None, &bottom_style),
+            "the dropped variant is not served to an older style"
+        );
+    }
+
+    #[test]
+    fn two_keys_can_say_the_same_words_in_different_fonts() {
+        // The style is part of the cache key: the same words under two styles are
+        // two pictures, and neither is served for the other.
+        let spec = deck_api::ImageSpec::new(72, 72, 4_096, deck_api::ImageFormat::Jpeg);
+        let action = Action::keys("ctrl+m").expect("a valid combination");
+        let mut cache = super::IconCache::new();
+        let mut text = engine();
+        let small = TitleStyle::default().with_size(12);
+        let large = TitleStyle::default().with_size(26);
+
+        cache.prepare(
+            Some(spec),
+            &[
+                styled(&action, "mute", small.clone()),
+                styled(&action, "mute", large.clone()),
+            ],
+            None,
+            Some(&mut text),
+        );
+
+        let small_tile = cache
+            .tile(&action, Some("mute"), &small)
+            .expect("the small variant")
+            .to_vec();
+        let large_tile = cache
+            .tile(&action, Some("mute"), &large)
+            .expect("the large variant")
+            .to_vec();
+        assert_ne!(small_tile, large_tile, "two styles are two pictures");
+    }
+
+    #[test]
+    fn a_size_change_changes_a_titled_keys_payload() {
+        // The number the user typed is part of the picture too: two sizes are
+        // two payloads, and neither is served for the other.
+        let spec = deck_api::ImageSpec::new(72, 72, 4_096, deck_api::ImageFormat::Jpeg);
+        let action = Action::keys("ctrl+m").expect("a valid combination");
+        let mut cache = super::IconCache::new();
+        let mut text = engine();
+        let fourteen = TitleStyle::default();
+        let twenty_four = TitleStyle::default().with_size(24);
+
+        cache.prepare(
+            Some(spec),
+            &[styled(&action, "mute", fourteen.clone())],
+            None,
+            Some(&mut text),
+        );
+        let small = cache
+            .tile(&action, Some("mute"), &fourteen)
+            .expect("a titled initial is a picture")
+            .to_vec();
+
+        cache.prepare(
+            Some(spec),
+            &[styled(&action, "mute", twenty_four.clone())],
+            None,
+            Some(&mut text),
+        );
+        let big = cache
+            .tile(&action, Some("mute"), &twenty_four)
+            .expect("the recomposed variant")
+            .to_vec();
+
+        assert_ne!(small, big, "the size reaches the encoder");
+    }
+
+    #[test]
+    fn a_cache_with_no_engine_keeps_the_untitled_picture() {
+        // The start path: a profile with titles and no engine built yet serves
+        // the base picture instead of holding a payload it cannot compose.
+        let spec = deck_api::ImageSpec::new(72, 72, 4_096, deck_api::ImageFormat::Jpeg);
+        let action = Action::keys("ctrl+m").expect("a valid combination");
+        let mut cache = super::IconCache::new();
+
+        cache.prepare(Some(spec), &[face(&action)], None, None);
+        let plain = cache
+            .tile(&action, None, &TitleStyle::default())
+            .expect("the initial is a picture")
+            .to_vec();
+
+        cache.prepare(Some(spec), &[titled(&action, "mute")], None, None);
+        assert_eq!(
+            cache
+                .tile(&action, Some("mute"), &TitleStyle::default())
+                .expect("the base"),
+            plain,
+            "no engine, no words, and never a blank key"
+        );
+    }
+
+    #[test]
+    fn a_titled_key_sends_a_different_payload_from_an_untitled_one() {
+        // The title is part of the picture: the bytes the deck receives change
+        // when the words do, and the untitled key keeps exactly what it had.
+        let spec = deck_api::ImageSpec::new(72, 72, 4_096, deck_api::ImageFormat::Jpeg);
+        let action = Action::keys("ctrl+m").expect("a valid combination");
+        let mut cache = super::IconCache::new();
+        let mut text = engine();
+
+        cache.prepare(Some(spec), &[face(&action)], None, Some(&mut text));
+        let plain = cache
+            .tile(&action, None, &TitleStyle::default())
+            .expect("the initial is a picture")
+            .to_vec();
+
+        cache.prepare(
+            Some(spec),
+            &[titled(&action, "mute")],
+            None,
+            Some(&mut text),
+        );
+        let with_title = cache
+            .tile(&action, Some("mute"), &TitleStyle::default())
+            .expect("the titled initial is a picture")
+            .to_vec();
+
+        assert_ne!(plain, with_title, "the words reach the encoder");
+        assert!(with_title.len() <= spec.max_bytes());
+        assert_eq!(
+            plain,
+            cache
+                .tile(&action, None, &TitleStyle::default())
+                .expect("still the base")
+        );
+
+        // Clearing the title takes the variant with it, and the base is back.
+        cache.prepare(Some(spec), &[face(&action)], None, Some(&mut text));
+        assert_eq!(
+            cache
+                .tile(&action, None, &TitleStyle::default())
+                .expect("the base"),
+            plain
+        );
+        assert_eq!(
+            cache
+                .tile(&action, Some("mute"), &TitleStyle::default())
+                .expect("a title the cache was never told about falls back to the base"),
+            plain,
+        );
+    }
+
     #[test]
     fn a_program_with_no_icon_to_read_is_a_glyph_and_never_a_blank() {
         // The cache is asked about a program that was never prepared: the
@@ -704,7 +1405,7 @@ mod tests {
 
         assert_eq!(cache.artwork(Some(&action)), Artwork::Glyph);
         assert!(cache.frame(&action).is_none());
-        assert!(cache.tile(&action).is_none());
+        assert!(cache.tile(&action, None, &TitleStyle::default()).is_none());
     }
 
     #[test]
@@ -838,11 +1539,13 @@ mod tests {
         let spec = deck_api::ImageSpec::new(72, 72, 4_096, deck_api::ImageFormat::Jpeg);
         let action = launch(r"C:\this\program\was\never\installed.exe");
         let mut cache = super::IconCache::new();
-        cache.prepare(Some(spec), std::slice::from_ref(&action), None);
+        cache.prepare(Some(spec), &[face(&action)], None, None);
 
         assert_eq!(cache.artwork(Some(&action)), Artwork::Glyph);
         assert!(cache.frame(&action).is_some(), "the initial is a picture");
-        let tile = cache.tile(&action).expect("the deck receives the initial");
+        let tile = cache
+            .tile(&action, None, &TitleStyle::default())
+            .expect("the deck receives the initial");
         assert!(tile.len() <= spec.max_bytes(), "{} bytes", tile.len());
     }
 
@@ -854,13 +1557,13 @@ mod tests {
         let second = Action::keys("ctrl+m").expect("a valid combination");
         let mut cache = super::IconCache::new();
 
-        cache.prepare(None, std::slice::from_ref(&first), None);
+        cache.prepare(None, &[face(&first)], None, None);
         assert!(
             cache.frame(&first).is_some(),
             "a bound program has a picture"
         );
 
-        cache.prepare(None, std::slice::from_ref(&second), None);
+        cache.prepare(None, &[face(&second)], None, None);
         assert!(
             cache.frame(&first).is_none(),
             "the program that was unbound is forgotten"
@@ -877,6 +1580,95 @@ mod tests {
     }
 
     #[test]
+    fn a_url_whose_site_has_no_icon_falls_back_to_its_initial() {
+        // The ordinary case on the open web: a site that answers nothing at any
+        // of the paths an icon is published on. The key is an initial, never a
+        // blank tile.
+        let cache = super::IconCache::new();
+        let action = Action::OpenUrl {
+            url: "https://example.com/".to_string(),
+        };
+
+        assert_eq!(cache.artwork(Some(&action)), Artwork::Glyph);
+        assert!(cache.frame(&action).is_none());
+        assert!(!cache.has_site("example.com"));
+    }
+
+    #[test]
+    fn a_site_icon_the_cache_holds_is_what_the_key_wears() {
+        // What a completed fetch does: the picture goes in once, and the key
+        // then shows it — in the window and on the deck — instead of the letter.
+        let spec = deck_api::ImageSpec::new(72, 72, 4_096, deck_api::ImageFormat::Jpeg);
+        let mut cache = super::IconCache::new();
+        cache.prepare(Some(spec), &[], None, None);
+
+        let picture = image::RgbaImage::from_pixel(32, 32, image::Rgba([0x91, 0x45, 0xFF, 0xFF]));
+        cache.finish_site("twitch.tv", Some(&picture));
+
+        let action = Action::OpenUrl {
+            url: "https://twitch.tv/dashboard".to_string(),
+        };
+        assert_eq!(cache.artwork(Some(&action)), Artwork::Icon);
+        assert!(cache.frame(&action).is_some(), "the tile has a picture");
+        let tile = cache
+            .tile(&action, None, &TitleStyle::default())
+            .expect("the deck gets the same picture");
+        assert!(tile.len() <= spec.max_bytes(), "{} bytes", tile.len());
+        assert!(cache.has_site("twitch.tv"));
+    }
+
+    #[test]
+    fn a_site_with_no_icon_is_asked_once_and_remembered_as_a_miss() {
+        // Offline, or a site with nothing at that path: the answer is the
+        // initial, and the next pass over the bindings must not ask again.
+        let mut cache = super::IconCache::new();
+
+        assert!(cache.begin_site("example.com"), "the first pass asks");
+        assert!(
+            !cache.begin_site("example.com"),
+            "the request is in flight: no second one"
+        );
+        cache.finish_site("example.com", None);
+
+        assert!(!cache.begin_site("example.com"), "a miss is an answer");
+        assert!(!cache.has_site("example.com"));
+    }
+
+    #[test]
+    fn each_host_keeps_its_own_picture() {
+        // A rebind to another site must not take the first site's icon with it,
+        // and must not ask for a picture that is already in the cache.
+        let mut cache = super::IconCache::new();
+        let picture = image::RgbaImage::from_pixel(16, 16, image::Rgba([0x00, 0x80, 0x00, 0xFF]));
+        cache.finish_site("twitch.tv", Some(&picture));
+        cache.finish_site("github.com", None);
+
+        let first = Action::OpenUrl {
+            url: "https://twitch.tv/".to_string(),
+        };
+        let second = Action::OpenUrl {
+            url: "https://github.com/".to_string(),
+        };
+        assert_eq!(cache.artwork(Some(&first)), Artwork::Icon);
+        assert_eq!(cache.artwork(Some(&second)), Artwork::Glyph);
+        assert!(!cache.begin_site("github.com"), "asked and answered");
+        assert!(cache.begin_site("wikipedia.org"), "a new host is fetched");
+    }
+
+    #[test]
+    fn a_site_icon_that_is_gone_takes_its_picture_with_it() {
+        // The cache is the set of sites the deck can reach now: a key rebound
+        // to a program does not keep the site's picture alive.
+        let mut cache = super::IconCache::new();
+        let picture = image::RgbaImage::from_pixel(16, 16, image::Rgba([0x11, 0x22, 0x33, 0xFF]));
+        cache.finish_site("twitch.tv", Some(&picture));
+
+        cache.prepare(None, &[face(&launch(r"C:\Apps\brave.exe"))], None, None);
+
+        assert!(!cache.has_site("twitch.tv"));
+    }
+
+    #[test]
     fn the_editor_has_the_picture_of_its_program_before_it_is_bound() {
         // Choosing an application fills the editor's field, and the key it is
         // about to become shows that program's icon. Nothing is bound yet, so
@@ -884,7 +1676,7 @@ mod tests {
         let program = std::env::current_exe().expect("the test binary has a path");
         let mut cache = super::IconCache::new();
 
-        cache.prepare(None, &[], Some(&program));
+        cache.prepare(None, &[], Some(&program), None);
 
         #[cfg(windows)]
         assert!(
@@ -903,7 +1695,7 @@ mod tests {
         // The field is empty until the user types or picks, and asking the shell
         // about "" would be a call for an answer nothing can use.
         let mut cache = super::IconCache::new();
-        cache.prepare(None, &[], Some(std::path::Path::new("")));
+        cache.prepare(None, &[], Some(std::path::Path::new("")), None);
 
         assert!(cache.program_frame(std::path::Path::new("")).is_none());
     }

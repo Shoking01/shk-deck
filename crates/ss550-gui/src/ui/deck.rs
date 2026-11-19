@@ -6,6 +6,8 @@
 //! own, so a deck of any shape draws itself correctly.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::Input;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
     div, px, AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, RenderImage, SharedString, StatefulInteractiveElement as _,
@@ -18,8 +20,8 @@ use super::{
     FONT_APP, FONT_CAPTION, FONT_MICRO, FONT_SUB, FONT_TITLE, RADIUS_MD, RADIUS_SM,
 };
 use crate::icons::{glyph_letter, Artwork};
-use crate::{Controller, Paint, Slot};
-
+use crate::titlestyle::{TitleLook as _, TitlePosition, TitleStyle};
+use crate::{key_number, Controller, Paint, Slot};
 /// The width a grid of keys may grow into before the tiles stop growing. Tiles
 /// are square, so this is also the height they aim for.
 const GRID_BUDGET: f32 = 600.;
@@ -155,6 +157,13 @@ struct Cell {
     picture: Option<Arc<RenderImage>>,
     /// The initial the tile draws, when there is no picture of it.
     glyph: Option<char>,
+    /// The words the profile gives the key, when it gives any.
+    title: Option<SharedString>,
+    /// How those words are drawn, when the key has a style of its own.
+    ///
+    /// `None` is "the app's default", resolved when the row is built so a frame
+    /// reads one value and not a chain of fallbacks.
+    style: Option<TitleStyle>,
     pressed: bool,
     selected: bool,
     binding: Option<SharedString>,
@@ -193,9 +202,28 @@ pub(crate) fn deck_page(
                 .gap(px(24.))
                 .w(px(SIDE_W))
                 .min_w(px(0.))
+                .min_h(px(0.))
+                // The column scrolls inside itself, not with the page: a user
+                // reaching for the editor must not lose sight of the grid whose
+                // key they are editing. The bound is what the window leaves once
+                // the bars, the padding and the page's heading are taken out.
+                .max_h(px(side_max_height(controller.viewport_h)))
+                .overflow_y_scrollbar()
                 .child(inspector_card(controller, tokens, cx))
-                .child(profile_card(controller, tokens, cx)),
+                .child(profile_card(controller, tokens, cx))
+                .child(super::pages::pages_card(controller, tokens, cx)),
         )
+}
+
+/// How tall the side column may get before it scrolls inside itself.
+///
+/// The window's own height minus everything around the scrollable part: the app
+/// bar, the status bar, the page's padding and gap, and the heading. It is a
+/// function of the window rather than a constant so a taller window shows more
+/// of the column and a shorter one still leaves the grid visible.
+pub(crate) fn side_max_height(viewport: f32) -> f32 {
+    const CHROME: f32 = 220.;
+    (viewport - CHROME).max(320.)
 }
 
 /// The card holding the toolbar, the grid and the deck-wide buttons.
@@ -388,23 +416,42 @@ fn grid(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
     let accepts = controller.session.is_some();
     let columns = match controller.session.as_ref() {
         Some(session) => {
-            let profile = controller.profile_store.active();
+            // The page the deck is showing is the authority on what each key
+            // looks like here: a folder may paint key 4 differently from the root.
+            let keys = controller.current_keys();
             for row in session.rows() {
                 let mut cells = Vec::new();
                 for &index in row {
                     let number = crate::binding_number(session, index);
                     let action = number.and_then(|number| controller.store.get(number));
                     let binding = action.map(|action| SharedString::from(action.summary()));
-                    let key = u16::try_from(index + 1).unwrap_or(u16::MAX);
-                    let appearance = profile.and_then(|profile| profile.appearance_for(key));
+                    let key = key_number(index);
+                    let appearance = keys.and_then(|keys| keys.appearance_for(key));
+                    // A key bound to a reading draws the face the deck received,
+                    // pixels and all, so the window and the glass cannot disagree
+                    // about what the key is. The frame was composed off the UI
+                    // thread and is keyed by the binding, so a page switch can
+                    // never show one cell's face on another cell's key.
+                    let reading_face = action.and_then(|action| action.plugin_cell()).and_then(
+                        |(plugin, cell)| {
+                            controller
+                                .face_tiles
+                                .get(&(key, plugin.to_string(), cell.to_string()))
+                                .cloned()
+                        },
+                    );
+                    let has_reading_face = reading_face.is_some();
                     // The picture comes from the library when the profile names
                     // one, and from the icon cache otherwise. Both were built
                     // when the deck, the profile or the binding changed, so this
                     // is a lookup and never a decode.
-                    let picture = appearance
-                        .and_then(|appearance| appearance.asset())
-                        .and_then(|name| controller.previews.get(name))
-                        .cloned()
+                    let picture = reading_face
+                        .or_else(|| {
+                            appearance
+                                .and_then(|appearance| appearance.asset())
+                                .and_then(|name| controller.previews.get(name))
+                                .cloned()
+                        })
                         .or_else(|| {
                             action
                                 .and_then(|action| controller.icons.frame(action))
@@ -412,12 +459,23 @@ fn grid(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
                         });
                     let artwork = controller.icons.artwork(action);
                     let slot = controller.slots.get(index).copied().unwrap_or(Slot::Off);
+                    // A reading's face is the reading: the profile's appearance is
+                    // not drawn over it on the deck either, so the tile passes no
+                    // appearance for that key.
+                    let face_appearance = match has_reading_face {
+                        true => None,
+                        false => appearance,
+                    };
                     cells.push(Cell {
                         index,
                         number,
-                        face: resolved_face(appearance, slot, artwork, picture.is_some()),
+                        face: resolved_face(face_appearance, slot, artwork, picture.is_some()),
                         picture,
                         glyph: action.map(glyph_letter),
+                        title: keys
+                            .and_then(|keys| keys.title(key))
+                            .map(SharedString::from),
+                        style: keys.and_then(|keys| keys.title_style(key)).cloned(),
                         pressed: controller.pressed.get(index).copied().unwrap_or(false),
                         selected: number == Some(controller.selected_key),
                         binding,
@@ -431,12 +489,28 @@ fn grid(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
     };
 
     let size = tile_size(columns);
+    // The default style is copied out before the rows are built: a tile reads the
+    // same value the deck's picture was composed with, and nothing in the frame
+    // has to reach back into the controller for it.
+    let default_style = controller.title_style.clone();
+    // The deck's own tile side, which is what a pixel in the style means. A
+    // window with no deck draws at its own scale.
+    let device_side = controller
+        .session
+        .as_ref()
+        .map_or(size, |session| f32::from(session.image_spec().height()));
     let built: Vec<Div> = rows
         .into_iter()
         .map(|cells| {
             let tiles: Vec<AnyElement> = cells
                 .into_iter()
-                .map(|cell| tile(cell, size, accepts, tokens, cx))
+                .map(|cell| {
+                    // A key with a style of its own wears it; the rest follow the
+                    // default. `Cell` carries the key's override, resolved when
+                    // the grid was built.
+                    let style = cell.style.clone().unwrap_or_else(|| default_style.clone());
+                    tile(cell, size, accepts, &style, device_side, tokens, cx)
+                })
                 .collect();
             div()
                 .flex()
@@ -465,6 +539,8 @@ fn tile(
     cell: Cell,
     size: f32,
     accepts: bool,
+    style: &TitleStyle,
+    device_side: f32,
     tokens: Tokens,
     cx: &mut Context<Controller>,
 ) -> AnyElement {
@@ -520,7 +596,7 @@ fn tile(
                         ),
                 )
                 .child(badge(format!("#{}", index + 1)))
-                .child(scrim(binding));
+                .child(scrim(cell.title.clone(), binding, size, style, device_side));
         }
         Face::Glyph => {
             // No icon to draw: the initial of what the key runs, on the accent
@@ -570,7 +646,7 @@ fn tile(
                         .child(letter),
                 })
                 .child(badge(format!("#{}", index + 1)))
-                .child(scrim(binding));
+                .child(scrim(cell.title.clone(), binding, size, style, device_side));
         }
         Face::Swatch(slot) => {
             let (_, ink) = slot_colours(slot, tokens);
@@ -590,29 +666,58 @@ fn tile(
                 .gap(px(4.))
                 .p(px(8.))
                 .border_color(ring)
-                .text_color(ink)
-                .child(
-                    div()
-                        .text_size(px(FONT_SUB))
-                        .font_weight(FontWeight::BOLD)
-                        .child(format!("#{}", index + 1)),
+                .text_color(ink);
+
+            // The lines of a flat-colour tile. The title is one of them, and the
+            // position decides where: first, between the colour and what the key
+            // runs, or last. A key with no title keeps exactly the three lines
+            // it had, whatever the position says.
+            let mut lines: Vec<AnyElement> = Vec::new();
+            lines.push(
+                div()
+                    .text_size(px(FONT_SUB))
+                    .font_weight(FontWeight::BOLD)
+                    .child(format!("#{}", index + 1))
+                    .into_any_element(),
+            );
+            lines.push(
+                div()
+                    .text_size(px(FONT_MICRO))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(ink.opacity(0.7))
+                    .child(appearance_label(slot))
+                    .into_any_element(),
+            );
+            lines.push(
+                div()
+                    .w_full()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_size(px(FONT_MICRO))
+                    .text_color(ink.opacity(0.75))
+                    .child(binding)
+                    .into_any_element(),
+            );
+            if let Some(title) = cell.title.clone() {
+                let at = match style.position {
+                    TitlePosition::Top => 0,
+                    TitlePosition::Middle => 2,
+                    // After the action, which is the last line pushed.
+                    TitlePosition::Bottom => lines.len(),
+                };
+                let mut line = one_line(
+                    title_words(&title, style),
+                    style.window_font(size, device_side),
+                    ink,
                 )
-                .child(
-                    div()
-                        .text_size(px(FONT_MICRO))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(ink.opacity(0.7))
-                        .child(appearance_label(slot)),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .min_w(px(0.))
-                        .truncate()
-                        .text_size(px(FONT_MICRO))
-                        .text_color(ink.opacity(0.75))
-                        .child(binding),
-                );
+                .w_full()
+                .font_weight(FontWeight::SEMIBOLD);
+                if let Some(family) = title_family(style) {
+                    line = line.font_family(family);
+                }
+                lines.insert(at, line.into_any_element());
+            }
+            tile = tile.children(lines);
         }
     }
 
@@ -662,17 +767,86 @@ fn badge(text: String) -> Div {
         .child(text)
 }
 
-/// The band along the bottom of a picture tile: what the key runs.
-fn scrim(binding: SharedString) -> Div {
-    div()
-        .absolute()
-        .bottom(px(0.))
-        .left(px(0.))
+/// The band over a picture tile: what the key says and runs.
+///
+/// The title goes above the action, in the same band: the two are one caption
+/// on the picture, and a key with no title keeps exactly the one line it had.
+/// The style's position decides which edge the band hugs — the same three
+/// places the deck's own band is drawn in, from the same value — so the window
+/// and the key on the desk never disagree about where a title sits.
+fn scrim(
+    title: Option<SharedString>,
+    binding: SharedString,
+    size: f32,
+    style: &TitleStyle,
+    device_side: f32,
+) -> Div {
+    let band = div()
         .w_full()
         .px(px(8.))
         .py(px(4.))
-        .bg(color(0x000000).opacity(0.55))
-        .child(one_line(binding, FONT_MICRO, color(0xffffff)))
+        .bg(color(0x000000).opacity(0.55));
+
+    // The title's label is the style's size, computed from the style and the two
+    // tiles alone: a frame never measures a string to decide how big it is.
+    let title_size = style.window_font(size, device_side);
+    let band = match title {
+        Some(title) => {
+            // The family the deck was drawn with, so the window and the key show
+            // the same type and not only the same words.
+            let words = title_words(&title, style);
+            let mut caption =
+                one_line(words, title_size, color(0xffffff)).font_weight(FontWeight::SEMIBOLD);
+            if let Some(family) = title_family(style) {
+                caption = caption.font_family(family);
+            }
+            band.flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(caption)
+                .child(one_line(binding, FONT_MICRO, color(0xffffff)))
+        }
+        None => band.child(one_line(binding, FONT_MICRO, color(0xffffff))),
+    };
+
+    // A full-tile layer with the band at one end: the flex anchor moves the
+    // band without anyone having to know how tall it turned out.
+    let layer = div()
+        .absolute()
+        .top(px(0.))
+        .left(px(0.))
+        .w_full()
+        .h_full()
+        .flex()
+        .flex_col();
+    match style.position {
+        TitlePosition::Top => layer.justify_start(),
+        TitlePosition::Middle => layer.justify_center(),
+        TitlePosition::Bottom => layer.justify_end(),
+    }
+    .child(band)
+}
+
+/// The family the window's title label is drawn in, when the style names one.
+///
+/// An empty name means "whatever sans the system defaults to", and that is the
+/// window theme's own default already: leaving the family unset is how the
+/// window and the deck agree on the system's font instead of on a name.
+fn title_family(style: &TitleStyle) -> Option<SharedString> {
+    (!style.family.is_empty()).then(|| SharedString::from(style.family.clone()))
+}
+
+/// The words a window label shows.
+///
+/// The deck's renderer applies the style's case rule to the string before it
+/// shapes it ([`crate::titletext`]); the window's labels have to apply the same
+/// rule, or a key under `UPPERCASE` would say two different things on the desk
+/// and on the screen.
+fn title_words(title: &SharedString, style: &TitleStyle) -> SharedString {
+    match style.uppercase {
+        true => SharedString::from(title.to_uppercase()),
+        false => title.clone(),
+    }
 }
 
 /// The buttons that act on the whole deck, below the grid.
@@ -758,9 +932,8 @@ fn inspector_card(
     // the profile's when it names one, and the icon of what the key runs
     // otherwise — the same lookup the tile makes, so the two never disagree.
     let appearance = controller
-        .profile_store
-        .active()
-        .and_then(|profile| profile.appearance_for(u16::from(number.get())));
+        .current_keys()
+        .and_then(|keys| keys.appearance_for(u16::from(number.get())));
     let artwork = controller.icons.artwork(bound.as_ref());
     let selected_picture = appearance
         .and_then(|appearance| appearance.asset())
@@ -948,6 +1121,7 @@ fn profile_card(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Co
         .collect();
 
     let count = names.len();
+    let active_name = active.clone();
     card(tokens)
         .w_full()
         .child(
@@ -966,6 +1140,40 @@ fn profile_card(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Co
             ),
             false => div().flex().flex_col().gap(px(6.)).children(rows),
         })
+        // Renaming is offered on the active profile: a key that switches to a
+        // profile holds its name, so the engine moves the profile, the active
+        // name and every key that points at it together.
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .w_full()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(Input::new(&controller.profile_input)),
+                )
+                .child(
+                    Button::new("rename-profile")
+                        .ghost()
+                        .label(match active_name {
+                            Some(name) => format!("RENAME \"{name}\""),
+                            None => "RENAME".to_string(),
+                        })
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.rename_active_profile(window, cx);
+                            cx.notify();
+                        })),
+                ),
+        )
+        .child(one_line(
+            "Clicking a name switches to it; the field renames the one that is active.",
+            FONT_CAPTION,
+            tokens.soft,
+        ))
 }
 
 /// What the page shows with no deck on the bus.
@@ -1025,14 +1233,32 @@ fn empty_card(tokens: Tokens, cx: &mut Context<Controller>) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{
-        appearance_label, face_for, grid_card_min, resolved_face, slot_colours, tile_size, Face,
-        TILE_MAX, TILE_MIN,
+        appearance_label, face_for, grid_card_min, resolved_face, slot_colours, tile_size,
+        title_words, Face, TILE_MAX, TILE_MIN,
     };
     use crate::icons::Artwork;
+    use crate::titlestyle::TitleStyle;
     use crate::ui::{Tokens, PAGE_PAD, RAIL_W, WINDOW_MIN_W};
     use crate::Slot;
     use gpui_kit::component::Theme;
+    use gpui_kit::SharedString;
     use ss550_engine::{Appearance, AssetName};
+
+    #[test]
+    fn the_window_label_says_what_the_key_says() {
+        // The deck's renderer applies the style's case rule before it shapes the
+        // words; a window label that skipped it would show `Canción` on a key
+        // that says `CANCIÓN`, and the two would disagree about the words.
+        let title = SharedString::from("Canción");
+        let typed = TitleStyle::default();
+        assert_eq!(title_words(&title, &typed), title);
+
+        let loud = TitleStyle {
+            uppercase: true,
+            ..TitleStyle::default()
+        };
+        assert_eq!(title_words(&title, &loud), SharedString::from("CANCIÓN"));
+    }
 
     #[test]
     fn a_tile_is_square_and_sized_from_the_column_count() {

@@ -54,6 +54,7 @@ mod error;
 mod hid_transport;
 mod image;
 mod keys;
+mod locator;
 
 pub use connection::{
     ensure_verified, is_deck_present, ButtonEvent, Command, Device, LONG_CONNECT_TIMEOUT, PID, VID,
@@ -62,6 +63,7 @@ pub use deck::Ss550Deck;
 pub use error::Ss550Error;
 pub use image::{ButtonImage, Rotation};
 pub use keys::Key;
+pub use locator::Locator;
 pub use ss550_protocol::ButtonState;
 
 /// Convenience re-export of commonly used types.

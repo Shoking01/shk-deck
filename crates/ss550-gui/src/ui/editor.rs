@@ -30,8 +30,8 @@ use gpui_kit::{
 
 use super::panels::{placeholder, thumbnail};
 use super::{
-    activate, micro_label, muted, one_line, path_line, segment, Tokens, FONT_CAPTION, FONT_SUB,
-    RADIUS_SM,
+    activate, micro_label, muted, one_line, path_line, segment, titlecontrols, Tokens,
+    FONT_CAPTION, FONT_SUB, RADIUS_SM,
 };
 use crate::apps;
 use crate::{Controller, DraftKind, NO_DECK_PICTURE};
@@ -111,6 +111,18 @@ pub(crate) fn key_editor(
                 this.note = "Fill the combination, then press SAVE BINDING.".into();
                 cx.notify();
             },
+        ))
+        .child(segment(
+            SharedString::from("draft-plugin"),
+            "LIVE STAT",
+            draft == DraftKind::Plugin,
+            tokens,
+            cx,
+            |this, _window, cx| {
+                this.draft = DraftKind::Plugin;
+                this.note = "Pick a measurement, then press SAVE BINDING.".into();
+                cx.notify();
+            },
         ));
 
     let launch_fields = div()
@@ -176,6 +188,7 @@ pub(crate) fn key_editor(
         DraftKind::Launch => launch_fields,
         DraftKind::OpenUrl => url_fields,
         DraftKind::Keys => key_fields,
+        DraftKind::Plugin => plugin_fields(controller, tokens, cx),
     };
 
     let save_row = div()
@@ -200,8 +213,8 @@ pub(crate) fn key_editor(
                 .ghost()
                 .label("CLEAR KEY")
                 .disabled(!has_deck)
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.clear_binding();
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.clear_binding(window, cx);
                     cx.notify();
                 })),
         );
@@ -214,7 +227,87 @@ pub(crate) fn key_editor(
         }
     };
 
-    div()
+    // The title sits under the action and above the colour row the caller adds:
+    // it is what the key *says*, which is a property of the key and not of what
+    // it runs. It saves on its own, because naming a key is not rebinding it.
+    let title_row = div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .w_full()
+        .child(
+            Field::new()
+                .label("TITLE · the words this key shows, drawn on its tile")
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .child(Input::new(&controller.title_input)),
+                        )
+                        .child(
+                            Button::new("save-title")
+                                .ghost()
+                                .label("SAVE TITLE")
+                                .disabled(!has_deck)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.save_title(cx);
+                                    cx.notify();
+                                })),
+                        ),
+                ),
+        )
+        .child(match has_deck {
+            // The cap is the engine's, not a second copy of the rule: the field
+            // says what will be accepted, and the engine is what refuses.
+            true => one_line(
+                format!(
+                    "Up to {} characters. Leave it empty to take the title off the key.",
+                    ss550_engine::MAX_TITLE_CHARS
+                ),
+                FONT_CAPTION,
+                tokens.soft,
+            ),
+            // The same sentence the refusal uses, so the caption and the note
+            // cannot disagree about why the button does nothing.
+            false => one_line(crate::NO_DECK_TITLE, FONT_CAPTION, tokens.soft),
+        });
+
+    // The key's own style, under the words it draws. Offered only when the key
+    // says something: a style with no words has nothing to draw, and the engine
+    // clears both together anyway.
+    let key = u16::from(controller.selected_key.get());
+    let has_title = controller
+        .current_keys()
+        .and_then(|keys| keys.title(key))
+        .is_some();
+    let style_block = match has_title {
+        true => {
+            let target = crate::FontTarget::Key(key);
+            let mut block = div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .w_full()
+                .child(micro_label("THIS KEY'S STYLE", tokens))
+                .child(titlecontrols::rows(controller, target, tokens, cx));
+            if let Some(reset) = titlecontrols::reset(controller, target, tokens, cx) {
+                block = block.child(reset);
+            }
+            Some(block.child(muted(
+                "Keys without a style of their own follow TITLE DEFAULTS on the Settings page.",
+                tokens,
+            )))
+        }
+        false => None,
+    };
+
+    let mut form = div()
         .flex()
         .flex_col()
         .gap(px(16.))
@@ -223,6 +316,11 @@ pub(crate) fn key_editor(
         .child(fields)
         .child(save_row)
         .child(one_line(saved_to, FONT_CAPTION, tokens.soft))
+        .child(title_row);
+    if let Some(block) = style_block {
+        form = form.child(block);
+    }
+    form
 }
 
 /// The heading the editor is introduced with, so both callers say it the same.
@@ -234,6 +332,88 @@ pub(crate) fn editor_heading(number: ss550_engine::KeyNumber, tokens: Tokens) ->
         .justify_between()
         .child(micro_label("WHAT THIS KEY RUNS", tokens))
         .child(micro_label(format!("#{}", number.get()), tokens))
+}
+
+/// The measurement a key shows, chosen from what the plugins of this build
+/// publish.
+///
+/// The list is the catalogue itself, not a copy: a cell this build does not have
+/// cannot be chosen, and the same list is what refuses a binding that names one
+/// after a plugin goes away. Nothing is measured to draw it — the plugin states
+/// its cells once, when it is built.
+fn plugin_fields(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller>) -> Div {
+    let chosen = controller.draft_plugin.clone();
+    let cells: Vec<ss550_plugin_api::CellSpec> = controller.plugins.cells().to_vec();
+
+    let mut list = div().flex().flex_col().gap(px(2.)).w_full();
+    for (position, cell) in cells.iter().enumerate() {
+        let picked = chosen.as_ref().is_some_and(|(plugin, id)| {
+            plugin == cell.plugin().as_str() && id == cell.cell().as_str()
+        });
+        let plugin = cell.plugin().to_string();
+        let id = cell.cell().to_string();
+        let swatch = cell.accent();
+        let row = div()
+            .id(SharedString::from(format!("plugin-cell-{position}")))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .h(px(34.))
+            .w_full()
+            .min_w(px(0.))
+            .px(px(8.))
+            .rounded(px(RADIUS_SM))
+            .bg(if picked {
+                tokens.accent_tint
+            } else {
+                tokens.elevated
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(10.))
+                    .h(px(10.))
+                    .rounded(px(5.))
+                    .bg(gpui_kit::rgb(
+                        (u32::from(swatch[0]) << 16)
+                            | (u32::from(swatch[1]) << 8)
+                            | u32::from(swatch[2]),
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w(px(0.))
+                    .child(one_line(cell.label(), FONT_SUB, tokens.ink))
+                    .child(one_line(cell.hint(), FONT_CAPTION, tokens.soft)),
+            );
+        list = list.child(activate(row, cx, move |this, _window, cx| {
+            this.draft = DraftKind::Plugin;
+            this.draft_plugin = Some((plugin.clone(), id.clone()));
+            this.note = format!(
+                "{} will show {} — press SAVE BINDING.",
+                this.selected_key.get(),
+                id
+            )
+            .into();
+            cx.notify();
+        }));
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .w_full()
+        .child(micro_label("MEASUREMENT · what this key shows", tokens))
+        .child(list)
+        .child(one_line(
+            "The key redraws itself as the measurement moves. Pressing it refreshes it.",
+            FONT_CAPTION,
+            tokens.soft,
+        ))
 }
 
 /// The picture the key would wear for the program in the field.
@@ -444,9 +624,8 @@ pub(crate) fn picture_block(
     let has_deck = controller.session.is_some();
     let key = u16::from(controller.selected_key.get());
     let in_use = controller
-        .profile_store
-        .active()
-        .and_then(|profile| profile.appearance_for(key))
+        .current_keys()
+        .and_then(|keys| keys.appearance_for(key))
         .and_then(|appearance| appearance.asset())
         .cloned();
     let folder = controller.assets.root().display().to_string();

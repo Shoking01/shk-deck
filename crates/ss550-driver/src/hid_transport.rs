@@ -69,6 +69,18 @@ impl Transport for HidTransport {
             .get_input_report(buf)
             .map_err(|error| TransportError::Io(error.to_string()))
     }
+
+    /// The device path this handle was opened from.
+    ///
+    /// Windows reports it per handle. It is what a caller remembers so the next
+    /// start can open the same deck directly instead of walking the bus, and a
+    /// handle that cannot answer costs nothing: the caller discovers instead.
+    fn device_path(&self) -> Option<String> {
+        self.device
+            .get_device_info()
+            .ok()
+            .map(|info| info.path().to_string_lossy().into_owned())
+    }
 }
 
 /// Clamps a [`Duration`] into hidapi's millisecond `i32` timeout.

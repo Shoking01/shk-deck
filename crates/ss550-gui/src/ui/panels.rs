@@ -11,14 +11,14 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
 use gpui_kit::{
-    div, px, AnyElement, ClickEvent, Context, Div, FontWeight, InteractiveElement as _,
+    div, px, AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, SharedString, Styled as _,
 };
 use std::sync::Arc;
 
 use super::{
-    activate, body, card, color, micro_label, muted, one_line, path_line, segment, Tokens,
-    FONT_CAPTION, FONT_MICRO, FONT_SUB, RADIUS_MD, RADIUS_SM,
+    activate, body, card, color, micro_label, muted, one_line, path_line, segment, titlecontrols,
+    Tokens, FONT_CAPTION, FONT_MICRO, FONT_SUB, RADIUS_MD, RADIUS_SM,
 };
 use crate::{ms_text, Controller};
 
@@ -200,8 +200,8 @@ fn bound_card(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Cont
                 .ghost()
                 .compact()
                 .label("REMOVE")
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.remove_binding(key);
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.remove_binding(key, window, cx);
                     cx.notify();
                 }))
                 .into_any_element(),
@@ -383,6 +383,42 @@ pub(crate) fn settings_page(
             path_line(bindings, tokens, &mono),
             tokens,
         ))
+        .child(info_row(
+            "INSTALLED",
+            path_line(
+                match ss550_tray::install::installed_executable() {
+                    Ok(path) => path.display().to_string(),
+                    Err(error) => error.to_string(),
+                },
+                tokens,
+                &mono,
+            ),
+            tokens,
+        ))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(12.))
+                .w_full()
+                .pt(px(4.))
+                .child(
+                    Button::new("install-app")
+                        .primary()
+                        .label("INSTALL TO START MENU")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.install_app();
+                            cx.notify();
+                        })),
+                )
+                .child(muted(
+                    "Copies the controller to the folder above and puts an entry in this \
+                     user's Start Menu, so Windows Search and Flow Launcher find it. \
+                     Starting it again while it runs brings the window back.",
+                    tokens,
+                )),
+        )
         .child(one_line(
             "Paths are cut short from the left, so the name at the end stays visible.",
             FONT_CAPTION,
@@ -419,10 +455,224 @@ pub(crate) fn settings_page(
         .w_full()
         .child(startup)
         .child(appearance)
+        .child(thresholds_card(controller, tokens, cx))
+        .child(titles_card(controller, tokens, cx))
         .child(files)
         .child(about)
 }
 
+/// The lines the Stats page paints a card by.
+///
+/// Two rows of steppers rather than text fields: a threshold is a number in a
+/// small range, and a field would need a parser, a refusal and a message for
+/// every way a number can be wrong. A click is unambiguous, and the pair is kept
+/// valid in one place (`Lines::new`), so a warning can never end up above its
+/// limit however many times it is pressed.
+fn thresholds_card(
+    controller: &mut Controller,
+    tokens: Tokens,
+    cx: &mut Context<Controller>,
+) -> Div {
+    let mut card_body = card(tokens)
+        .w_full()
+        .child(micro_label("THRESHOLDS", tokens))
+        .child(muted(
+            "Where the Stats page turns a card amber, and then red.",
+            tokens,
+        ));
+
+    // What went wrong with the file, next to the controls that write it: the
+    // status line carries the same sentence for a moment, but it is replaced the
+    // next time the deck reports in.
+    if let Some(note) = &controller.thresholds_note {
+        card_body = card_body.child(
+            div()
+                .text_size(px(FONT_MICRO))
+                .text_color(tokens.warn)
+                .child(note.clone()),
+        );
+    }
+
+    for kind in [
+        crate::thresholds::Kind::Share,
+        crate::thresholds::Kind::Degrees,
+    ] {
+        let lines = controller.thresholds.lines(kind);
+        let ceiling = crate::thresholds::Thresholds::ceiling(kind);
+        let step = if kind == crate::thresholds::Kind::Share {
+            5.0
+        } else {
+            2.0
+        };
+        // The two lines on one row, each one a caption followed by its own pair of
+        // arrows with the number between them: `WARN − 80 +` is the shape every
+        // stepper has ever had, and it needs no second explanation.
+        let row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(18.))
+            .w_full()
+            .child(
+                div()
+                    .w(px(110.))
+                    .text_size(px(FONT_MICRO))
+                    .text_color(tokens.ink)
+                    .child(crate::thresholds::Thresholds::label(kind)),
+            )
+            .child(line_control(
+                kind,
+                "warn",
+                "WARN",
+                lines.warn,
+                tokens.warn,
+                step,
+                ceiling,
+                tokens,
+                cx,
+            ))
+            .child(line_control(
+                kind,
+                "alarm",
+                "LIMIT",
+                lines.alarm,
+                tokens.bad,
+                step,
+                ceiling,
+                tokens,
+                cx,
+            ));
+        card_body = card_body.child(row);
+    }
+    card_body
+}
+
+/// `WARN − 80 +`, one line of one kind.
+#[allow(clippy::too_many_arguments)]
+fn line_control(
+    kind: crate::thresholds::Kind,
+    which: &'static str,
+    caption: &'static str,
+    value: f32,
+    colour: Hsla,
+    step: f32,
+    ceiling: f32,
+    tokens: Tokens,
+    cx: &mut Context<Controller>,
+) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.))
+        .child(
+            div()
+                .text_size(px(FONT_MICRO))
+                .text_color(tokens.soft)
+                .child(caption),
+        )
+        .child(stepper(kind, which, value, -step, ceiling, cx))
+        .child(
+            div()
+                .w(px(34.))
+                .text_size(px(FONT_CAPTION))
+                .text_color(colour)
+                .child(format!("{value:.0}")),
+        )
+        .child(stepper(kind, which, value, step, ceiling, cx))
+}
+
+/// One arrow that moves a line by `step` and saves it.
+///
+/// The value is carried in the button's own id, so two arrows on the same line
+/// never share an element.
+fn stepper(
+    kind: crate::thresholds::Kind,
+    which: &'static str,
+    value: f32,
+    step: f32,
+    ceiling: f32,
+    cx: &mut Context<Controller>,
+) -> AnyElement {
+    let target = value + step;
+    let label = if step > 0.0 { "+" } else { "−" };
+    // The kind is part of the id because both kinds can sit on the same number
+    // and two elements with one id are one element as far as the window is
+    // concerned.
+    let scope = match kind {
+        crate::thresholds::Kind::Share => "share",
+        crate::thresholds::Kind::Degrees => "degrees",
+    };
+    let id = SharedString::from(format!("{scope}-{which}-{}-{label}", value as i32));
+    Button::new(id)
+        .ghost()
+        .label(label)
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            let lines = this.thresholds.lines(kind);
+            let next = if which == "warn" {
+                crate::thresholds::Lines::new(target, lines.alarm, ceiling)
+            } else {
+                crate::thresholds::Lines::new(lines.warn, target, ceiling)
+            };
+            this.set_thresholds(this.thresholds.with(kind, next), cx);
+        }))
+        .into_any_element()
+}
+
+/// How a title is drawn when its key does not say otherwise.
+///
+/// The **default** style, applied on the click: the controller recomposes the
+/// payloads of the keys that follow it and repaints those, so the deck itself is
+/// the preview and no second renderer exists to keep in step. A key with a style
+/// of its own is untouched by this card — that is the difference between the two
+/// — and the card is offered with no deck too, because the default is saved
+/// whether or not anything is plugged in.
+fn titles_card(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller>) -> Div {
+    // How many keys say something of their own, bounded by the deck's own key
+    // count: the profile is keyed by key number and nothing else knows how many
+    // there are.
+    let key_count = controller
+        .session
+        .as_ref()
+        .map_or(0, crate::session::DeckSession::key_count);
+    // The page the deck is showing: a folder may set styles the root never did.
+    let overrides = match controller.current_keys() {
+        Some(keys) => (1..=key_count as u16)
+            .filter(|key| keys.title_style(*key).is_some())
+            .count(),
+        None => 0,
+    };
+
+    card(tokens)
+        .w_full()
+        .child(micro_label("TITLE DEFAULTS", tokens))
+        .child(muted(
+            "How a title is drawn when the key does not say otherwise: the words are set in a \
+             font the system already has, at a pixel size, and a title too long for its band steps \
+             down rather than being cut. A key can carry a style of its own, from the editor on \
+             the key itself.",
+            tokens,
+        ))
+        .child(titlecontrols::rows(
+            controller,
+            crate::FontTarget::Defaults,
+            tokens,
+            cx,
+        ))
+        .child(muted(
+            match overrides {
+                0 => "No key has a style of its own, so every title follows this.".to_string(),
+                1 => "One key has a style of its own and does not follow this.".to_string(),
+                count => format!("{count} keys have a style of their own and do not follow this."),
+            },
+            tokens,
+        ))
+        .child(muted(
+            "The size is a ceiling: the fit brings it down until the words fit, and never up. \
+             Every choice is saved for the next start.",
+            tokens,
+        ))
+}
 // ── Shared pieces for the pages ─────────────────────────────────────────
 
 /// A 44 px thumbnail: the fitted tile, or a quiet box when it is not ready.

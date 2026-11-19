@@ -227,17 +227,60 @@ fn deliver(sequence: &[KeyStroke]) -> Result<(), String> {
     // is ever written or read.
     let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
 
-    // A short count means the system took some events and refused the rest —
+    // A short count means the system took some events and refused the rest -
     // typically because the foreground window belongs to a higher-integrity
     // process. Reporting it is the only way the window can say the keystroke
-    // did not arrive; a half-sent combination is not a success.
+    // did not arrive; a half-sent combination is not a success. Whatever the
+    // system did take may have been a modifier going down, and a modifier left
+    // down is not a failed shortcut: it is a keyboard the user has to fix by
+    // hand, with Ctrl or Alt stuck and the mouse behaving like it is held. So
+    // every key this attempt could have pressed is released before the error
+    // goes back, and the release is best-effort: it cannot fail worse than the
+    // state it is repairing.
     if (sent as usize) < inputs.len() {
+        release_attempted(&inputs);
         return Err(format!(
             "Windows accepted {sent} of {} key events, so the combination was not sent",
             inputs.len()
         ));
     }
     Ok(())
+}
+
+/// Releases every key `attempted` could have left down, ignoring the outcome.
+///
+/// The keys are released in the reverse order they were pressed in, which is the
+/// order a hand would let go of them.
+#[cfg(windows)]
+fn release_attempted(attempted: &[windows::Win32::UI::Input::KeyboardAndMouse::INPUT]) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    };
+
+    let mut releases: Vec<INPUT> = attempted
+        .iter()
+        .map(|input| {
+            let code = unsafe { input.Anonymous.ki.wVk };
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VIRTUAL_KEY(code.0),
+                        wScan: 0,
+                        dwFlags: KEYEVENTF_KEYUP,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            }
+        })
+        .collect();
+    releases.reverse();
+
+    // SAFETY: a live array of `INPUT` records with its own length, exactly as
+    // `deliver` builds them. The result is deliberately ignored: this runs on
+    // the path that is already reporting a failure.
+    let _ = unsafe { SendInput(&releases, std::mem::size_of::<INPUT>() as i32) };
 }
 
 /// Everywhere else there is no keystroke to send.

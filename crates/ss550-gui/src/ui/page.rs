@@ -15,19 +15,22 @@ pub(crate) enum Page {
     Deck,
     /// What each key runs when it is pressed.
     Actions,
+    /// What every measurement is doing, and what it has been doing.
+    Stats,
     /// How the controller behaves away from the window.
     Settings,
 }
 
 impl Page {
     /// Every page, in the order the rail lists them.
-    pub(crate) const ALL: [Page; 3] = [Page::Deck, Page::Actions, Page::Settings];
+    pub(crate) const ALL: [Page; 4] = [Page::Deck, Page::Actions, Page::Stats, Page::Settings];
 
     /// The rail label: one word, so the rows stay a column and not a table.
     pub(crate) fn label(self) -> &'static str {
         match self {
             Page::Deck => "Deck",
             Page::Actions => "Actions",
+            Page::Stats => "Stats",
             Page::Settings => "Settings",
         }
     }
@@ -37,6 +40,7 @@ impl Page {
         match self {
             Page::Deck => "Deck",
             Page::Actions => "Actions",
+            Page::Stats => "Stats",
             Page::Settings => "Settings",
         }
     }
@@ -51,6 +55,10 @@ impl Page {
             Page::Actions => {
                 "Every key as a chip, the editor for the selected one, and what is bound right \
                  now. A key with no action still lights up and still says so."
+            }
+            Page::Stats => {
+                "What every measurement is doing, and what it has been doing for the last few \
+                 minutes. The deck's sampler does the measuring; nothing here asks the machine."
             }
             Page::Settings => {
                 "How the controller behaves when the window is closed and the deck is left to it."
@@ -95,7 +103,10 @@ mod tests {
     #[test]
     fn the_rail_starts_on_the_deck_and_lists_the_pages_in_order() {
         assert_eq!(Page::default(), Page::Deck);
-        assert_eq!(Page::ALL, [Page::Deck, Page::Actions, Page::Settings]);
+        assert_eq!(
+            Page::ALL,
+            [Page::Deck, Page::Actions, Page::Stats, Page::Settings]
+        );
         assert_eq!(Page::Deck.label(), "Deck");
         assert_eq!(Page::Actions.label(), "Actions");
         assert_eq!(Page::Settings.label(), "Settings");
@@ -106,7 +117,7 @@ mod tests {
         // The picture a key shows belongs to the key, and the key is edited on
         // the `Deck` page and summarised on `Actions`. A fourth page for it was
         // retired, and a rail row reappearing there would be the regression.
-        assert_eq!(Page::ALL.len(), 3, "the rail lists exactly three pages");
+        assert_eq!(Page::ALL.len(), 4, "the rail lists exactly four pages");
         for page in Page::ALL {
             assert_ne!(page.label(), "Artwork");
             assert_ne!(page.title(), "Artwork");

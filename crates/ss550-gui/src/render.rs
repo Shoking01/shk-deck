@@ -144,6 +144,46 @@ pub fn render_rgba(
     encode_tile(spec, name, &rgb, &QUALITY_LADDER)
 }
 
+/// The fitted tile for `source`, as pixels a title can be drawn on.
+///
+/// The picture is decoded and fitted exactly as [`render`] fits it, and handed
+/// back in RGBA so [`crate::icons::compose_title`] can draw into the same pixels
+/// the encoder will see. [`render_rgba`] then takes it the rest of the way: the
+/// flip, the fit — an identity at this size — and the quality ladder.
+///
+/// # Errors
+///
+/// [`RenderError::EmptySpec`] when the deck asks for no pixels, and
+/// [`RenderError::Decode`] when the bytes are not an image this build reads.
+pub fn fitted_tile(
+    spec: ImageSpec,
+    name: &AssetName,
+    source: &[u8],
+) -> Result<RgbaImage, RenderError> {
+    let (width, height) = (spec.width(), spec.height());
+    if width == 0 || height == 0 {
+        return Err(RenderError::EmptySpec { width, height });
+    }
+
+    let decoded = image::load_from_memory(source).map_err(|source| RenderError::Decode {
+        name: name.to_string(),
+        source,
+    })?;
+    Ok(opaque(&fit(spec, &decoded.to_rgb8())))
+}
+
+/// An RGB picture as opaque RGBA, so a title can be drawn onto it.
+///
+/// The fit already flattened the picture onto black, so the alpha is the
+/// canvas's: a JPEG has none, and nothing downstream has to guess at it.
+fn opaque(picture: &RgbImage) -> RgbaImage {
+    let mut out = RgbaImage::new(picture.width(), picture.height());
+    for (x, y, pixel) in picture.enumerate_pixels() {
+        out.put_pixel(x, y, Rgba([pixel[0], pixel[1], pixel[2], 0xFF]));
+    }
+    out
+}
+
 /// The tile one deck accepts, from a picture already in RGB.
 fn encode_tile(
     spec: ImageSpec,

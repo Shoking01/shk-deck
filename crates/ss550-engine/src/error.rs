@@ -17,6 +17,60 @@ pub enum ActionError {
     #[error("{0:?} is not a URL: it needs a scheme, for example https://example.com")]
     InvalidUrl(String),
 
+    /// A navigation action names a page with nothing in it.
+    #[error("a page name cannot be empty")]
+    EmptyPageName,
+
+    /// A navigation action names a page longer than a page name may be.
+    #[error("a page name can hold at most {max} characters")]
+    PageNameTooLong {
+        /// The cap, in characters.
+        max: usize,
+    },
+
+    /// A navigation action names a page with a character a name cannot hold.
+    #[error("a page name cannot contain control characters")]
+    PageNameControlCharacter,
+
+    /// A profile switch names no profile.
+    #[error("a profile name cannot be empty")]
+    EmptyProfileName,
+
+    /// A plugin binding names a plugin id the contract refuses.
+    #[error("the plugin id is not usable: {source}")]
+    PluginId {
+        /// Why the contract refused it.
+        source: ss550_plugin_api::IdError,
+    },
+
+    /// A plugin binding names a cell id the contract refuses.
+    #[error("the plugin cell is not usable: {source}")]
+    PluginCell {
+        /// Why the contract refused it.
+        source: ss550_plugin_api::IdError,
+    },
+
+    /// A plugin reading was handed to the runner.
+    ///
+    /// A reading is drawn on the key and refreshed by the window; there is
+    /// nothing to start, and a worker with no window cannot draw one.
+    #[error("{action} is a reading the window draws, not something to run")]
+    ReadingIsNotRunnable {
+        /// The action, as its one-line label.
+        action: String,
+    },
+
+    /// A navigation action was handed to the runner.
+    ///
+    /// Navigation is what the deck is *showing*, not something a process does:
+    /// the window applies it where the keys are drawn, and the runner refuses it
+    /// so a bound key can never half-run one.
+    #[error("{action} changes what the deck shows, so the window applies it; the runner cannot")]
+    NavigationIsNotRunnable {
+        /// The action, as its one-line label.
+        action: String,
+    },
+
     /// The program could not be started.
     #[error("could not run {program}: {source}")]
     Launch {
@@ -117,6 +171,28 @@ pub enum ActionError {
     /// A profile operation failed for a named reason.
     #[error("{0}")]
     ProfileError(String),
+}
+
+/// Why a key title was refused.
+///
+/// A title is text the user typed, so a refusal is a sentence they can act on:
+/// each variant says what a title must be instead. It is a type of its own
+/// rather than a variant of [`ActionError`] because a title belongs to the
+/// profile, not to an action, and because a text rule is worth comparing: the
+/// tests assert the exact variant, while `ActionError` carries I/O and serde
+/// errors that cannot be compared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum TitleError {
+    /// The title is longer than a key can show.
+    #[error("a title can hold at most {max} characters")]
+    TooLong {
+        /// The cap, in characters.
+        max: usize,
+    },
+
+    /// The title holds a character that is not printable text.
+    #[error("a title cannot contain control characters")]
+    ControlCharacter,
 }
 
 /// Why a keystroke combination was refused.

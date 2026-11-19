@@ -62,6 +62,12 @@
 //! }
 //! ```
 
+// Every caller of the decoder helpers below is the Win32 path: `SHGetFileInfoW`
+// is compiled out on any other platform, so nothing there asks a PNG to become
+// RGBA. The helpers and their tests still build everywhere, which is the point of
+// keeping them instead of gating them.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use std::path::Path;
 
 use crate::shortcut;
@@ -562,7 +568,10 @@ mod windows_tests {
             .or_else(|| std::env::current_exe().ok())
             .expect("some executable to ask about");
         let Some(icon) = program_icon(&target) else {
-            eprintln!("the shell answered no icon for {}; skipping", target.display());
+            eprintln!(
+                "the shell answered no icon for {}; skipping",
+                target.display()
+            );
             return;
         };
 

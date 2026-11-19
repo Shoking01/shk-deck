@@ -12,10 +12,16 @@ You are an autonomous Rust development agent building `streamcraft-rs`, a native
 
 ### 2. Code Standards (Rust)
 - **Edition:** 2021, MSRV 1.87+
-- **Lints:** `#![deny(unsafe_code)]` in all crates except `ss550-tray`, the one
-  crate allowed to call Win32 (hide/restore the native window, own the
-  notification-area icon, read the logon key). Its exception is declared in its
-  `Cargo.toml` with a comment saying why, not as a blanket allowance.
+- **Lints:** `#![deny(unsafe_code)]` in all crates except two, each with its
+  exception declared in its `Cargo.toml` with a comment saying why, never as a
+  blanket allowance:
+  - `ss550-tray`, the one crate allowed to call Win32 (hide/restore the native
+    window, own the notification-area icon, read the logon key);
+  - `ss550-sensors`, the one crate allowed to call a vendor library: AMD's
+    `atiadlxx.dll` for the graphics card's temperature and activity, and
+    PawnIO's driver for the processor's. Every call in it is **read-only** —
+    it declares no setter of the vendor API — and every status is checked before
+    a value is used.
 - **Formatting:** `rustfmt` with default settings — run `cargo fmt` before every commit
 - **Clippy:** Zero warnings — run `cargo clippy --all-targets --all-features`
 - **Documentation:** Every public API item must have doc comments with examples

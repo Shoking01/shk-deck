@@ -891,6 +891,14 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "ss550-plugin-api",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "ss550-plugin-api"
+version = "0.1.0"
+dependencies = [
  "thiserror 2.0.21",
 ]
 

@@ -142,6 +142,94 @@ pub fn refresh_installed(running: &Path) -> Result<Refresh, TrayError> {
     Ok(refresh_at(&installed, running))
 }
 
+/// The name the entry in the Start Menu gets.
+///
+/// It is what Windows Search and every launcher that indexes the Start Menu show,
+/// so it is the name the program calls itself by, not the file name it happens to
+/// have on disk.
+pub const SHORTCUT_NAME: &str = "Sh-Deck.lnk";
+
+/// The folder this user's Start Menu entries live in.
+///
+/// Both Windows Search and launchers like Flow Launcher index this folder; an
+/// entry here is what makes a program findable by typing its name.
+#[cfg(windows)]
+pub fn start_menu_dir() -> Result<PathBuf, TrayError> {
+    let appdata = std::env::var_os("APPDATA").ok_or_else(|| {
+        TrayError::Install("APPDATA is not set, so there is no Start Menu to write to".into())
+    })?;
+    Ok(PathBuf::from(appdata)
+        .join("Microsoft")
+        .join("Windows")
+        .join("Start Menu")
+        .join("Programs"))
+}
+
+/// Everywhere but Windows there is no Start Menu.
+#[cfg(not(windows))]
+pub fn start_menu_dir() -> Result<PathBuf, TrayError> {
+    Err(TrayError::Unsupported)
+}
+
+/// Where the entry in the Start Menu is written.
+pub fn start_menu_shortcut() -> Result<PathBuf, TrayError> {
+    Ok(start_menu_dir()?.join(SHORTCUT_NAME))
+}
+
+/// Installs the controller as a program this user can find and start.
+///
+/// Two things, in this order: the running binary is copied into the install
+/// folder (the same copy the logon entry points at, so there is one file and
+/// not two), and an entry is written into the Start Menu that starts that copy.
+/// It returns the entry, which is the thing to tell the user about.
+///
+/// No administrator rights, no installer, no registry beyond the logon entry the
+/// switch already owns: deleting the folder and the entry is a complete
+/// uninstall.
+///
+/// # Example
+///
+/// ```no_run
+/// # fn main() -> Result<(), ss550_tray::TrayError> {
+/// let running = std::env::current_exe()
+///     .map_err(|error| ss550_tray::TrayError::Install(error.to_string()))?;
+/// let entry = ss550_tray::install::install(&running)?;
+/// println!("start it from {}", entry.display());
+/// # Ok(())
+/// # }
+/// ```
+pub fn install(running: &Path) -> Result<PathBuf, TrayError> {
+    let installed = ensure_installed(running)?;
+    let entry = start_menu_shortcut()?;
+    if let Some(parent) = entry.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| TrayError::Install(format!("{}: {error}", parent.display())))?;
+    }
+    crate::shortcut::create(&entry, &installed, &install_dir()?, SHORTCUT_TITLE)
+        .map_err(TrayError::Install)?;
+    // The entry the program used to write is gone under the new name: leaving it
+    // would put two Deck Controllers in the launcher, one of them stale.
+    if let Some(parent) = entry.parent() {
+        let _ = std::fs::remove_file(parent.join("Deck Controller.lnk"));
+    }
+    Ok(entry)
+}
+
+/// Takes the Start Menu entry away, leaving the installed copy alone.
+///
+/// The copy stays on purpose: the logon entry may still name it, and a shortcut
+/// is the only thing this removes.
+pub fn remove_shortcut() -> Result<(), TrayError> {
+    match std::fs::remove_file(start_menu_shortcut()?) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(TrayError::Install(error.to_string())),
+    }
+}
+
+/// What the Start Menu entry says about the program, on hover.
+const SHORTCUT_TITLE: &str = "Sh-Deck — the StreamCraft SS550 on your desk";
+
 /// [`refresh_installed`], with the installed path spelled out.
 ///
 /// Split out so a test can point it at a scratch folder instead of the copy

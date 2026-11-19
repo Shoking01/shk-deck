@@ -1,0 +1,25 @@
+[package]
+name = "ss550-sensors"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Native hardware sensors: AMD's display library for the graphics card, PawnIO's driver for the processor"
+license = "MIT OR Apache-2.0"
+
+# unsafe code: this is the crate that calls a vendor library, and there is no
+# safe API for asking a graphics driver for a temperature. Everything unsafe
+# lives in `adl`; the module above it is a safe wrapper that checks the library's
+# own status code on every call, and every call only *reads*: nothing here writes
+# to a register, a device or a file. It is the second crate in the workspace to
+# hold this exception, beside `ss550-tray`, and for the same reason: no safe
+# crate can do this job.
+[lints.rust]
+unsafe_code = "allow"
+
+[[bin]]
+name = "ss550-sensor-helper"
+path = "src/bin/sensor_helper.rs"
+
+# The library is loaded at run time, from the copy AMD's driver installs.
+[target."cfg(windows)".dependencies]
+libloading = "0.8"

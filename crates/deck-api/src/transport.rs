@@ -47,4 +47,15 @@ pub trait Transport {
     /// Returns how many bytes were read. **Zero means no control report was
     /// pending**, which is the normal answer most of the time.
     fn read_control(&mut self, buf: &mut [u8]) -> Result<usize, TransportError>;
+
+    /// The path this transport was opened from, when the platform has one.
+    ///
+    /// A caller that remembers it can open the same device again without
+    /// enumerating the bus, which is the difference between a start that only
+    /// touches one handle and one that walks every HID device on the machine.
+    /// A transport with no path — a fake, a pipe — answers `None`, and the
+    /// caller falls back to discovering the device.
+    fn device_path(&self) -> Option<String> {
+        None
+    }
 }

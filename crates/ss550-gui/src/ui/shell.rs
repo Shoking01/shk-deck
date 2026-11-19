@@ -14,6 +14,7 @@ use gpui_kit::{
 };
 
 use super::page::Page;
+use super::stats;
 use super::{
     activate, body, color, dot, micro_label, muted, one_line, palette, panels, Tokens, APP_BAR_H,
     FONT_APP, FONT_CAPTION, FONT_MICRO, FONT_SUB, FONT_TITLE, PAGE_PAD, RADIUS_PILL, RADIUS_SM,
@@ -80,7 +81,7 @@ fn app_bar(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Control
                             div()
                                 .text_size(px(FONT_APP))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child("Deck Controller"),
+                                .child("Sh-Deck"),
                         )
                         .child(one_line(subtitle, FONT_CAPTION, tokens.soft)),
                 ),
@@ -281,10 +282,11 @@ fn rail(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
         .border_color(tokens.border)
         .children(items)
         // The palette sits under the pages: the pages are where you go, the
-        // palette is what you drag onto a key from anywhere.
+        // palette is what you drag onto a key from anywhere. It takes the
+        // height the deck card leaves, so its recents list scrolls inside the
+        // rail instead of pushing the card off the bottom.
         .child(div().h(px(1.)).w_full().bg(tokens.border).my(px(8.)))
         .child(palette::actions_palette(controller, tokens))
-        .child(div().flex_1())
         .child(rail_deck_card(controller, tokens, cx))
 }
 
@@ -474,6 +476,7 @@ fn page_body(
     match page {
         Page::Deck => super::deck::deck_page(controller, tokens, cx).into_any_element(),
         Page::Actions => panels::actions_page(controller, tokens, cx).into_any_element(),
+        Page::Stats => stats::stats_page(controller, tokens, cx).into_any_element(),
         Page::Settings => panels::settings_page(controller, tokens, cx).into_any_element(),
     }
 }
