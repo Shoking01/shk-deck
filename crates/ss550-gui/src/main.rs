@@ -760,6 +760,13 @@ struct Controller {
     /// Held apart from the inputs because a cell is two ids, not a string: the
     /// list under the form sets it, and SAVE BINDING turns it into the action.
     draft_plugin: Option<(String, String)>,
+    /// The plugin whose cells the reading editor lists, when a plugin row is
+    /// what opened it.
+    ///
+    /// Set by dropping a plugin row on a key and cleared by every other way into
+    /// the editor. It narrows a list; it never restricts what may be bound, so a
+    /// key already bound to another plugin still shows every cell.
+    draft_plugin_filter: Option<String>,
     program_input: Entity<InputState>,
     args_input: Entity<TextareaState>,
     url_input: Entity<InputState>,
@@ -1142,6 +1149,11 @@ impl Controller {
             cx.background_executor().timer(POLL).await;
             let alive = this.update(cx, |this, cx| {
                 let mut changed = this.poll_deck();
+                // A composed face is painted as soon as it exists. It used to
+                // wait for the maintenance tick, which left the key marked as in
+                // flight for up to half a second — long enough that the next
+                // sample found it busy and the key skipped a second of a clock.
+                changed |= this.collect_faces();
                 // A rebuild that finds titled keys and no font asks for the scan
                 // here, where there is a context to spawn it with.
                 this.pump_fonts(cx);
@@ -1218,6 +1230,7 @@ impl Controller {
             selected_key: KeyNumber::default(),
             draft: DraftKind::Launch,
             draft_plugin: None,
+            draft_plugin_filter: None,
             program_input,
             args_input,
             url_input,
@@ -2621,12 +2634,11 @@ impl Controller {
         }
 
         self.heartbeat();
-        // The newest walk over the machine, the keys it moved, the faces that are
-        // ready to paint, and the sentence the tray icon is showing. All four
-        // happen here, on the thread that owns the deck: the measurement and the
-        // drawing ran on threads of their own.
+        // The newest walk over the machine, and the keys it moved. The faces it
+        // queues are collected by the fast loop instead: a face that sat here
+        // until the next half-second tick would keep its key marked as in flight,
+        // and the sample after it would be refused for that key.
         self.pump_samples();
-        self.collect_faces();
         self.refresh_tray_tooltip();
     }
 
@@ -2884,6 +2896,11 @@ impl Controller {
 
         self.draft = kind;
         self.draft_plugin = chosen;
+        // A key loaded into the editor is looked at whole: the list of readings
+        // is every cell this build has, with the bound one picked inside it. A
+        // filter left over from a drag would hide the siblings of the very cell
+        // the key already shows.
+        self.draft_plugin_filter = None;
         // The key's face is decided by the program in the field, so the icon
         // cache is told which one it is before the editor draws. A field that is
         // only text has no picture, and the editor draws the initial instead.
@@ -3020,9 +3037,11 @@ impl Controller {
     /// A template is an intent: it selects the key and aims the editor at that
     /// kind, in place — the drop happens on the `Deck` page, where the key is,
     /// so the window must not move to another page to show a form. The key is
-    /// not touched until SAVE BINDING. An action that is already bound has
-    /// nothing left to ask for, so it goes straight to the save path — the same
-    /// one the editor uses, file and deck included.
+    /// not touched until SAVE BINDING. A plugin row is the same intent one step
+    /// further in: the editor opens on the reading list narrowed to that
+    /// plugin, and which cell is bound is still the user's click. An action that
+    /// is already bound has nothing left to ask for, so it goes straight to the
+    /// save path — the same one the editor uses, file and deck included.
     fn drop_palette_entry(
         &mut self,
         number: KeyNumber,
@@ -3031,14 +3050,27 @@ impl Controller {
         cx: &mut Context<Self>,
     ) {
         match ui::palette::drop_plan(drag) {
-            ui::palette::DropPlan::OpenEditor(kind) => {
+            ui::palette::DropPlan::OpenEditor { kind, plugin } => {
                 self.select_key(number, window, cx);
+                // Read after `select_key`, which hands the editor a whole list
+                // again: the drop is what narrows it.
+                let name = plugin
+                    .as_deref()
+                    .and_then(|id| self.plugins.groups().iter().find(|group| group.id() == id))
+                    .map(|group| group.name().to_string());
+                self.draft_plugin_filter = plugin;
                 self.open_editor(kind, window, cx);
-                self.note = format!(
-                    "Key #{} — set it to {} and press SAVE BINDING.",
-                    number.get(),
-                    kind.label()
-                )
+                self.note = match name {
+                    Some(name) => format!(
+                        "Key #{} — pick which part of {name} it shows, then press SAVE BINDING.",
+                        number.get()
+                    ),
+                    None => format!(
+                        "Key #{} — set it to {} and press SAVE BINDING.",
+                        number.get(),
+                        kind.label()
+                    ),
+                }
                 .into();
             }
             ui::palette::DropPlan::Assign(action) => {

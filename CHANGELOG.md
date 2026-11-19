@@ -7,6 +7,36 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Changed — the seconds tick one at a time
+- The sampler walks the machine **once a second** instead of once every two, which
+  is what makes the clock's second hand advance by one. The schedule is driven by
+  absolute deadlines, not by sleeping for the interval: a sleep that pays for the
+  walk out of its own interval slips the phase, and a clock that skips or repeats
+  a second is not a clock. A walk that overruns its slot costs the samples it ate,
+  never a burst of catch-up walks.
+- The Stats page keeps **the same four minutes**: the sparkline holds twice as
+  many samples, one bar per second, and a test holds the depth and the cadence
+  together so one cannot be changed without the other.
+- A composed face is **painted as soon as it exists**, on the fast loop, not when
+  the half-second maintenance tick came round. A face that sat in the queue kept
+  its key marked as "in flight" for up to half a second, and the next sample found
+  it busy and skipped that key — which is exactly how one second in five went
+  missing from the clock.
+
+### Added — a clock, as three keys
+- `ss550-plugins` ships a second plugin, **`clock`**: three cells (`hours`,
+  `minutes`, `seconds`) that publish the local time as two digits each, so three
+  keys side by side read as one clock. Two digits always — `07`, not `7` — and the
+  labels are `HOUR`, `MIN`, `SEC` because the face draws them in a six-character
+  band.
+- The rail's `ACTIONS` section now lists **one draggable row per plugin** instead
+  of a single `Live stat` row: dropping `Clock` on a key opens the reading editor
+  with the cell list narrowed to its three cells, and `LIVE STAT` widens it back to
+  every plugin. The list is read from the catalogue, so a plugin this build ships
+  is a row without anyone adding one.
+- A reading can now be **spelled**, not only numbered: `Reading::spelled` covers a
+  value whose text is not a measurement — a time, a state — and has no bar.
+
 ### Added — plugins, and the first one: system stats
 - The **graphics card's temperature needs no other program**: `ss550-sensors` asks
   AMD's own display library (`atiadlxx.dll`, installed with the Radeon driver)

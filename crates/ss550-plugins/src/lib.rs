@@ -34,13 +34,63 @@ pub use system_stats::{temperature_hint, SystemStats};
 
 /// How often the sampler walks the machine.
 ///
-/// Two seconds is the compromise the deck's link asks for: a percentage that
-/// moves every second is a JPEG every second per key, and a person reading a key
-/// from across a desk cannot use a finer number than this anyway.
-pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+/// One second, because a clock is a plugin like any other: its seconds are
+/// sampled, so a slower walk would make the second hand jump two at a time. A
+/// percentage that moves every second is a JPEG every second — but only for the
+/// keys whose face actually changed, which is what keeps the cost of this number
+/// bounded.
+pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The longest the sampler sleeps without checking whether it was told to stop.
 const STOP_CHECK: Duration = Duration::from_millis(50);
+
+/// When the next walk is due.
+///
+/// The sampler must not sleep *for* the interval: that adds the walk's own time
+/// to every cycle, so the phase slips and — at a one-second interval — a clock's
+/// seconds start skipping and repeating. The deadline is held here and moved on
+/// by exactly one interval, so neither a walk that took longer nor a wake-up the
+/// system delayed can push the next one late.
+struct Schedule {
+    next: Instant,
+    interval: Duration,
+}
+
+impl Schedule {
+    /// A schedule whose first walk is due at once.
+    fn new(interval: Duration) -> Self {
+        Self {
+            next: Instant::now(),
+            interval,
+        }
+    }
+
+    /// Sleeps until the next walk is due, in short steps so a stop is answered
+    /// promptly. Returns `false` when it was told to stop first.
+    fn wait(&mut self, stop: &AtomicBool) -> bool {
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                return false;
+            }
+            let now = Instant::now();
+            if now >= self.next {
+                break;
+            }
+            std::thread::sleep(STOP_CHECK.min(self.next - now));
+        }
+
+        // The next walk is one interval after the slot this one occupied. A walk
+        // that overran its own slot leaves that deadline in the past, and the
+        // schedule starts again from now: the samples it ate are gone, and a
+        // burst of walks catching up would spend the link on old numbers.
+        let next = self.next + self.interval;
+        self.next = match next > Instant::now() {
+            true => next,
+            false => Instant::now() + self.interval,
+        };
+        true
+    }
+}
 
 /// How long a stopped sampler is waited for before it is left behind.
 ///
@@ -325,7 +375,10 @@ fn run(interval: Duration, sender: SyncSender<Samples>, stop: Arc<AtomicBool>) {
     }
     std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
 
-    while !stop.load(Ordering::SeqCst) {
+    // The loop is the schedule: it holds until a walk is due, and one walk is
+    // one slot. A stopped schedule ends the loop, which is the only way out.
+    let mut schedule = Schedule::new(interval);
+    while schedule.wait(&stop) {
         let mut merged = Samples {
             at: Some(Instant::now()),
             readings: BTreeMap::new(),
@@ -342,22 +395,87 @@ fn run(interval: Duration, sender: SyncSender<Samples>, stop: Arc<AtomicBool>) {
         match sender.try_send(merged) {
             Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
         }
-
-        // Sleep in steps, so a window that closes does not wait two seconds for
-        // a thread it just told to stop.
-        let deadline = Instant::now() + interval;
-        while Instant::now() < deadline {
-            if stop.load(Ordering::SeqCst) {
-                return;
-            }
-            std::thread::sleep(STOP_CHECK);
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn the_walk_keeps_its_phase_when_a_sample_takes_time() {
+        // A clock is sampled like any other cell, so a schedule that pays for
+        // the walk out of the interval makes its seconds slip, skip and repeat.
+        // Eight cycles are measured against the schedule's own clock: a sampler
+        // that slept *for* the interval would show interval + walk per cycle.
+        let interval = Duration::from_millis(60);
+        let walk = Duration::from_millis(20);
+        let stop = AtomicBool::new(false);
+        let mut schedule = Schedule::new(interval);
+        assert!(schedule.wait(&stop), "the first walk is due at once");
+
+        // Seven slots, each paying a walk out of its own interval.
+        let started = Instant::now();
+        for _ in 0..7 {
+            std::thread::sleep(walk);
+            assert!(schedule.wait(&stop), "the schedule was never stopped");
+        }
+        let elapsed = started.elapsed();
+
+        let slots = interval * 7;
+        assert!(
+            elapsed >= slots - Duration::from_millis(5),
+            "seven slots came early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < slots + Duration::from_millis(80),
+            "the walk was added to the schedule, so its phase is walking away: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_walk_that_overruns_its_slot_does_not_start_a_burst() {
+        // A provider that hangs for several slots must cost the samples it ate,
+        // not a burst of walks catching up on deadlines already spent.
+        let interval = Duration::from_millis(20);
+        let stop = AtomicBool::new(false);
+        let mut schedule = Schedule::new(interval);
+
+        assert!(schedule.wait(&stop));
+        std::thread::sleep(Duration::from_millis(200));
+
+        let started = Instant::now();
+        assert!(schedule.wait(&stop));
+        let first = started.elapsed();
+        assert!(schedule.wait(&stop));
+        let second = started.elapsed();
+
+        assert!(
+            first <= Duration::from_millis(5),
+            "the first walk after an overrun waited: {first:?}"
+        );
+        assert!(
+            second >= interval - Duration::from_millis(5),
+            "the sampler tried to catch up on slots it had lost: {second:?}"
+        );
+    }
+
+    #[test]
+    fn a_stopped_schedule_answers_at_once() {
+        let interval = Duration::from_secs(60);
+        let stop = AtomicBool::new(false);
+        let mut schedule = Schedule::new(interval);
+        assert!(schedule.wait(&stop));
+
+        stop.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        assert!(!schedule.wait(&stop), "a stopped schedule must say so");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a stopped schedule slept for its whole interval"
+        );
+    }
 
     #[test]
     fn the_catalogue_lists_the_cells_the_system_stats_plugin_promises() {

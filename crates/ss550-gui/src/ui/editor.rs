@@ -120,6 +120,9 @@ pub(crate) fn key_editor(
             cx,
             |this, _window, cx| {
                 this.draft = DraftKind::Plugin;
+                // The segment is the way back to the whole list: a filter left
+                // by a drag would keep hiding every other plugin's cells.
+                this.draft_plugin_filter = None;
                 this.note = "Pick a measurement, then press SAVE BINDING.".into();
                 cx.notify();
             },
@@ -343,7 +346,26 @@ pub(crate) fn editor_heading(number: ss550_engine::KeyNumber, tokens: Tokens) ->
 /// its cells once, when it is built.
 fn plugin_fields(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller>) -> Div {
     let chosen = controller.draft_plugin.clone();
-    let cells: Vec<ss550_plugin_api::CellSpec> = controller.plugins.cells().to_vec();
+    // A plugin dragged onto the key narrows the list to its own cells; every
+    // other way in — `LIVE STAT` on a key that already shows a reading, a key
+    // just selected — lists the whole build. The filter decides what is *shown*,
+    // never what may be saved: the binding is still checked against the
+    // catalogue on the way to the store.
+    let filter = controller.draft_plugin_filter.clone();
+    let cells: Vec<ss550_plugin_api::CellSpec> = match &filter {
+        Some(plugin) => controller.plugins.cells_of(plugin).to_vec(),
+        None => controller.plugins.cells().to_vec(),
+    };
+    let filter_name = filter
+        .as_deref()
+        .and_then(|id| {
+            controller
+                .plugins
+                .groups()
+                .iter()
+                .find(|group| group.id() == id)
+        })
+        .map(|group| group.name().to_string());
 
     let mut list = div().flex().flex_col().gap(px(2.)).w_full();
     for (position, cell) in cells.iter().enumerate() {
@@ -402,18 +424,30 @@ fn plugin_fields(controller: &mut Controller, tokens: Tokens, cx: &mut Context<C
         }));
     }
 
-    div()
+    let mut card = div()
         .flex()
         .flex_col()
         .gap(px(8.))
         .w_full()
-        .child(micro_label("MEASUREMENT · what this key shows", tokens))
-        .child(list)
-        .child(one_line(
-            "The key redraws itself as the measurement moves. Pressing it refreshes it.",
+        .child(micro_label("MEASUREMENT · what this key shows", tokens));
+
+    if let Some(name) = filter_name {
+        // The list is short because the drop asked for one plugin, not because
+        // the others went away — and the way back is the segment above. Short
+        // enough to fit the panel: this is a fixed sentence, and one that ends
+        // in an ellipsis explains nothing.
+        card = card.child(one_line(
+            format!("{name} only. LIVE STAT lists every plugin."),
             FONT_CAPTION,
             tokens.soft,
-        ))
+        ));
+    }
+
+    card.child(list).child(one_line(
+        "The key redraws itself as the measurement moves. Pressing it refreshes it.",
+        FONT_CAPTION,
+        tokens.soft,
+    ))
 }
 
 /// The picture the key would wear for the program in the field.

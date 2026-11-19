@@ -1,6 +1,7 @@
-# Plugins — what they are, and the one this build ships
+# Plugins — what they are, and the two this build ships
 
-**Status:** the contract, the host and the first plugin are implemented. Loading
+**Status:** the contract, the host and two plugins (`system-stats`, `clock`) are
+implemented. Loading
 third-party code (WASM, or a native library) is a separate feature with its own
 sandbox, consent and safety work, and is **not** attempted here.
 
@@ -84,6 +85,32 @@ The order is: LibreHardwareMonitor's web server, then the two WMI namespaces,
 then ACPI. Each is tried once per sample and a missing one costs a failed
 connection or a failed query, never a stall: the timeouts are 200 ms to connect
 and 500 ms to read.
+
+## The cells of `clock`
+
+A clock is a plugin too, and it is the smallest one: it measures nothing about
+the machine, it reads the time. It publishes three cells so a key can be bound to
+one of them — three keys side by side read as one clock:
+
+| cell | label | what it shows | example |
+|---|---|---|---|
+| `hours` | HOUR | the hour, 24-hour, two digits | `07`, `23` |
+| `minutes` | MIN | the minute, two digits | `05`, `42` |
+| `seconds` | SEC | the second, two digits | `00`, `59` |
+
+Two digits always, including the leading zero: `7` on a key under `07` reads as a
+seven and not as half of a time. The face's label band is six characters wide, and
+that is why the labels are `HOUR`, `MIN` and `SEC` rather than the words.
+
+The sampler walks it once per interval like any other plugin, and that interval
+is **one second** — the whole walk, not a cadence of its own. A slower walk would
+make the second hand jump two at a time, which is not a clock. The schedule is
+kept on absolute deadlines rather than by sleeping for the interval, because a
+sleep that pays for the walk out of the interval slips the phase and starts
+skipping and repeating seconds.
+
+One second of samples is one JPEG per second **per key whose face changed**; a
+percentage that is not moving still costs nothing.
 
 ## The GPU could answer without a monitoring tool
 
@@ -198,9 +225,16 @@ sample and says what the measurement is in the status line.
 
 ## Binding one
 
-In the editor, pick `LIVE STAT` and click the measurement. `SAVE BINDING` writes
-it like any other action, so it lives in the profile, moves with the page it is
-on, and is saved with the deck it belongs to:
+Two ways in, and both end on `SAVE BINDING`:
+
+- **In the editor**, pick `LIVE STAT` and click the measurement. The list holds
+  every cell of this build.
+- **From the rail**, drag a plugin's row — `Clock`, `System stats` — onto a key.
+  The editor opens on that key with the list narrowed to that plugin's cells and
+  a line saying so; `LIVE STAT` widens it back to every plugin.
+
+`SAVE BINDING` writes it like any other action, so it lives in the profile, moves
+with the page it is on, and is saved with the deck it belongs to:
 
 ```json
 {"type":"plugin","plugin":"system-stats","cell":"cpu.usage"}
@@ -213,7 +247,7 @@ window says which cell is missing and the key keeps the face it had.
 
 The **Stats** page draws one card per cell: the number, the source it came from
 (`SMU`, `ADL`, `LHM`, `ACPI`, or the detail the plugin wrote), and the last four
-minutes of samples as a sparkline — one bar per sample, two seconds apart.
+minutes of samples as a sparkline — one bar per sample, one second apart.
 
 - A card turns **amber** past a warning line and **red** at the limit. Those two
   lines are the user's, not this program's: **Settings → Thresholds** edits them,
@@ -236,11 +270,13 @@ minutes of samples as a sparkline — one bar per sample, two seconds apart.
 | path | what it holds |
 |---|---|
 | `crates/ss550-plugin-api` | the contract: ids, cells, readings, the `Plugin` trait |
-| `crates/ss550-plugins` | the catalogue, the sampler thread, and `system-stats` |
+| `crates/ss550-plugins` | the catalogue, the sampler thread, and the plugins: `system-stats`, `clock` |
+| `crates/ss550-plugins/src/clock.rs` | the clock: three cells, and the pure formatter behind them |
 | `crates/ss550-plugins/examples/stats_once.rs` | one walk over the machine, printed |
 | `crates/ss550-gui/src/plugintile.rs` | the face: proportions, label, number, caption, bar |
 | `crates/ss550-gui/src/facework.rs` | the thread that composes a face, and the queue back |
-| `crates/ss550-gui/src/ui/editor.rs` | the `LIVE STAT` list |
+| `crates/ss550-gui/src/ui/editor.rs` | the `LIVE STAT` list, narrowed when a plugin is dropped |
+| `crates/ss550-gui/src/ui/palette.rs` | the rail: one draggable row per plugin |
 
 `cargo run -p ss550-plugins --example stats_once` prints what this machine
 answers, which is the first thing to look at when a key shows `—`.
