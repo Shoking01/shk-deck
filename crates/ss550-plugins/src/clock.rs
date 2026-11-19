@@ -12,10 +12,13 @@
 
 use chrono::{Local, Timelike};
 
-use ss550_plugin_api::{CellId, CellSpec, Plugin, PluginId, Reading, Snapshot};
+use ss550_plugin_api::{Cadence, CellId, CellSpec, Plugin, PluginId, Reading, Snapshot};
 
 /// The plugin's name, and the word the palette shows for it.
 pub(crate) const NAME: &str = "Clock";
+
+/// How often the clock wants to be read.
+const SECOND: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The three cells, by name, in the order the editor lists them.
 const CELLS: [&str; 3] = ["hours", "minutes", "seconds"];
@@ -101,6 +104,16 @@ impl Plugin for Clock {
         snapshot.set(self.ids[1].clone(), minutes);
         snapshot.set(self.ids[2].clone(), seconds);
         snapshot
+    }
+
+    /// One second, on a thread of its own.
+    ///
+    /// The clock is the reason the contract has cadences at all: reading the time
+    /// costs nothing, and a second hand that moved every two seconds — or every
+    /// time a sensor answered — would not be a clock. The machine's own walk is
+    /// the expensive one and keeps its interval; this reading never waits for it.
+    fn cadence(&self) -> Cadence {
+        Cadence::Own(SECOND)
     }
 }
 

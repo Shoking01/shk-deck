@@ -17,11 +17,11 @@ use ss550_plugin_api::{CellId, PluginId, Reading};
 
 /// How many samples one cell keeps.
 ///
-/// At the sampler's one-second interval this is four minutes: long enough to see
-/// a compile start and finish, short enough that a value from another session
+/// At the machine walk's two-second interval this is four minutes: long enough to
+/// see a compile start and finish, short enough that a value from another session
 /// never influences the graph. The cadence and this number are one decision —
 /// `the_graph_still_holds_four_minutes` holds them together.
-pub(crate) const DEPTH: usize = 240;
+pub(crate) const DEPTH: usize = 120;
 
 /// How bad a reading is, in the only three states a threshold needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

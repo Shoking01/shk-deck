@@ -102,15 +102,22 @@ Two digits always, including the leading zero: `7` on a key under `07` reads as 
 seven and not as half of a time. The face's label band is six characters wide, and
 that is why the labels are `HOUR`, `MIN` and `SEC` rather than the words.
 
-The sampler walks it once per interval like any other plugin, and that interval
-is **one second** — the whole walk, not a cadence of its own. A slower walk would
-make the second hand jump two at a time, which is not a clock. The schedule is
-kept on absolute deadlines rather than by sleeping for the interval, because a
-sleep that pays for the walk out of the interval slips the phase and starts
-skipping and repeating seconds.
+The clock does not ride the machine's walk. Reading the time costs nothing — the
+process already has it — while measuring a machine is one pass over the sensors,
+a helper for the processor's temperature and a driver for the card's. So the
+worker runs **one thread per cadence**: the machine walk every two seconds, and
+anything that asks for its own cadence on its own thread at the interval it
+names. The clock asks for one second, which is what makes its second hand advance
+by one instead of by two.
 
-One second of samples is one JPEG per second **per key whose face changed**; a
-percentage that is not moving still costs nothing.
+Both cadences hand over their own cells, and the window folds each message into
+the readings it holds; one never blanks the other. The schedule is kept on
+absolute deadlines rather than by sleeping for the interval, because a sleep that
+pays for the walk out of the interval slips the phase and starts producing
+seconds that skip and repeat.
+
+Only a face that changed is a JPEG, so a clock's second is one write a second per
+clock key, and a percentage that is not moving costs nothing.
 
 ## The GPU could answer without a monitoring tool
 
@@ -247,7 +254,7 @@ window says which cell is missing and the key keeps the face it had.
 
 The **Stats** page draws one card per cell: the number, the source it came from
 (`SMU`, `ADL`, `LHM`, `ACPI`, or the detail the plugin wrote), and the last four
-minutes of samples as a sparkline — one bar per sample, one second apart.
+minutes of samples as a sparkline — one bar per sample, two seconds apart.
 
 - A card turns **amber** past a warning line and **red** at the limit. Those two
   lines are the user's, not this program's: **Settings → Thresholds** edits them,

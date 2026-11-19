@@ -7,21 +7,26 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
-### Changed — the seconds tick one at a time
-- The sampler walks the machine **once a second** instead of once every two, which
-  is what makes the clock's second hand advance by one. The schedule is driven by
-  absolute deadlines, not by sleeping for the interval: a sleep that pays for the
-  walk out of its own interval slips the phase, and a clock that skips or repeats
-  a second is not a clock. A walk that overruns its slot costs the samples it ate,
-  never a burst of catch-up walks.
-- The Stats page keeps **the same four minutes**: the sparkline holds twice as
-  many samples, one bar per second, and a test holds the depth and the cadence
-  together so one cannot be changed without the other.
-- A composed face is **painted as soon as it exists**, on the fast loop, not when
-  the half-second maintenance tick came round. A face that sat in the queue kept
-  its key marked as "in flight" for up to half a second, and the next sample found
-  it busy and skipped that key — which is exactly how one second in five went
-  missing from the clock.
+### Changed — one cadence per plugin, so the clock alone ticks every second
+- A plugin now states **how often it wants to be measured**. The machine walk —
+  which reads the sensors, a temperature through a helper and the card's through a
+  driver — keeps its two seconds; the clock asks for its own cadence and gets a
+  thread of its own, so its seconds advance by one while the percentages keep
+  their own pace. Dropping the whole walk to one second made every key on the deck
+  repaint with the second hand.
+- A sample from one cadence is **folded into** the readings the window holds
+  instead of replacing them: a clock's second must not blank the sensors, and the
+  machine's walk must not erase the seconds. A cell's history gets one point per
+  time that cell was measured, so the Stats graph does not show a sensor twice per
+  second.
+- The schedule is driven by **absolute deadlines**, not by sleeping for the
+  interval: a sleep that pays for the walk out of its own interval slips the
+  phase, and a clock that skips or repeats a second is not a clock. A walk that
+  overruns its slot costs the samples it ate, never a burst of catch-up walks.
+- A composed face is **painted as soon as it exists**, on the fast loop. It used
+  to wait for the half-second maintenance tick, which left its key marked as "in
+  flight" long enough that the next sample was refused for that key: one second in
+  five went missing from the clock.
 
 ### Added — a clock, as three keys
 - `ss550-plugins` ships a second plugin, **`clock`**: three cells (`hours`,

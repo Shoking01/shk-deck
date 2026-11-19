@@ -3920,8 +3920,12 @@ impl Controller {
         let Some(samples) = self.sampler.as_ref().and_then(Sampler::try_recv) else {
             return false;
         };
-        self.samples = samples;
-        self.record_history();
+        // Each cadence hands over its own cells, so a sample is folded in rather
+        // than replaced: the clock's second must not wipe the machine's numbers,
+        // and the machine's walk must not blank the seconds. What was measured is
+        // recorded before the merge, one history point per cell measured.
+        self.record_history(&samples);
+        self.samples.merge(samples);
         self.repaint_changed_readings()
     }
 
@@ -3979,17 +3983,12 @@ impl Controller {
     ///
     /// Called once per received sample, before the keys are repainted, so the
     /// graph and the key are always describing the same walk over the machine.
-    fn record_history(&mut self) {
-        let cells: Vec<(ss550_plugin_api::PluginId, ss550_plugin_api::CellId)> = self
-            .plugins
-            .cells()
-            .iter()
-            .map(|spec| (spec.plugin().clone(), spec.cell().clone()))
-            .collect();
-        for (plugin, cell) in &cells {
-            if let Some(reading) = self.samples.get(plugin, cell).cloned() {
-                self.history.record(plugin, cell, &reading);
-            }
+    /// Only the cells the message carries are recorded: cadences differ, and a
+    /// sensor would otherwise get a second point for the same number every time
+    /// the clock's faster message carried it.
+    fn record_history(&mut self, samples: &ss550_plugins::Samples) {
+        for (plugin, cell, reading) in samples.iter() {
+            self.history.record(plugin, cell, reading);
         }
     }
 

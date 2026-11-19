@@ -36,6 +36,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -489,6 +490,23 @@ impl Snapshot {
     }
 }
 
+/// How often the sampler asks a plugin to measure.
+///
+/// A plugin is measured on a cadence, not by a global clock: what a machine
+/// measurement costs is what decides how often it can be taken, and a reading the
+/// process already has must not be held back by a provider that blocks. The
+/// sampler takes the machine walk as one pass — the plugin that reads a
+/// processor's temperature and the disk's free space belong together, because
+/// they are the same walk — and gives a plugin that asks for its own cadence a
+/// thread of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cadence {
+    /// With the machine walk, at the interval the window asked for.
+    Machine,
+    /// On its own thread, at this interval, whatever the machine walk is doing.
+    Own(Duration),
+}
+
 /// One plugin of this build.
 ///
 /// `Send` because the sampler measures on a thread of its own: reading a
@@ -509,6 +527,17 @@ pub trait Plugin: Send {
     /// cells it owns, not as an error: one dead sensor must not stop the rest of
     /// the sample.
     fn sample(&mut self) -> Snapshot;
+
+    /// How often this plugin wants to be measured.
+    ///
+    /// The default is the machine walk: a plugin that measures the machine is
+    /// priced by what that costs, and pretending otherwise is how a window ends
+    /// up walking the machine every second. A plugin that only reads a value the
+    /// process already holds says [`Cadence::Own`] and is asked on its own, so a
+    /// blocking provider cannot make its readings late.
+    fn cadence(&self) -> Cadence {
+        Cadence::Machine
+    }
 }
 
 #[cfg(test)]
@@ -517,6 +546,41 @@ mod tests {
 
     fn cell(text: &str) -> CellId {
         CellId::parse(text).expect("a usable cell id")
+    }
+
+    /// A plugin that offers one cell and measures nothing, for the contract's
+    /// own defaults.
+    struct Silent {
+        id: PluginId,
+        cells: Vec<CellSpec>,
+    }
+
+    impl Plugin for Silent {
+        fn id(&self) -> &PluginId {
+            &self.id
+        }
+        fn name(&self) -> &str {
+            "Silent"
+        }
+        fn cells(&self) -> &[CellSpec] {
+            &self.cells
+        }
+        fn sample(&mut self) -> Snapshot {
+            Snapshot::new()
+        }
+    }
+
+    #[test]
+    fn a_plugin_that_says_nothing_is_measured_with_the_machine_walk() {
+        // The default is the expensive cadence on purpose: a plugin that reads a
+        // sensor must say so before the window pays for it every second, and one
+        // that says nothing is priced like the walk it joins.
+        let silent = Silent {
+            id: PluginId::parse("silent").expect("a usable id"),
+            cells: Vec::new(),
+        };
+
+        assert_eq!(silent.cadence(), Cadence::Machine);
     }
 
     #[test]
