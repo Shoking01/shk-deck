@@ -44,7 +44,7 @@ use gpui_kit::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use ss550_driver::LONG_CONNECT_TIMEOUT;
 use ss550_engine::{Action, ActionRunner, ActionStore, KeyNumber, Recents};
-use ss550_plugin_api::Reading;
+use ss550_plugin_api::{CellSpec, Reading};
 use ss550_plugins::{Catalogue, Sampler, Samples};
 use ss550_tray::{autostart, install, TrayCommand, TrayHost};
 
@@ -179,6 +179,50 @@ enum Tile {
     /// A deck only ever receives a JPEG, so a key that says something has to
     /// send one: the words are pixels, not a property of the colour.
     TitledColour(Vec<u8>),
+}
+
+/// The sentence the tray icon carries, with the window closed.
+///
+/// One line, and short: this is what a person reads by hovering a 16-pixel icon,
+/// so it names the program once and then gives the numbers in the order the
+/// catalogue states them — processor, card, memory, disk.
+///
+/// It says what state the controller is in when it is not measuring anything: a
+/// tooltip reading "Sh-Deck" and nothing else would leave "is it connected?" to
+/// guesswork, and that is the one question a tray icon exists to answer.
+///
+/// The length is bounded because Windows truncates a taskbar tooltip at 127
+/// characters, and a sentence cut in the middle of a number reads as a bug.
+fn tray_text(link: Link, samples: &Samples, cells: &[CellSpec]) -> String {
+    const MAX: usize = 120;
+
+    let mut text = String::from("Sh-Deck");
+    match link {
+        Link::Connected => {}
+        Link::Connecting => return format!("{text} · connecting"),
+        Link::Waiting => return format!("{text} · waiting for the deck"),
+        Link::Lost => return format!("{text} · connection lost, reconnecting"),
+    }
+
+    let measured: Vec<String> = cells
+        .iter()
+        .filter_map(|cell| {
+            let reading = samples.get(cell.plugin(), cell.cell())?;
+            Some(format!("{} {}", cell.label(), reading.text()))
+        })
+        .collect();
+
+    if measured.is_empty() {
+        return format!("{text} · connected");
+    }
+    for reading in measured {
+        let candidate = format!("{text} · {reading}");
+        if candidate.chars().count() > MAX {
+            break;
+        }
+        text = candidate;
+    }
+    text
 }
 
 /// Decides one key's face, before anything is sent.
@@ -898,6 +942,12 @@ struct Controller {
     /// Written from the same sample the keys are painted from, so the graph and
     /// the key can never disagree about the last number.
     history: history::History,
+    /// The tooltip the tray icon is showing right now.
+    ///
+    /// The tray is renamed only when this changes: a message to another thread
+    /// every half second for a string that says nothing new is a waste, and it is
+    /// the kind of waste that shows up as a stutter.
+    tray_tooltip: String,
 }
 
 /// The keys the newest sample would change on the deck.
@@ -1205,6 +1255,7 @@ impl Controller {
             face_tiles: BTreeMap::new(),
             faces_gone: None,
             history: history::History::new(),
+            tray_tooltip: String::new(),
         };
 
         // Look for the deck right away: its settle window starts the moment
@@ -2551,11 +2602,13 @@ impl Controller {
         }
 
         self.heartbeat();
-        // The newest walk over the machine, the keys it moved, and the faces that
-        // are ready to paint. Both happen here, on the thread that owns the deck:
-        // the measurement and the drawing ran on threads of their own.
+        // The newest walk over the machine, the keys it moved, the faces that are
+        // ready to paint, and the sentence the tray icon is showing. All four
+        // happen here, on the thread that owns the deck: the measurement and the
+        // drawing ran on threads of their own.
         self.pump_samples();
         self.collect_faces();
+        self.refresh_tray_tooltip();
     }
 
     /// Handles an unexpected disconnect with exponential backoff.
@@ -3816,6 +3869,35 @@ impl Controller {
         self.repaint_changed_readings()
     }
 
+    /// Keeps the tray icon's tooltip saying what the machine is doing.
+    ///
+    /// The icon is what a user sees with the window closed, so the tooltip is the
+    /// one place the numbers are readable without opening anything. It is written
+    /// only when the sentence changes: a rename is a message to another thread,
+    /// and waking it every half second to say the same thing is a stutter with no
+    /// information in it.
+    fn refresh_tray_tooltip(&mut self) {
+        let Some(tray) = &self.tray else {
+            return;
+        };
+        let text = tray_text(self.link, &self.samples, self.plugins.cells());
+        if text == self.tray_tooltip {
+            return;
+        }
+        let failed = tray.set_tooltip(&text).is_err();
+        // The sentence is remembered whether or not the icon took it: a tray that
+        // has stopped answering is not something to retry twice a second.
+        self.tray_tooltip = text;
+        if failed {
+            self.tray = None;
+            self.tray_error = Some(
+                "The tray icon stopped answering. The controller keeps running, but it has no \
+                 icon to come back from."
+                    .to_string(),
+            );
+        }
+    }
+
     /// Remembers what each measured cell reported, for the Stats page.
     ///
     /// Called once per received sample, before the keys are repainted, so the
@@ -4286,7 +4368,7 @@ mod tests {
     use super::{
         advance_clicks, apply_pick, join_notes, load_recents_at, navigate, needs_fonts, plan_tile,
         read_deck_path_at, readings_to_repaint, record_recent_at, resolve_style, slot_for,
-        write_deck_path_at, NavOutcome, PickOutcome, PictureDialog, Slot, Tile,
+        tray_text, write_deck_path_at, Link, NavOutcome, PickOutcome, PictureDialog, Slot, Tile,
     };
     use ss550_engine::{Action, AssetLibrary, Recents};
     use ss550_plugin_api::{CellId, PluginId, Reading};
@@ -4344,6 +4426,36 @@ mod tests {
         );
         let due = readings_to_repaint(&[Some(action)], &[None], &samples);
         assert_eq!(due, vec![0]);
+    }
+
+    #[test]
+    fn the_tray_says_what_the_machine_is_doing_and_what_the_link_is_doing() {
+        let cells = ss550_plugins::Catalogue::built_in().cells().to_vec();
+        let mut samples = Samples::new();
+        let owner = PluginId::parse("system-stats").expect("a usable plugin id");
+        samples.set(owner.clone(), cell("cpu.usage"), Reading::percent(20.0));
+        samples.set(owner.clone(), cell("cpu.temp"), Reading::temperature(55.0));
+        samples.set(owner, cell("gpu.temp"), Reading::unavailable("no sensor"));
+
+        let connected = tray_text(Link::Connected, &samples, &cells);
+        assert!(connected.starts_with("Sh-Deck · CPU 20%"), "{connected}");
+        assert!(connected.contains("CPU °C 55°C"), "{connected}");
+        assert!(
+            connected.contains("GPU °C —"),
+            "a dash is said, not hidden: {connected}"
+        );
+        // Short enough for a Windows taskbar tooltip, which cuts at 127.
+        assert!(connected.chars().count() <= 120, "{connected}");
+
+        // With no deck there are no numbers, and the state is the whole answer.
+        assert_eq!(
+            tray_text(Link::Waiting, &samples, &cells),
+            "Sh-Deck · waiting for the deck"
+        );
+        assert_eq!(
+            tray_text(Link::Connected, &Samples::new(), &cells),
+            "Sh-Deck · connected"
+        );
     }
 
     #[test]

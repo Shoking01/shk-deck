@@ -8,17 +8,15 @@ messages; the file below is a human summary, not a substitute for
 ## Unreleased
 
 ### Added — plugins, and the first one: system stats
-- The **graphics card's temperature needs no other program**: `ss550-sensors`
-- The **processor's temperature** is now read from the chip itself, through PawnIO's
-  signed driver and an AMD module (LGPL-2.1, vendored with its notices): the Ryzen's
-  thermal register, no monitoring program running. The driver opens **only to an
-  elevated process**, so an ordinary start still reads the processor from
-  LibreHardwareMonitor, and an elevated one reads it with nothing else running; the
-  key's caption says `SMU` or `LHM` accordingly.
-  asks AMD's own display library (`atiadlxx.dll`, installed with the Radeon
-  driver) through its performance-log interface, read-only, and the key's caption
-  says `ADL`. LibreHardwareMonitor is still the source for the **processor**,
-  which no user-mode API can read without a kernel driver.
+- The **graphics card's temperature needs no other program**: `ss550-sensors` asks
+  AMD's own display library (`atiadlxx.dll`, installed with the Radeon driver)
+  through its performance-log interface, read-only, and the key's caption says
+  `ADL`.
+- The **processor's temperature** is now read from the chip itself, through
+  PawnIO's signed driver and an AMD module (LGPL-2.1, vendored with its notices):
+  the Ryzen's thermal register, no monitoring program running. The driver opens
+  **only to an elevated process**, so an ordinary start falls back to
+  LibreHardwareMonitor, and the key's caption says `SMU` or `LHM` accordingly.
 - The privilege that reading a processor needs lives in a separate, tiny program:
   ss550-sensor-helper.exe opens PawnIO's driver once a second and answers one
   question on loopback (ss550-sensors/1 cpu=59.0), so Sh-Deck and its window stay
@@ -31,17 +29,21 @@ messages; the file below is a human summary, not a substitute for
   A key bound to a cell becomes a live gauge — the window redraws its face as the
   measurement moves, and pressing it refreshes it on the spot.
 - Load, memory and free space come from the machine's own counters; the GPU's
-  engines come from the Windows performance counters, which answer on any card
-  and not just one make. The two **temperatures** are the readings Windows does
-  not simply answer: the plugin reads LibreHardwareMonitor's WMI namespace when
-  it is running, then the ACPI thermal zone, and says `—` with a reason when
-  neither answers. See `docs/plugins.md`.
+  engines come from the Windows performance counters, which answer on any card and
+  not just one make. The two **temperatures** have a chain of their own, written
+  down in `docs/plugins.md`: the card natively, the processor through PawnIO's
+  driver, then LibreHardwareMonitor and the ACPI zone, and a dash with a reason when
+  nothing answers.
 - A reading is drawn off the thread that draws frames, on a worker with a font of
   its own, and redrawn only when its face changed, at most once per two-second
   sample. The window's key tile shows exactly the pixels the deck received, so
   the two cannot disagree about what a key is.
 - The editor gained a fourth kind, `LIVE STAT`, which lists the cells of this
   build and binds one the same way an app or a URL is bound.
+- With the window closed, the **tray icon's tooltip says what the machine is doing**:
+  `Sh-Deck · CPU 20% · CPU °C 55°C · GPU 63% · GPU °C 62°C · RAM 55% · DISK 52%`, or the
+  link's state when there is no deck. Renamed only when the sentence changes,
+  bounded to what a Windows tooltip shows.
 - A **Stats** page in the window: one card per measurement with the number, the
   source it came from (`SMU`, `ADL`, `LHM`, `ACPI`) and four minutes of samples as
   a sparkline, one bar per sample. A card turns amber past a warning line and red at
