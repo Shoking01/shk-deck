@@ -14,7 +14,20 @@
 //! The temperatures are the two the machine may not answer; see
 //! [`thermal`] for why, and what the plugin says when they do not.
 
+// Every source this plugin reads for a temperature or a GPU engine is Windows:
+// WMI, AMD's library, PawnIO's driver, LibreHardwareMonitor's server. The plugin
+// still compiles and tests on any platform — CI builds the workspace on macOS and
+// Linux — and there the cells those sources feed answer "no sensor". Their
+// constants, helpers and stubs are therefore unreachable off Windows, which is
+// what this allows: the alternative is fifteen `cfg` attributes on things whose
+// only crime is living on the platform the app ships on.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 mod gpu;
+// LibreHardwareMonitor is Windows software and is read through serde, which this
+// crate only depends on there; leaving the module ungated broke the macOS and
+// Linux builds of the workspace.
+#[cfg(windows)]
 mod lhm;
 mod machine;
 mod native;

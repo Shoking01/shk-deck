@@ -53,6 +53,10 @@ pub(crate) fn usable_celsius(raw: i32) -> Option<f32> {
 }
 
 /// A percentage the library reported, clamped to the range a percentage has.
+///
+/// Only AMD's library answers a percentage, and that library is Windows-only, so
+/// on any other platform there is nothing here to use.
+#[cfg(windows)]
 pub(crate) fn usable_percent(raw: i32) -> Option<f32> {
     let value = raw as f32;
     (0.0..=100.0).contains(&value).then_some(value)
@@ -60,7 +64,7 @@ pub(crate) fn usable_percent(raw: i32) -> Option<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{usable_celsius, usable_percent};
+    use super::usable_celsius;
 
     #[test]
     fn a_sensor_that_answers_nothing_is_not_a_reading() {
@@ -70,8 +74,12 @@ mod tests {
         assert_eq!(usable_celsius(62), Some(62.0));
     }
 
+    // The percentage clamp belongs to the card's own library, which is Windows-only,
+    // so the test that covers it is too.
+    #[cfg(windows)]
     #[test]
     fn a_percentage_stays_between_zero_and_a_hundred() {
+        use super::usable_percent;
         assert_eq!(usable_percent(0), Some(0.0));
         assert_eq!(usable_percent(13), Some(13.0));
         assert_eq!(usable_percent(100), Some(100.0));
