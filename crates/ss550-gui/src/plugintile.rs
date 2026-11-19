@@ -142,6 +142,11 @@ impl Layout {
 }
 
 /// The pixels one key shows, before the encoder sees them.
+///
+/// Two faces, and the cell says which: a **gauge** (`Gauge`) is the label above,
+/// the number, the caption under it and a bar; a **number** (`Number`) is the
+/// reading alone, centred and as large as the tile allows, which is what a clock
+/// key is. Which one is the plugin's statement, not the paint code's guess.
 pub(crate) fn face(
     width: u32,
     height: u32,
@@ -159,20 +164,25 @@ pub(crate) fn face(
         Rgba([BACKGROUND[0], BACKGROUND[1], BACKGROUND[2], 0xFF]),
     );
 
+    let missing = reading.reason().is_some();
+    let value_ink = match missing {
+        true => MISSING_INK,
+        false => VALUE_INK,
+    };
+
+    if cell.face() == ss550_plugin_api::Face::Number {
+        return number(&picture, reading.text(), family, value_ink, text);
+    }
+
     // The bar goes under the words, so a caption that reaches too low covers
     // the track instead of the number growing a hole in it.
     if let Some(fraction) = reading.fraction() {
         draw_bar(&mut picture, &layout, cell.accent(), fraction);
     }
 
-    let missing = reading.reason().is_some();
     let label_ink = match missing {
         true => MISSING_INK,
         false => cell.accent(),
-    };
-    let value_ink = match missing {
-        true => MISSING_INK,
-        false => VALUE_INK,
     };
 
     let drawn = text.draw_band(&picture, cell.label(), layout.label, family, ink(label_ink));
@@ -203,6 +213,48 @@ pub(crate) fn face(
     }
 
     picture
+}
+
+/// The number alone, centred on the tile, in the largest type that fits.
+///
+/// No label, no caption, no bar: a key that shows a time shows a time. The type
+/// is fitted against **both** sides of the box, because a size that fits the
+/// height but not the width wraps the number into two lines — and two `0`s
+/// stacked is not a time.
+fn number(
+    picture: &RgbaImage,
+    text_value: &str,
+    family: &str,
+    ink_rgb: [u8; 3],
+    text: &mut TextEngine,
+) -> RgbaImage {
+    let (width, height) = picture.dimensions();
+    let margin = (width / 8).max(1);
+    let pad = (height / 16).max(1);
+    let box_width = width.saturating_sub(margin * 2).max(1);
+    let box_height = height.saturating_sub(pad * 2).max(1);
+
+    // A digit is about 0.55 em wide, so this is roughly the size the box's width
+    // can hold: the ladder only has to correct it by a few pixels either way
+    // instead of walking down from the tile's height.
+    let digits = u32::try_from(text_value.chars().count())
+        .unwrap_or(1)
+        .max(1);
+    let estimate = box_width.saturating_mul(20) / (11 * digits);
+    let ceiling = u16::try_from(estimate)
+        .unwrap_or(u16::MAX)
+        .min(u16::try_from(box_height).unwrap_or(u16::MAX))
+        .max(MIN_TYPE_PX);
+    let px = text.fit_one_line(text_value, family, ceiling, box_width, box_height);
+
+    let band = Band {
+        top: pad,
+        height: box_height,
+        px,
+        margin,
+    };
+    text.draw_band(picture, text_value, band, family, ink(ink_rgb))
+        .unwrap_or_else(|| picture.clone())
 }
 
 /// The deck's own payload for a face.
@@ -266,6 +318,138 @@ mod tests {
 
     fn engine() -> MutexGuard<'static, TextEngine> {
         test_engine()
+    }
+
+    #[test]
+    fn a_number_face_draws_the_number_and_nothing_else() {
+        let mut text = engine();
+        let accent = [0x60u8, 0x9a, 0xf0];
+        let clock = CellSpec::new(
+            PluginId::parse("clock").expect("a usable id"),
+            CellId::parse("seconds").expect("a usable id"),
+            "SEC",
+            "the second, 00 to 59",
+            accent,
+        )
+        .with_face(ss550_plugin_api::Face::Number);
+
+        let picture = face(
+            112,
+            112,
+            &clock,
+            &Reading::spelled("07", 7.0),
+            "",
+            &mut text,
+        );
+
+        // The label and the bar are the two things the gauge draws in the
+        // accent, and neither belongs on a key that is a time.
+        assert!(
+            picture.pixels().all(|pixel| pixel.0[..3] != accent[..]),
+            "a label or a bar found its way onto a number"
+        );
+        // And the digits are there: something brighter than the background.
+        assert!(
+            picture
+                .pixels()
+                .any(|pixel| pixel.0[..3] != [BACKGROUND[0], BACKGROUND[1], BACKGROUND[2]][..]),
+            "the number was not drawn"
+        );
+    }
+
+    #[test]
+    fn a_number_is_centred_and_larger_than_a_gauges_value() {
+        let mut text = engine();
+        let clock = CellSpec::new(
+            PluginId::parse("clock").expect("a usable id"),
+            CellId::parse("seconds").expect("a usable id"),
+            "SEC",
+            "the second, 00 to 59",
+            [0x60, 0x9a, 0xf0],
+        )
+        .with_face(ss550_plugin_api::Face::Number);
+
+        let number = face(
+            112,
+            112,
+            &clock,
+            &Reading::spelled("07", 7.0),
+            "",
+            &mut text,
+        );
+        let gauge = face(
+            112,
+            112,
+            &clock.clone().with_face(ss550_plugin_api::Face::Gauge),
+            &Reading::spelled("07", 7.0),
+            "",
+            &mut text,
+        );
+
+        let (left, top, right, bottom) = ink_box(&number);
+        let centre = ((left + right) as i32 / 2, (top + bottom) as i32 / 2);
+        // Centred in the tile, give or take the line box a font puts around its
+        // digits: the ink sits a little above the middle of its own band.
+        assert!(
+            (centre.0 - 56).abs() <= 6,
+            "the number is off-centre horizontally: {centre:?}"
+        );
+        assert!(
+            (centre.1 - 56).abs() <= 16,
+            "the number is off-centre vertically: {centre:?}"
+        );
+
+        let (_, gauge_top, _, gauge_bottom) = ink_box(&gauge);
+        assert!(
+            (bottom - top) > (gauge_bottom - gauge_top),
+            "the number is not larger than a gauge's value: {} vs {}",
+            bottom - top,
+            gauge_bottom - gauge_top
+        );
+    }
+
+    #[test]
+    fn a_number_whose_family_is_missing_still_draws() {
+        // The FONT control offers the system's families, but a profile can name
+        // one this machine does not have: the key falls back to the sans the fit
+        // started with instead of drawing a blank tile.
+        let mut text = engine();
+        let clock = CellSpec::new(
+            PluginId::parse("clock").expect("a usable id"),
+            CellId::parse("seconds").expect("a usable id"),
+            "SEC",
+            "the second, 00 to 59",
+            [0x60, 0x9a, 0xf0],
+        )
+        .with_face(ss550_plugin_api::Face::Number);
+
+        let picture = face(
+            112,
+            112,
+            &clock,
+            &Reading::spelled("07", 7.0),
+            "A Family This Machine Does Not Have",
+            &mut text,
+        );
+
+        let (left, top, right, bottom) = ink_box(&picture);
+        assert!(right > left && bottom > top, "the number vanished");
+    }
+
+    /// The box that holds every pixel the face drew, as `(left, top, right, bottom)`.
+    fn ink_box(picture: &RgbaImage) -> (u32, u32, u32, u32) {
+        let background = [BACKGROUND[0], BACKGROUND[1], BACKGROUND[2], 0xFF];
+        let (width, height) = picture.dimensions();
+        let mut box_ = (width, height, 0u32, 0u32);
+        for (x, y, pixel) in picture.enumerate_pixels() {
+            if pixel.0 != background {
+                box_.0 = box_.0.min(x);
+                box_.1 = box_.1.min(y);
+                box_.2 = box_.2.max(x);
+                box_.3 = box_.3.max(y);
+            }
+        }
+        box_
     }
 
     #[test]

@@ -490,6 +490,7 @@ fn run_own(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ss550_plugin_api::Face;
     use std::sync::atomic::AtomicBool;
 
     #[test]
@@ -564,6 +565,21 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "a stopped schedule slept for its whole interval"
         );
+    }
+
+    #[test]
+    fn the_clocks_cells_are_a_number_and_the_machines_are_a_gauge() {
+        // The face is the plugin's statement: a clock's key is a time to read at
+        // a glance, and a percentage's label is worth its line. This is what the
+        // paint code must not decide by look.
+        let catalogue = Catalogue::built_in();
+
+        for cell in catalogue.cells_of("clock") {
+            assert_eq!(cell.face(), Face::Number, "{} is not a number", cell.cell());
+        }
+        for cell in catalogue.cells_of("system-stats") {
+            assert_eq!(cell.face(), Face::Gauge, "{} is not a gauge", cell.cell());
+        }
     }
 
     #[test]

@@ -12,7 +12,7 @@
 
 use chrono::{Local, Timelike};
 
-use ss550_plugin_api::{Cadence, CellId, CellSpec, Plugin, PluginId, Reading, Snapshot};
+use ss550_plugin_api::{Cadence, CellId, CellSpec, Face, Plugin, PluginId, Reading, Snapshot};
 
 /// The plugin's name, and the word the palette shows for it.
 pub(crate) const NAME: &str = "Clock";
@@ -65,6 +65,9 @@ impl Clock {
                 hint,
                 accent,
             )
+            // A clock's key is the number and nothing else: `HOUR` over `00` is
+            // one word too many on a key read from across a desk.
+            .with_face(Face::Number)
         })
         .collect()
     }

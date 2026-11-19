@@ -192,6 +192,24 @@ fn parse_id(text: &str, max: usize, segments: bool) -> Result<String, IdError> {
 /// rather than in the window because a plugin knows what it measures: a
 /// temperature and a disk share no palette, and the plugin is the only place
 /// that can decide without the window learning every plugin's name.
+/// What a key bound to this cell shows, beyond the number itself.
+///
+/// A plugin knows what its reading means and the window does not: `HOUR` over
+/// `00` is a label a person has to read, while `00` alone on a key is a clock.
+/// Saying it here is what keeps that judgement out of the paint code, which would
+/// otherwise have to learn every plugin's name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Face {
+    /// The label above, the number, the caption under it, and a bar when the
+    /// number has a scale: what a percentage or a temperature wants.
+    #[default]
+    Gauge,
+    /// The number alone, centred and as large as the tile allows.
+    Number,
+}
+
+/// One cell of one plugin: what it is called, what it measures, and how a key
+/// bound to it should look.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CellSpec {
     plugin: PluginId,
@@ -199,6 +217,7 @@ pub struct CellSpec {
     label: String,
     hint: String,
     accent: [u8; 3],
+    face: Face,
 }
 
 impl CellSpec {
@@ -220,7 +239,22 @@ impl CellSpec {
             label: label.into(),
             hint: hint.into(),
             accent,
+            face: Face::Gauge,
         }
+    }
+
+    /// The same cell, drawn as the number alone.
+    ///
+    /// For a reading that is its own label — a clock's `00`, where `HOUR` above
+    /// it is a word to read instead of a time to glance at.
+    pub fn with_face(mut self, face: Face) -> Self {
+        self.face = face;
+        self
+    }
+
+    /// What a key bound to this cell shows beyond the number.
+    pub fn face(&self) -> Face {
+        self.face
     }
 
     /// The plugin this cell belongs to.

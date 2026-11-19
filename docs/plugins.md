@@ -204,9 +204,23 @@ reads correctly with no vendor tooling installed.
 ## How a reading reaches a key
 
 The deck receives one JPEG per key and nothing else — no text channel, no font,
-no widget. So a reading is **drawn**: label at the top, the number in the middle,
-the caption under it, and a bar when the number has a scale. A percentage has a
-bar; a temperature does not, because a bar needs a scale that means something.
+no widget. So a reading is **drawn**. A cell says which of two faces its key
+wears, because the plugin is the only place that knows what its number means:
+
+| face | what the key shows | who asks for it |
+|---|---|---|
+| `Gauge` | the label at the top, the number, the caption under it, and a bar when the number has a scale | a percentage or a temperature |
+| `Number` | the number alone, centred and as large as the tile allows | a clock |
+
+A percentage has a bar; a temperature does not, because a bar needs a scale that
+means something. A clock has neither label nor bar: `HOUR` over `00` is one word
+too many on a key read from across a desk.
+
+The type is the **key's own font**. `TITLE → FONT` sets it for the selected key,
+and a key with no style of its own wears the app's default, so the same control
+that names a title's family names a gauge's — and a clock's digits. A number is
+fitted against both sides of the tile: a size that fits the height but not the
+width wraps `00` into two lines, and two `0`s stacked is not a time.
 
 The drawing happens on a **worker thread of its own**
 (`crates/ss550-gui/src/facework.rs`), not on the one that draws frames: shaping

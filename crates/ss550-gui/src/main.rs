@@ -3809,7 +3809,10 @@ impl Controller {
             cell,
             spec,
             reading,
-            family: self.title_style.family.clone(),
+            // The key's own family, not the app's: a reading is drawn like the
+            // words on that key, so the FONT control under TITLE works on a gauge
+            // and on a clock's number the same way it works on a title.
+            family: self.style_for(key).family,
             image,
         };
         if self.faces.submit(job) {

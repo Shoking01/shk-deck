@@ -7,6 +7,16 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Added — the clock's key is a number, and it wears the key's font
+- A cell states which **face** its key wears: `Gauge` (the label, the number, the
+  caption and the bar — what a percentage wants) or `Number` (the number alone,
+  centred and as large as the tile allows). `clock` asks for `Number`, so its keys
+  stop saying `SEC` over `00`, and the digits are fitted against both sides of the
+  tile so they can never wrap into two lines.
+- A reading is drawn in the **key's own font**, not the app's default: `TITLE →
+  FONT` now reaches a gauge and a clock's digits the way it already reached a
+  title. A key with no style of its own still wears the default.
+
 ### Changed — one cadence per plugin, so the clock alone ticks every second
 - A plugin now states **how often it wants to be measured**. The machine walk —
   which reads the sensors, a temperature through a helper and the card's through a
