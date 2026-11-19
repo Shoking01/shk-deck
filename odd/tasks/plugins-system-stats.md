@@ -176,6 +176,18 @@ Ryzen Master SDK's files are installed, but its driver
 (`AMDRyzenMasterDriver.sys`) is **not** in `System32\drivers` and no service is
 registered, so the SDK alone answers nothing.
 
+- **T17 — the number in the icon.** `ss550_tray::icon::badge_with_digits` draws one
+  to three digits on a rounded dark badge, and the window decides which number: the
+  **hottest** temperature, tinted by the same `thresholds` the Stats page uses.
+  Redrawn only when the digits or the colour change. Route: inline. **Done.**
+  Checked live on this taskbar: `58` in white under the defaults, then `59` in amber
+  after writing `degrees: warn 30` — badge and card obey one rule. The first
+  drawing used two-pixel dots and the shell's non-integer downscale turned them
+  grey; four-pixel dots survive it, and `examples/icon_preview.rs` prints the
+  bitmap as characters so a digit can be looked at before it ships. Three digits
+  fall back to thin dots rather than vanishing at the hundreds. 65 tray tests, 194
+  GUI tests, and the tray's ignored rename test re-run: passing.
+
 ## Log
 
 - **L1** (verbatim, the request): "Ahora vamos a implementar plugins. Lo primero

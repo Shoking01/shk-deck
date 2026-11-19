@@ -46,6 +46,9 @@ enum TrayMessage {
     /// on every platform.
     #[cfg_attr(not(windows), allow(dead_code))]
     SetTooltip(String),
+    /// Replace the pixels of the icon, RGBA, ICON_SIZE square.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    SetIcon(Vec<u8>),
 }
 
 /// The notification-area icon, running on its own thread.
@@ -154,6 +157,36 @@ impl TrayHost {
     pub fn set_tooltip(&self, tooltip: &str) -> Result<(), TrayError> {
         self.messages
             .send(TrayMessage::SetTooltip(tooltip.to_string()))
+            .map_err(|_| TrayError::Tray("the tray thread is gone".to_string()))?;
+        platform::wake(self.thread_id);
+        Ok(())
+    }
+
+    /// Replaces the pixels of the icon.
+    ///
+    /// One RGBA pixel per dot, in the size [`crate::icon::ICON_SIZE`] states,
+    /// which is the only size the icon is built at: anything else is refused here
+    /// rather than drawn as a stretched picture in the notification area.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), ss550_tray::TrayError> {
+    /// let tray = ss550_tray::TrayHost::spawn("Sh-Deck")?;
+    /// tray.set_icon(&ss550_tray::icon::deck_icon_rgba())?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_icon(&self, pixels: &[u8]) -> Result<(), TrayError> {
+        let expected = (crate::icon::ICON_SIZE * crate::icon::ICON_SIZE * 4) as usize;
+        if pixels.len() != expected {
+            return Err(TrayError::Tray(format!(
+                "an icon is {expected} bytes of RGBA, not {}",
+                pixels.len()
+            )));
+        }
+        self.messages
+            .send(TrayMessage::SetIcon(pixels.to_vec()))
             .map_err(|_| TrayError::Tray("the tray thread is gone".to_string()))?;
         platform::wake(self.thread_id);
         Ok(())

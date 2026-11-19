@@ -226,6 +226,52 @@ fn tray_text(link: Link, samples: &Samples, cells: &[CellSpec]) -> String {
     text
 }
 
+/// The number the tray icon wears, and the colour it wears it in.
+///
+/// The **hottest** temperature, not a chosen one: the question a badge answers is
+/// "is something working hard", and whichever chip is hottest is the answer. The
+/// colour is the same rule the Stats page uses, so a badge and a card can never
+/// disagree about whether 88 °C is a warning.
+///
+/// `None` when no cell reports a temperature — a dash on a key is honest, a badge
+/// with a guess in it is not.
+fn tray_number(
+    samples: &Samples,
+    cells: &[CellSpec],
+    limits: &thresholds::Thresholds,
+) -> Option<(String, [u8; 3])> {
+    /// Readable at sixteen pixels on a dark badge: the window's own ink, amber and
+    /// red, as RGB because the icon is pixels and knows nothing of themes.
+    const INK: [u8; 3] = [0xed, 0xed, 0xf0];
+    const AMBER: [u8; 3] = [0xf5, 0x9e, 0x0b];
+    const RED: [u8; 3] = [0xef, 0x44, 0x44];
+
+    let hottest = cells
+        .iter()
+        .filter_map(|cell| {
+            let reading = samples.get(cell.plugin(), cell.cell())?;
+            if thresholds::kind_of(reading) != Some(thresholds::Kind::Degrees) {
+                return None;
+            }
+            Some((reading.value()?, reading))
+        })
+        .max_by(|left, right| left.0.total_cmp(&right.0))?;
+
+    let severity = thresholds::severity(hottest.1, limits);
+    let colour = match severity {
+        history::Severity::Quiet => INK,
+        history::Severity::Warn => AMBER,
+        history::Severity::Alarm => RED,
+    };
+    let text = format!("{:.0}", hottest.0);
+    // Three characters is what the badge still shows as digits; anything longer
+    // would be refused by the drawer anyway.
+    if text.chars().count() > ss550_tray::icon::MAX_CHARS {
+        return None;
+    }
+    Some((text, colour))
+}
+
 /// Decides one key's face, before anything is sent.
 ///
 /// The order is the whole of the rule: the profile's appearance first, because
@@ -955,6 +1001,11 @@ struct Controller {
     /// line within a second, and a message about a saved setting that vanishes
     /// before it is read has not been said.
     thresholds_note: Option<String>,
+    /// The number the tray icon is wearing right now, with its colour.
+    ///
+    /// Compared on every sample so the icon is redrawn only when the digits or
+    /// the colour changed: a new icon is a repaint of the notification area.
+    tray_icon: Option<(String, [u8; 3])>,
     /// The tooltip the tray icon is showing right now.
     ///
     /// The tray is renamed only when this changes: a message to another thread
@@ -1274,6 +1325,7 @@ impl Controller {
             history: history::History::new(),
             thresholds,
             thresholds_note,
+            tray_icon: None,
             tray_tooltip: String::new(),
         };
 
@@ -2628,6 +2680,7 @@ impl Controller {
         self.pump_samples();
         self.collect_faces();
         self.refresh_tray_tooltip();
+        self.refresh_tray_icon();
     }
 
     /// Handles an unexpected disconnect with exponential backoff.
@@ -3929,13 +3982,52 @@ impl Controller {
         // has stopped answering is not something to retry twice a second.
         self.tray_tooltip = text;
         if failed {
-            self.tray = None;
-            self.tray_error = Some(
+            self.forget_tray(
                 "The tray icon stopped answering. The controller keeps running, but it has no \
-                 icon to come back from."
-                    .to_string(),
+                 icon to come back from.",
             );
         }
+    }
+
+    /// Keeps the tray icon wearing the hottest temperature, in the colour that
+    /// temperature earns.
+    ///
+    /// The tooltip needs a hover; this does not. It is the one reading a person
+    /// wants without asking, and it is written only when the number or its colour
+    /// changes — a new icon twice a second would be a redraw of the notification
+    /// area for nothing.
+    fn refresh_tray_icon(&mut self) {
+        let Some(tray) = &self.tray else {
+            return;
+        };
+        let next = tray_number(&self.samples, self.plugins.cells(), &self.thresholds);
+        if next == self.tray_icon {
+            return;
+        }
+        // Nothing to say goes back to the application's own badge, so the icon
+        // never keeps a number the machine has stopped reporting.
+        let pixels = match &next {
+            Some((text, colour)) => ss550_tray::icon::badge_with_digits(text, *colour)
+                .unwrap_or_else(ss550_tray::icon::deck_icon_rgba),
+            None => ss550_tray::icon::deck_icon_rgba(),
+        };
+        let failed = tray.set_icon(&pixels).is_err();
+        self.tray_icon = next;
+        if failed {
+            self.forget_tray(
+                "The tray icon stopped answering. The controller keeps running, but it has no \
+                 icon to come back from.",
+            );
+        }
+    }
+
+    /// Drops the icon once, with the sentence that says why.
+    ///
+    /// A tray that has stopped answering is not something to retry on every tick,
+    /// and one message is enough for both the tooltip and the picture.
+    fn forget_tray(&mut self, reason: &str) {
+        self.tray = None;
+        self.tray_error = Some(reason.to_string());
     }
 
     /// Remembers what each measured cell reported, for the Stats page.
@@ -4408,8 +4500,10 @@ mod tests {
     use super::{
         advance_clicks, apply_pick, join_notes, load_recents_at, navigate, needs_fonts, plan_tile,
         read_deck_path_at, readings_to_repaint, record_recent_at, resolve_style, slot_for,
-        tray_text, write_deck_path_at, Link, NavOutcome, PickOutcome, PictureDialog, Slot, Tile,
+        tray_number, tray_text, write_deck_path_at, Link, NavOutcome, PickOutcome, PictureDialog,
+        Slot, Tile,
     };
+    use crate::thresholds;
     use ss550_engine::{Action, AssetLibrary, Recents};
     use ss550_plugin_api::{CellId, PluginId, Reading};
     use ss550_plugins::Samples;
@@ -4495,6 +4589,43 @@ mod tests {
         assert_eq!(
             tray_text(Link::Connected, &Samples::new(), &cells),
             "Sh-Deck · connected"
+        );
+    }
+
+    #[test]
+    fn the_tray_badge_shows_the_hottest_temperature_in_the_colour_it_earned() {
+        let cells = ss550_plugins::Catalogue::built_in().cells().to_vec();
+        let owner = PluginId::parse("system-stats").expect("a usable plugin id");
+        let mut samples = Samples::new();
+        samples.set(owner.clone(), cell("cpu.usage"), Reading::percent(20.0));
+        samples.set(owner.clone(), cell("cpu.temp"), Reading::temperature(55.0));
+        samples.set(owner, cell("gpu.temp"), Reading::temperature(62.0));
+
+        // The hottest chip is the answer, and the defaults call it quiet.
+        let (text, colour) = tray_number(&samples, &cells, &thresholds::Thresholds::default())
+            .expect("two temperatures are reported");
+        assert_eq!(text, "62", "the hottest, not the first");
+        assert_eq!(colour, [0xed, 0xed, 0xf0], "quiet is the window's own ink");
+
+        // The same number under the user's lines: amber past 60, red past 61.
+        let strict = thresholds::Thresholds {
+            share: thresholds::Lines::new(80.0, 95.0, 100.0),
+            degrees: thresholds::Lines::new(60.0, 61.0, 150.0),
+        };
+        assert_eq!(
+            tray_number(&samples, &cells, &strict).map(|(_, colour)| colour),
+            Some([0xef, 0x44, 0x44]),
+            "a badge and a card cannot disagree about 62"
+        );
+
+        // No temperature, no number: percentages are not what a badge is for.
+        let mut only_load = Samples::new();
+        let owner = PluginId::parse("system-stats").expect("a usable plugin id");
+        only_load.set(owner.clone(), cell("cpu.usage"), Reading::percent(96.0));
+        only_load.set(owner, cell("gpu.temp"), Reading::unavailable("no sensor"));
+        assert_eq!(
+            tray_number(&only_load, &cells, &thresholds::Thresholds::default()),
+            None
         );
     }
 
