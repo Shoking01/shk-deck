@@ -109,10 +109,13 @@ impl Ss550Deck {
 
     /// Opens the deck at a device path the caller already knows.
     ///
-    /// The cheap half of discovery: no bus walk, one named device. See
+    /// The cheap half of discovery: no bus walk, one named device. It still pays
+    /// the settle window — a path says where the deck is, not that it has
+    /// finished booting — so a start at logon cannot open a handle that dies
+    /// inside the deck's own re-enumeration. See
     /// [`Device::connect_at_path_with`] for why holding one [`HidApi`] matters.
     pub fn connect_at_path(
-        api: &HidApi,
+        api: &mut HidApi,
         path: &str,
         timeout: Duration,
     ) -> Result<Self, Ss550Error> {

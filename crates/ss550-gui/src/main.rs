@@ -607,6 +607,14 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 /// seconds. It is also the ceiling that keeps the shift from overflowing.
 const MAX_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
+/// How long a connection must last before it counts as the deck working.
+///
+/// The deck re-enumerates one to three seconds after it is powered: a start at
+/// logon answers, dies inside that window and answers again a moment later. None
+/// of those is a working deck, and treating them as one is what kept the retry at
+/// its shortest interval for as long as the machine was up.
+const STABLE_CONNECTION: Duration = Duration::from_secs(10);
+
 /// Outcome of one connection attempt, produced by the connector worker.
 enum Attempt {
     /// The deck answered and is ready to be spoken to.
@@ -737,6 +745,12 @@ struct Controller {
     attempts: u32,
     /// When the connection and heartbeat work last ran.
     last_tick: Instant,
+    /// When the current connection was adopted, while there is one.
+    ///
+    /// What decides whether a disconnect starts the backoff over: a deck that
+    /// worked for a while and then went away is a new event, and one that died
+    /// inside its own boot is not.
+    connected_at: Option<Instant>,
     /// When it's safe to try reconnecting again (for backoff).
     reconnect_at: Instant,
     /// What every key does, and where it is saved.
@@ -1222,6 +1236,7 @@ impl Controller {
             pending: false,
             attempts: 0,
             last_tick: Instant::now(),
+            connected_at: None,
             reconnect_at: Instant::now(),
             store,
             store_path,
@@ -1311,7 +1326,11 @@ impl Controller {
                         continue;
                     }
                     self.pending = false;
-                    self.attempts = 0;
+                    // A connection is not proof that it will last: at a logon the
+                    // deck answers, dies inside its re-enumeration and answers
+                    // again. The counter is started again by a connection that
+                    // *lasted* (see `schedule_retry`), not by this one.
+                    self.connected_at = Some(Instant::now());
                     // Reset backoff on successful connection
                     self.reconnect_at = Instant::now();
                     // Remember where it was found: the next start opens that
@@ -1856,8 +1875,18 @@ impl Controller {
     /// Every failed attempt goes through here, not only the disconnect the
     /// window noticed: a deck that stays away must keep backing off, or the
     /// app spams the USB bus for as long as it is unplugged.
+    ///
+    /// A connection that **lasted** is the one case that starts the count again.
+    /// At a logon the deck answers, dies inside its own re-enumeration and
+    /// answers again; resetting the backoff on each of those turned the retry
+    /// into a three-second loop that never gave the deck the quiet it needs to
+    /// finish booting. A deck that worked for a while and then went away is a new
+    /// event, and starts over.
     fn schedule_retry(&mut self) {
-        self.attempts = self.attempts.saturating_add(1);
+        self.attempts = match self.connected_at.take() {
+            Some(at) if at.elapsed() >= STABLE_CONNECTION => 1,
+            _ => self.attempts.saturating_add(1),
+        };
         self.reconnect_at = Instant::now() + self.retry_delay();
     }
 

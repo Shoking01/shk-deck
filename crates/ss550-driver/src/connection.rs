@@ -182,6 +182,13 @@ const PRESENCE_POLL: Duration = Duration::from_millis(50);
 /// missed while still costing only one `CreateFile` per try.
 const PATH_RETRY: Duration = Duration::from_millis(250);
 
+/// How long a **settled** deck's remembered path is given to open.
+///
+/// The settle window has already passed by the time this applies, so a path that
+/// refuses for longer than this is one the deck no longer lives at: the caller
+/// falls back to discovery instead of spending its whole attempt here.
+const PATH_OPEN_WINDOW: Duration = Duration::from_secs(2);
+
 /// Reconnect backoff constants (reserved for M7: hotplug detection)
 /// These will be used when we implement automatic reconnect with exponential
 /// backoff in the UI layer.
@@ -391,18 +398,31 @@ impl Device {
     /// wait for), and the caller falls back to
     /// [`Device::connect_with_api_timeout`] to discover a deck that moved.
     pub fn connect_at_path_with(
-        api: &HidApi,
+        api: &mut HidApi,
         path: &str,
         timeout: Duration,
     ) -> Result<Self, Ss550Error> {
+        // A path says **where** the deck is, never that it has finished booting.
+        // The deck re-enumerates one to three seconds after power-up, and a
+        // handle opened inside that window is dead the moment the device leaves
+        // the bus: the write that follows answers `0x3E5` and the app starts the
+        // connect-die-connect loop a start at logon spent a night in. So the same
+        // settle window the discovery path pays is paid here, before anything is
+        // opened — and only then is the remembered address worth using.
+        wait_until_settled(api, timeout)?;
+
         let path = std::ffi::CString::new(path)
             .map_err(|_| Ss550Error::DeviceNotFound { vid: VID, pid: PID })?;
+        // A settled deck opens at once, so this window is only for the address
+        // that went stale while the settle was being waited out. It is bounded
+        // separately from `timeout`: the caller then falls back to discovery
+        // instead of spending the whole attempt on a path that has moved.
         let started = Instant::now();
         loop {
             match api.open_path(&path) {
                 Ok(device) => return Ok(Self::init_from_handle(device)),
                 Err(error) => {
-                    if started.elapsed() >= timeout {
+                    if started.elapsed() >= PATH_OPEN_WINDOW {
                         // Not `DeviceNotFound`: the path was named and refused,
                         // which is a different thing from a bus with no deck.
                         return Err(Ss550Error::HidIoError(error.to_string()));
