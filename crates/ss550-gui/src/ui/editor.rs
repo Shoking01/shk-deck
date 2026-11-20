@@ -126,6 +126,18 @@ pub(crate) fn key_editor(
                 this.note = "Pick a measurement, then press SAVE BINDING.".into();
                 cx.notify();
             },
+        ))
+        .child(segment(
+            SharedString::from("draft-media"),
+            "MEDIA",
+            draft == DraftKind::Media,
+            tokens,
+            cx,
+            |this, _window, cx| {
+                this.draft = DraftKind::Media;
+                this.note = "Pick a player command, then press SAVE BINDING.".into();
+                cx.notify();
+            },
         ));
 
     let launch_fields = div()
@@ -192,6 +204,7 @@ pub(crate) fn key_editor(
         DraftKind::OpenUrl => url_fields,
         DraftKind::Keys => key_fields,
         DraftKind::Plugin => plugin_fields(controller, tokens, cx),
+        DraftKind::Media => media_fields(controller, tokens, cx),
     };
 
     let save_row = div()
@@ -335,6 +348,62 @@ pub(crate) fn editor_heading(number: ss550_engine::KeyNumber, tokens: Tokens) ->
         .justify_between()
         .child(micro_label("WHAT THIS KEY RUNS", tokens))
         .child(micro_label(format!("#{}", number.get()), tokens))
+}
+
+/// The four media commands, as buttons.
+///
+/// A media key is one command and nothing else: there is no field to fill, so the
+/// form is the list. The chosen command is the draft's, and SAVE BINDING turns it
+/// into the action — the same path an app or a keystroke takes.
+fn media_fields(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller>) -> Div {
+    let chosen = controller.draft_media;
+    let mut list = div().flex().flex_col().gap(px(2.)).w_full();
+
+    for command in ss550_engine::MediaCommand::ALL {
+        let picked = chosen == command;
+        let row = div()
+            .id(SharedString::from(format!("media-{}", command.as_str())))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .h(px(34.))
+            .w_full()
+            .min_w(px(0.))
+            .px(px(8.))
+            .rounded(px(RADIUS_SM))
+            .bg(match picked {
+                true => tokens.accent_tint,
+                false => tokens.elevated,
+            })
+            .child(one_line(command.label(), FONT_SUB, tokens.ink));
+
+        list = list.child(activate(row, cx, move |this, _window, cx| {
+            this.draft = DraftKind::Media;
+            this.draft_media = command;
+            this.note = format!(
+                "{} will be sent when key #{} is pressed — press SAVE BINDING.",
+                command.label(),
+                this.selected_key.get()
+            )
+            .into();
+            cx.notify();
+        }));
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .w_full()
+        .child(micro_label("PLAYER · what the key sends", tokens))
+        .child(list)
+        .child(one_line(
+            "Windows hands this to whichever player is active: Spotify, a browser tab, \
+             or the system's own.",
+            FONT_CAPTION,
+            tokens.soft,
+        ))
 }
 
 /// The measurement a key shows, chosen from what the plugins of this build

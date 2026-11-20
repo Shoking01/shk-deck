@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use crate::action::{file_label, Action};
+use crate::action::{file_label, Action, MediaCommand};
 use crate::error::ActionError;
 use crate::keys::KeyCombo;
 
@@ -79,6 +79,10 @@ pub fn command_for(action: &Action) -> Result<CommandSpec, ActionError> {
         Action::OpenUrl { url } => Ok(open_url_spec(url)),
         Action::Keys { keys } => Err(ActionError::KeysNotAProgram {
             keys: keys.to_string(),
+        }),
+        // A media command is delivered, not started, exactly like a keystroke.
+        Action::Media { command } => Err(ActionError::MediaIsNotAProgram {
+            command: command.as_str().to_string(),
         }),
         // A reading is drawn where the keys are drawn: the runner has no window
         // and no place to put one.
@@ -353,6 +357,20 @@ pub trait KeySender: Send + Sync {
     /// sender that returns `Ok` claims the keystroke was delivered; there is no
     /// way to say "nothing happened" by succeeding.
     fn send(&self, combo: &KeyCombo) -> Result<(), String>;
+
+    /// Sends one of the platform's media commands to whatever player owns the
+    /// active media session.
+    ///
+    /// The default **refuses with a sentence**: a sender that cannot do this must
+    /// say so instead of accepting a key that quietly does nothing. The Windows
+    /// sender implements it with the media virtual keys, which is what Spotify
+    /// and every other player listens for.
+    fn send_media(&self, command: MediaCommand) -> Result<(), String> {
+        Err(format!(
+            "this platform cannot send the media command {}",
+            command.label()
+        ))
+    }
 }
 
 /// Runs actions on a background thread, so the UI never waits for one.
@@ -445,6 +463,7 @@ impl ActionRunner {
                             Err(error) => report(&sink, error),
                         },
                         Job::Keys(combo) => deliver(sender.as_ref(), &combo, &sink),
+                        Job::Media(command) => deliver_media(sender.as_ref(), command, &sink),
                     }
                 }
             })
@@ -470,6 +489,10 @@ impl ActionRunner {
             Action::Keys { keys } => {
                 self.check_sender(&keys)?;
                 Job::Keys(keys)
+            }
+            Action::Media { command } => {
+                self.check_media_sender(command)?;
+                Job::Media(command)
             }
             action => Job::Run(action),
         };
@@ -509,6 +532,19 @@ impl ActionRunner {
         }
     }
 
+    /// Refuses a media command when there is nothing to deliver it with.
+    ///
+    /// The message is the sender's own name for it, because the sentence a user
+    /// reads is about what could not be sent, not about which trait is missing.
+    fn check_media_sender(&self, command: MediaCommand) -> Result<(), ActionError> {
+        match self.key_sender.is_some() {
+            true => Ok(()),
+            false => Err(ActionError::NeedsKeySender {
+                keys: command.label().to_string(),
+            }),
+        }
+    }
+
     /// Takes the oldest failure the worker has reported, if any.
     pub fn take_failure(&self) -> Option<String> {
         self.failures
@@ -534,6 +570,8 @@ enum Job {
     Run(Action),
     /// Deliver a key combination.
     Keys(KeyCombo),
+    /// Deliver one of the platform's media commands.
+    Media(MediaCommand),
 }
 
 /// Puts a failure where the window will find it.
@@ -559,6 +597,31 @@ fn deliver(
         // reported: a send that did not happen is never silence.
         None => Err(ActionError::NeedsKeySender {
             keys: combo.to_string(),
+        }),
+    };
+    if let Err(error) = outcome {
+        report(sink, error);
+    }
+}
+
+/// Hands one media command to the sender and reports a failure it names.
+///
+/// The sender is the same platform one a keystroke uses: a media command is a
+/// keystroke whose key happens not to be on a keyboard.
+fn deliver_media(
+    sender: Option<&Arc<dyn KeySender>>,
+    command: MediaCommand,
+    sink: &Arc<Mutex<VecDeque<String>>>,
+) {
+    let outcome = match sender {
+        Some(sender) => sender
+            .send_media(command)
+            .map_err(|reason| ActionError::KeySend {
+                keys: command.label().to_string(),
+                reason,
+            }),
+        None => Err(ActionError::MediaIsNotAProgram {
+            command: command.as_str().to_string(),
         }),
     };
     if let Err(error) = outcome {
@@ -916,6 +979,16 @@ mod tests {
             }
             Ok(())
         }
+
+        fn send_media(&self, command: MediaCommand) -> Result<(), String> {
+            if let Some(reason) = &self.failure {
+                return Err(reason.clone());
+            }
+            if let Ok(mut sent) = self.sent.lock() {
+                sent.push(format!("media:{}", command.as_str()));
+            }
+            Ok(())
+        }
     }
 
     fn combo(text: &str) -> KeyCombo {
@@ -964,6 +1037,64 @@ mod tests {
         assert!(
             runner.take_failure().is_none(),
             "a delivered key is not a failure"
+        );
+    }
+
+    #[test]
+    fn a_media_key_reaches_the_sender_as_a_media_command() {
+        // The whole path of the new action: submit → the worker → the platform
+        // sender, which is the same seam a keystroke uses.
+        let recorder = Recorder::sending();
+        let sender: Arc<dyn KeySender> = recorder.clone();
+        let runner = ActionRunner::with_key_sender(sender);
+
+        runner
+            .submit(Action::Media {
+                command: MediaCommand::Next,
+            })
+            .expect("queued");
+
+        let delivered = (0..200).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            !recorder.sent().is_empty()
+        });
+        assert!(delivered, "the sender was never asked for a media command");
+        assert_eq!(recorder.sent(), vec!["media:next".to_string()]);
+        assert!(
+            runner.take_failure().is_none(),
+            "a delivered media command is not a failure"
+        );
+    }
+
+    #[test]
+    fn a_media_key_without_a_sender_is_refused_on_the_spot() {
+        // Same rule as a keystroke: a runner that cannot deliver must say so
+        // before the action is queued, never report a send that did not happen.
+        let runner = ActionRunner::new();
+        let error = runner
+            .submit(Action::Media {
+                command: MediaCommand::PlayPause,
+            })
+            .expect_err("a runner with no sender must refuse a media command");
+
+        assert!(
+            matches!(error, ActionError::NeedsKeySender { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_media_command_is_not_a_program() {
+        // It is delivered, not started: `command_for` is the function that turns
+        // an action into a process, and this one must refuse it by name.
+        let error = super::command_for(&Action::Media {
+            command: MediaCommand::Stop,
+        })
+        .expect_err("a media command cannot be started");
+
+        assert!(
+            matches!(error, ActionError::MediaIsNotAProgram { .. }),
+            "{error:?}"
         );
     }
 

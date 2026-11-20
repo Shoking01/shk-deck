@@ -509,6 +509,12 @@ impl IconCache {
                 .glyphs
                 .contains_key(&letter)
                 .then_some(Base::Glyph(letter)),
+            // A media key has no picture and no program: its glyph is its whole
+            // face, so there is nothing else to try.
+            Action::Media { .. } => self
+                .glyphs
+                .contains_key(&letter)
+                .then_some(Base::Glyph(letter)),
             // A navigation key draws the initial of the page or profile it
             // names: the tile is never blank, and the letter says where it
             // goes. A plugin key draws the initial of the cell it measures, in
@@ -589,6 +595,15 @@ pub(crate) fn glyph_letter(action: &Action) -> char {
         // `BaseKey`'s own spelling is what the tile shows: `M`, `7`, `F24`,
         // `Enter`. The initial of that is the initial of the key.
         Action::Keys { keys } => first_letter(&keys.base_key().to_string()),
+        // One character per command: `P` play/pause, `N` next, `B` back (the
+        // track before) and `S` stop. A glyph is one character, and a media key
+        // has no program to take an initial from.
+        Action::Media { command } => match command {
+            ss550_engine::MediaCommand::PlayPause => 'P',
+            ss550_engine::MediaCommand::Next => 'N',
+            ss550_engine::MediaCommand::Previous => 'B',
+            ss550_engine::MediaCommand::Stop => 'S',
+        },
         // A navigation key says where it goes: the tile draws the initial of the
         // page or the profile it names, so it is never blank and the letter
         // points at the destination.

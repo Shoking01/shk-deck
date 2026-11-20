@@ -109,6 +109,7 @@ pub(crate) fn template_label(kind: DraftKind) -> &'static str {
         DraftKind::OpenUrl => "Open URL",
         DraftKind::Keys => "Keystrokes",
         DraftKind::Plugin => "Live stat",
+        DraftKind::Media => "Media key",
     }
 }
 

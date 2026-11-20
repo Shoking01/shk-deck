@@ -159,6 +159,13 @@ pub enum ActionError {
         keys: String,
     },
 
+    /// A media command is sent, not started, so it has no program to run.
+    #[error("the media command {command} is sent, not launched: it is not a program")]
+    MediaIsNotAProgram {
+        /// The command, as the profile spells it.
+        command: String,
+    },
+
     /// The platform sender could not deliver the combination.
     #[error("could not send {keys}: {reason}")]
     KeySend {

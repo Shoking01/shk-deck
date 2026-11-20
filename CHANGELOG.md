@@ -7,7 +7,22 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
-### Added — the application picker lists what the shell knows, not only the Start Menu
+### Added — media keys, so a deck key can control the player
+- A new action, **`Media`**, sends one of the system's media commands:
+  `play_pause`, `next`, `previous`, `stop`. It is delivered as the virtual keys a
+  keyboard's own media keys use, so Windows hands it to the **active media
+  session** — Spotify, a browser tab or the system player, without this app
+  knowing which. The editor gains a `MEDIA` segment with the four commands, and a
+  key bound to one draws a letter (`P`, `N`, `B`, `S`) until it has a picture.
+- `docs/actions.md` states the split the feature is built on: an **action** is
+  what a key does, a **plugin** is what a key shows, and the checklist for adding
+  either. Media control is an action; showing the track is the plugin that comes
+  next.
+- A media command is *delivered*, not started: `command_for` refuses it by name,
+  and a runner with no platform sender refuses it before it is queued — the same
+  rule a keystroke already followed.
+
+
 - The `CHOOSE AN APP` list now includes **packaged apps** — Settings, Calculator,
   Photos, Paint, Terminal, the Microsoft Store, and anything else registered in
   the shell's `AppsFolder` — which have no shortcut to walk to. A key starts one

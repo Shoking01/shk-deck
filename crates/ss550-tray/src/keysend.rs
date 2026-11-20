@@ -25,7 +25,7 @@
 //! | `BaseKey::Named(..)` | the table in [`named_code`] |
 //! | `BaseKey::Punctuation(..)` | the OEM keys in [`punctuation_code`] |
 
-use ss550_engine::{BaseKey, KeyCombo, KeySender, Modifier, NamedKey};
+use ss550_engine::{BaseKey, KeyCombo, KeySender, MediaCommand, Modifier, NamedKey};
 
 /// `VK_CONTROL`: the left and right Ctrl keys together.
 const VK_CONTROL: u16 = 0x11;
@@ -191,6 +191,17 @@ impl KeySender for SystemKeySender {
         let sequence = strokes(combo)?;
         deliver(&sequence)
     }
+
+    /// Sends one media command as the key Windows gives every player.
+    ///
+    /// `VK_MEDIA_PLAY_PAUSE` and its three siblings are the virtual keys the
+    /// system delivers to the **active media session**, which is why this needs no
+    /// player to be named and works for Spotify, a browser tab and the system's
+    /// own player alike. Each is one press and one release, the same shape a
+    /// keyboard sends.
+    fn send_media(&self, command: MediaCommand) -> Result<(), String> {
+        deliver_media(media_code(command))
+    }
 }
 
 /// Hands the keystrokes to the system.
@@ -281,6 +292,67 @@ fn release_attempted(attempted: &[windows::Win32::UI::Input::KeyboardAndMouse::I
     // `deliver` builds them. The result is deliberately ignored: this runs on
     // the path that is already reporting a failure.
     let _ = unsafe { SendInput(&releases, std::mem::size_of::<INPUT>() as i32) };
+}
+
+/// The virtual key a media command presses.
+///
+/// The four codes are Windows', not this project's: they are what a keyboard
+/// sends for its own media keys, so a player cannot tell the difference.
+fn media_code(command: MediaCommand) -> u16 {
+    match command {
+        MediaCommand::PlayPause => 0xB3,
+        MediaCommand::Next => 0xB0,
+        MediaCommand::Previous => 0xB1,
+        MediaCommand::Stop => 0xB2,
+    }
+}
+
+/// Presses and releases one media key.
+#[cfg(windows)]
+fn deliver_media(code: u16) -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    };
+
+    let events = [false, true].map(|release| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(code),
+                wScan: 0,
+                dwFlags: match release {
+                    true => KEYEVENTF_KEYUP,
+                    false => Default::default(),
+                },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    });
+
+    // SAFETY: `events` is a live array of `INPUT` records and its length is
+    // passed with it; the call copies what it needs before returning.
+    let sent = unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) };
+    if (sent as usize) < events.len() {
+        // The press may have landed even when the release did not, and a media
+        // key left down is a player that skips tracks until the key repeats.
+        // Releasing is best-effort: it cannot fail worse than the state it is
+        // repairing.
+        let release = [events[1]];
+        // SAFETY: as above, for the one record that matters.
+        let _ = unsafe { SendInput(&release, std::mem::size_of::<INPUT>() as i32) };
+        return Err(format!(
+            "Windows accepted {sent} of {} media key events",
+            events.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Everywhere else there is no media key to send.
+#[cfg(not(windows))]
+fn deliver_media(_code: u16) -> Result<(), String> {
+    Err("this platform has no way to send a media command yet".to_string())
 }
 
 /// Everywhere else there is no keystroke to send.

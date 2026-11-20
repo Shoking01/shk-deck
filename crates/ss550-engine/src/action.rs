@@ -9,8 +9,7 @@ use crate::keys::KeyCombo;
 use crate::profiles::MAX_PAGE_NAME_CHARS;
 use crate::{ActionError, KeyComboError};
 
-/// Whether `text` is an address the shell resolves rather than a file.
-///
+/// Whether `text` is an address the shell resolves rather than a file.///
 /// A packaged app (`shell:AppsFolder\<AppUserModelId>`) and a registered URI
 /// (`steam://rungameid/…`) are both started by handing the address over, and
 /// neither is a path anything can be read from. One rule, in one place: the
@@ -18,6 +17,49 @@ use crate::{ActionError, KeyComboError};
 /// shell for one.
 pub fn is_shell_address(text: &str) -> bool {
     text.starts_with("shell:") || text.contains("://")
+}
+
+/// One of the platform's media commands.
+///
+/// Four, because they are the four a player is driven with and every extra one is
+/// a promise: a key that sends `stop` is useful, a key that sends "shuffle" is a
+/// key that only one player honours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaCommand {
+    /// Start, or pause, whatever is playing.
+    PlayPause,
+    /// The next track.
+    Next,
+    /// The track before.
+    Previous,
+    /// Stop, without forgetting where the track was.
+    Stop,
+}
+
+impl MediaCommand {
+    /// Every command, in the order the editor lists them.
+    pub const ALL: [Self; 4] = [Self::PlayPause, Self::Next, Self::Previous, Self::Stop];
+
+    /// The command as it is stored and spelled in the profile.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PlayPause => "play_pause",
+            Self::Next => "next",
+            Self::Previous => "previous",
+            Self::Stop => "stop",
+        }
+    }
+
+    /// The words a person reads: the palette, the editor and the status line.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PlayPause => "Play / pause",
+            Self::Next => "Next track",
+            Self::Previous => "Previous track",
+            Self::Stop => "Stop",
+        }
+    }
 }
 
 /// What a key does when it is pressed.
@@ -62,6 +104,31 @@ pub enum Action {
     Keys {
         /// The combination to send.
         keys: KeyCombo,
+    },
+    /// Sends one of the platform's **media** commands to whatever player is
+    /// listening: play/pause, next track, previous track, stop.
+    ///
+    /// This is an action and not a plugin on purpose. A plugin *measures*
+    /// something and a key shows the answer; a media command *does* something
+    /// when the key is pressed, which is what an action is. The player does not
+    /// have to be named: Windows delivers the command to the active media
+    /// session, so Spotify, a browser tab and the system's own player all obey
+    /// the same key.
+    ///
+    /// ```
+    /// use ss550_engine::{Action, MediaCommand};
+    ///
+    /// let action = Action::Media {
+    ///     command: MediaCommand::PlayPause,
+    /// };
+    /// assert_eq!(action.summary(), "MEDIA PLAY_PAUSE");
+    ///
+    /// let json = serde_json::to_string(&action).expect("serialise");
+    /// assert_eq!(json, r#"{"type":"media","command":"play_pause"}"#);
+    /// ```
+    Media {
+        /// Which command the key sends.
+        command: MediaCommand,
     },
     /// Shows another page of this profile: what a folder is on the deck.
     ///
@@ -155,6 +222,9 @@ impl Action {
             // A `KeyCombo` is proof that the combination parses, and its fields
             // are private, so there is nothing left to check here.
             Action::Keys { .. } => Ok(()),
+            // A command is one of four values the type states; there is nothing
+            // a caller could have typed for it to be wrong.
+            Action::Media { .. } => Ok(()),
             Action::Folder { page } => Self::validate_page_name(page),
             Action::Back => Ok(()),
             Action::Profile { name } => Self::validate_profile_name(name),
@@ -210,6 +280,9 @@ impl Action {
             // would save that copy and force every caller to deal with a type
             // it does not need.
             Action::Keys { keys } => Action::Keys { keys: keys.clone() },
+            // A command is a value of a closed set: nothing to clean, nothing to
+            // re-spell.
+            Action::Media { command } => Action::Media { command: *command },
             // Navigation carries a name and nothing to clean: a name is trimmed
             // when it is validated, and rewriting it here would give one page
             // two spellings.
@@ -296,6 +369,9 @@ impl Action {
             Action::Launch { program, .. } => format!("LAUNCH {}", file_label(program)),
             Action::OpenUrl { url } => format!("OPEN {}", host_of(url)),
             Action::Keys { keys } => keys.to_string(),
+            // The dashboard's one-line label names the command, not the player:
+            // the player is whatever is playing.
+            Action::Media { command } => format!("MEDIA {}", command.as_str().to_uppercase()),
             Action::Folder { page } => format!("FOLDER {}", page.to_uppercase()),
             Action::Back => "BACK".to_string(),
             Action::Profile { name } => format!("PROFILE {}", name.to_uppercase()),
@@ -365,6 +441,7 @@ impl Action {
             }
             Action::OpenUrl { url } => format!("Open {url}"),
             Action::Keys { keys } => format!("Send {keys}"),
+            Action::Media { command } => format!("Send the media command {}", command.label()),
             Action::Folder { page } => format!("Open the page {page}"),
             Action::Back => "Go back to the page this one was opened from".to_string(),
             Action::Profile { name } => format!("Switch to the profile {name}"),

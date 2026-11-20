@@ -320,6 +320,8 @@ enum DraftKind {
     Keys,
     /// Show a live reading from a plugin on this key.
     Plugin,
+    /// Send one of the platform's media commands: play, next, previous, stop.
+    Media,
 }
 
 impl DraftKind {
@@ -333,6 +335,7 @@ impl DraftKind {
             DraftKind::OpenUrl => "open a URL",
             DraftKind::Keys => "send a keystroke",
             DraftKind::Plugin => "show a live reading",
+            DraftKind::Media => "send a media command",
         }
     }
 }
@@ -781,6 +784,11 @@ struct Controller {
     /// the editor. It narrows a list; it never restricts what may be bound, so a
     /// key already bound to another plugin still shows every cell.
     draft_plugin_filter: Option<String>,
+    /// The media command the editor has chosen, while the draft is a media key.
+    ///
+    /// A media key is one command and nothing else, so the draft holds the value
+    /// the button sets and SAVE BINDING turns it into the action.
+    draft_media: ss550_engine::MediaCommand,
     program_input: Entity<InputState>,
     args_input: Entity<TextareaState>,
     url_input: Entity<InputState>,
@@ -1252,6 +1260,7 @@ impl Controller {
             draft: DraftKind::Launch,
             draft_plugin: None,
             draft_plugin_filter: None,
+            draft_media: ss550_engine::MediaCommand::PlayPause,
             program_input,
             args_input,
             url_input,
@@ -2929,6 +2938,13 @@ impl Controller {
     fn load_draft(&mut self, number: KeyNumber, window: &mut Window, cx: &mut Context<Self>) {
         let binding = self.store.get(number).cloned();
 
+        // Taken from the binding before it is destructured: the media command is
+        // part of what the key does, and the form opens with it picked.
+        self.draft_media = match &binding {
+            Some(Action::Media { command }) => *command,
+            _ => self.draft_media,
+        };
+
         // Every field is written on every load, empty included: a field left
         // holding the previous key's value is how the wrong program gets saved
         // onto the wrong key.
@@ -2955,6 +2971,16 @@ impl Controller {
                 String::new(),
                 keys.to_string(),
                 DraftKind::Keys,
+                None,
+            ),
+            // A media key has no field either: the draft remembers the command,
+            // and the four buttons under the form choose it.
+            Some(Action::Media { .. }) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                DraftKind::Media,
                 None,
             ),
             // A reading is edited by the list under the form, which is the only
@@ -3045,8 +3071,9 @@ impl Controller {
                 .keys_input
                 .update(cx, |state, cx| state.focus(window, cx)),
             // A reading is chosen by clicking a row, not by typing: the caret
-            // has nowhere to go, and the list is already on screen.
-            DraftKind::Plugin => {}
+            // has nowhere to go, and the list is already on screen. A media
+            // command is the same: four buttons and no field.
+            DraftKind::Plugin | DraftKind::Media => {}
         }
     }
 
@@ -3252,6 +3279,11 @@ impl Controller {
                         "Choose a measurement from the list, then press SAVE BINDING.".into();
                     return;
                 }
+            },
+            // One command, chosen from four: there is nothing to validate and
+            // nothing to type.
+            DraftKind::Media => Action::Media {
+                command: self.draft_media,
             },
         };
 
