@@ -789,6 +789,11 @@ struct Controller {
     /// A media key is one command and nothing else, so the draft holds the value
     /// the button sets and SAVE BINDING turns it into the action.
     draft_media: ss550_engine::MediaCommand,
+    /// What a reading key does when it is pressed, when it does anything.
+    ///
+    /// `None` is the ordinary gauge: pressing it refreshes the face and runs
+    /// nothing. A player's key sets a command here, so the same press pauses.
+    draft_press: Option<ss550_engine::MediaCommand>,
     program_input: Entity<InputState>,
     args_input: Entity<TextareaState>,
     url_input: Entity<InputState>,
@@ -1261,6 +1266,7 @@ impl Controller {
             draft_plugin: None,
             draft_plugin_filter: None,
             draft_media: ss550_engine::MediaCommand::PlayPause,
+            draft_press: None,
             program_input,
             args_input,
             url_input,
@@ -2414,11 +2420,27 @@ impl Controller {
         }
 
         // A reading is a gauge, not a button: pressing it refreshes what it
-        // shows from the newest sample and runs nothing. Saying which
-        // measurement it is keeps the press from feeling like nothing happened.
-        if action.is_reading() {
+        // shows from the newest sample. A plugin **may** also state what a press
+        // does — a player's key shows the track and pauses it — and that is the
+        // one case where a reading runs something, so it goes through the same
+        // path every other action takes, after the refresh.
+        if let Action::Plugin { press, .. } = &action {
             let key = u16::try_from(idx + 1).unwrap_or(u16::MAX);
             let refreshed = self.repaint_key(key);
+            if let Some(press) = press.as_deref() {
+                let summary = press.summary();
+                match self.runner.submit(press.clone()) {
+                    Ok(()) => self.note = format!("Key #{} pressed - {summary}.", idx + 1).into(),
+                    Err(err) => {
+                        self.note = format!(
+                            "Key #{} pressed, but the action was refused: {err}",
+                            idx + 1
+                        )
+                        .into()
+                    }
+                }
+                return;
+            }
             self.note = if refreshed {
                 // `describe` starts with the verb, so the template does not add
                 // one: "Key #3: Show cpu.usage, measured by the plugin …".
@@ -2944,6 +2966,15 @@ impl Controller {
             Some(Action::Media { command }) => *command,
             _ => self.draft_media,
         };
+        // A reading key's press, when it has one. Only a media command is offered
+        // by the form, so anything else reads as "nothing to do".
+        self.draft_press = match &binding {
+            Some(Action::Plugin { press, .. }) => match press.as_deref() {
+                Some(Action::Media { command }) => Some(*command),
+                _ => None,
+            },
+            _ => None,
+        };
 
         // Every field is written on every load, empty included: a field left
         // holding the previous key's value is how the wrong program gets saved
@@ -2985,7 +3016,7 @@ impl Controller {
             ),
             // A reading is edited by the list under the form, which is the only
             // place that knows which cells this build has.
-            Some(Action::Plugin { plugin, cell }) => (
+            Some(Action::Plugin { plugin, cell, .. }) => (
                 String::new(),
                 String::new(),
                 String::new(),
@@ -3273,7 +3304,13 @@ impl Controller {
                             .into();
                     return;
                 }
-                Some((plugin, cell)) => Action::Plugin { plugin, cell },
+                Some((plugin, cell)) => Action::Plugin {
+                    plugin,
+                    cell,
+                    press: self
+                        .draft_press
+                        .map(|command| Box::new(Action::Media { command })),
+                },
                 None => {
                     self.note =
                         "Choose a measurement from the list, then press SAVE BINDING.".into();
@@ -4597,6 +4634,7 @@ mod tests {
         let plugin = |id: &str| Action::Plugin {
             plugin: "system-stats".to_string(),
             cell: id.to_string(),
+            press: None,
         };
         let actions = vec![
             Some(plugin("cpu.usage")),
@@ -4630,6 +4668,7 @@ mod tests {
         let action = Action::Plugin {
             plugin: "system-stats".to_string(),
             cell: "cpu.usage".to_string(),
+            press: None,
         };
         let mut samples = Samples::new();
         samples.set(

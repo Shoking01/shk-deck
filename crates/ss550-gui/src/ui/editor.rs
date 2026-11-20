@@ -512,11 +512,65 @@ fn plugin_fields(controller: &mut Controller, tokens: Tokens, cx: &mut Context<C
         ));
     }
 
-    card.child(list).child(one_line(
-        "The key redraws itself as the measurement moves. Pressing it refreshes it.",
-        FONT_CAPTION,
-        tokens.soft,
-    ))
+    card.child(list)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .w_full()
+                .child(micro_label("WHEN PRESSED · what the key also does", tokens))
+                .child(press_choices(controller, tokens, cx)),
+        )
+        .child(one_line(
+            "The key redraws itself as the measurement moves. Pressing it refreshes it, \
+         and sends the command above when one is picked.",
+            FONT_CAPTION,
+            tokens.soft,
+        ))
+}
+
+/// The press a reading key may carry: nothing, or one media command.
+///
+/// Nothing is the ordinary gauge. A player's key is the case the field exists
+/// for: the same press that refreshes the track pauses it.
+fn press_choices(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller>) -> Div {
+    let chosen = controller.draft_press;
+    let options: Vec<(Option<ss550_engine::MediaCommand>, &str)> =
+        std::iter::once((None, "Nothing — a gauge only"))
+            .chain(
+                ss550_engine::MediaCommand::ALL
+                    .into_iter()
+                    .map(|command| (Some(command), command.label())),
+            )
+            .collect();
+
+    let mut list = div().flex().flex_col().gap(px(2.)).w_full();
+    for (position, (command, label)) in options.into_iter().enumerate() {
+        let picked = chosen == command;
+        let row = div()
+            .id(SharedString::from(format!("press-{position}")))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .h(px(30.))
+            .w_full()
+            .min_w(px(0.))
+            .px(px(8.))
+            .rounded(px(RADIUS_SM))
+            .bg(match picked {
+                true => tokens.accent_tint,
+                false => tokens.elevated,
+            })
+            .child(one_line(label, FONT_SUB, tokens.ink));
+
+        list = list.child(activate(row, cx, move |this, _window, cx| {
+            this.draft_press = command;
+            cx.notify();
+        }));
+    }
+    list
 }
 
 /// The picture the key would wear for the program in the field.
