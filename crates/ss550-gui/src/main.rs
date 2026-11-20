@@ -1397,11 +1397,21 @@ impl Controller {
     /// selected key — is built here from the deck's own geometry, once. Nothing
     /// below has a key count of its own.
     fn adopt(&mut self, deck: ss550_driver::Ss550Deck) {
-        let session = session::DeckSession::new(Box::new(deck));
+        let mut session = session::DeckSession::new(Box::new(deck));
         let key_count = session.key_count();
         // What the app found, and what shape it is: the one line a start that
         // "does not connect" needs in order to say why.
         diagnostics::record(&format!("connected: {}", session.label()));
+
+        // One harmless write before any image: a deck that answers its reads and
+        // refuses this one came back from its boot already halted, and pushing
+        // fifteen images at it would only extend the halt. This is the runbook's
+        // sixth rule, and the difference between "the deck went away" and the
+        // truth.
+        if let Err(error) = session.preflight() {
+            self.wedge(&error.to_string());
+            return;
+        }
 
         let path = ss550_engine::bindings_path_for(session.key());
         let (store, mut note) = self.load_store(&path, &session);

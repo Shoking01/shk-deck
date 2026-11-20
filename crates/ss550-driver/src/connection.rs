@@ -640,6 +640,22 @@ impl Device {
         Ok(events)
     }
 
+    /// Proves the transport accepts one write before a paint session starts.
+    ///
+    /// The runbook's sixth rule: one harmless write that must complete, with its
+    /// own error. `CRT|DIS` is the proven command for it — the deck's own
+    /// heartbeat, accepted in every good state and with no side effect to undo.
+    ///
+    /// A deck that answers its reads and refuses this one is **already halted**
+    /// when it comes back; that is measured, not hypothetical
+    /// (`docs/troubleshooting/deck-stuck.md` §5.6), and no host can clear it. The
+    /// difference this makes is honesty and one less image pushed at a dead
+    /// endpoint.
+    pub fn preflight(&mut self) -> Result<(), Ss550Error> {
+        let dis = build_dis();
+        self.write_pack(Command::DisplayOn, &dis)
+    }
+
     /// Wakes the display (`CRT|DIS`).
     ///
     /// This deliberately does **not** touch brightness. An earlier version sent

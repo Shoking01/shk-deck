@@ -317,6 +317,13 @@ impl Deck for Ss550Deck {
             .map_err(|error| seam_error(DeckOperation::KeepAlive, error))
     }
 
+    /// One `CRT|DIS` that must complete, before any image is offered.
+    fn preflight(&mut self) -> Result<(), DeckError> {
+        self.device
+            .preflight()
+            .map_err(|error| seam_error(DeckOperation::KeepAlive, error))
+    }
+
     fn set_dial(&mut self, dial: u8, _value: u8) -> Result<(), DeckError> {
         // No dials: every dial is out of range, and the capability is the one
         // place that count lives.
