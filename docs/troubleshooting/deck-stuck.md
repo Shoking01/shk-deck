@@ -412,6 +412,15 @@ telemetry. Either way the outcome that matters is unambiguous: the handle opened
 against the settled device and the first write landed 3 ms later, with no `0x48F`
 and no `0x3E5`.
 
+**The remembered path is not an exception.** A start at logon tried the path the
+previous run had saved — a single `CreateFile`, no bus walk — and opened the deck
+**one second after launch**, inside its own boot: `0x1F` and then `0x3E5` in a
+loop every three seconds, for the whole night, because the retry counter reset on
+each connection. Both halves are fixed: `connect_at_path_with` pays the same 3 s
+of continuous presence before it opens anything, and the app only restarts its
+backoff after a connection that lasted ten seconds. A path says *where* the deck
+is, never that it finished booting.
+
 This is the failure that made every earlier live test betray us — a handle opened
 on an intermediate appearance is stale forever. It no longer is.
 
