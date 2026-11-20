@@ -841,6 +841,12 @@ struct Controller {
     last_frame: Duration,
     /// True when the window was told not to look for a deck at all.
     blind: bool,
+    /// True while the deck's endpoint is halted and waiting to be power cycled.
+    ///
+    /// A halted endpoint answers a handle and refuses every report until power
+    /// is cut; retrying extends the halt, so this state suppresses the automatic
+    /// attempt and only RECONNECT clears it.
+    wedged: bool,
     /// Profile management for this deck.
     profile_store: ss550_engine::ProfileStore,
     /// The pictures a key can show.
@@ -1268,6 +1274,7 @@ impl Controller {
             frames: 0,
             last_frame: Duration::ZERO,
             blind,
+            wedged: false,
             profile_store: ss550_engine::ProfileStore::new(),
             assets: ss550_engine::AssetLibrary::at_config_dir(&ss550_engine::config_dir()),
             picture: PictureDialog::default(),
@@ -1901,6 +1908,10 @@ impl Controller {
             // the retries: nothing is opened until it is started without it.
             return;
         }
+        // Asking is the only thing that clears a halted endpoint's state in this
+        // app: the user has read the sentence, unplugged the deck, and pressed
+        // the button. That is consent to try once more; a failure wedges it again.
+        self.wedged = false;
         let generation = self.generation + 1;
         if self.commands.try_send(generation).is_err() {
             // A request is already queued: it will produce a fresh attempt.
@@ -2016,6 +2027,15 @@ impl Controller {
     /// must not claim it lost a deck that just told it exactly what it cannot
     /// do. Transport failure is the only thing that means the link is gone.
     fn report(&mut self, error: session::SessionError) {
+        // A halted endpoint is not a deck that went away: it is a deck that is
+        // there and refusing every report until it is power cycled. Retrying is
+        // the one thing that makes it worse — each rejected report extends the
+        // halt — so it is its own state, and the user is told what to do.
+        if Self::is_wedged(&error) {
+            let reason = error.to_string();
+            self.wedge(&reason);
+            return;
+        }
         // Both of these mean the deck is no longer there to talk to: a transport
         // failure on a read or a write, and the device not being enumerable at
         // all. Anything else — a refusal, a wrong size — leaves the session
@@ -2033,6 +2053,36 @@ impl Controller {
         } else {
             self.note = error.to_string().into();
         }
+    }
+
+    /// The state a halted endpoint leaves: no deck, no retry, and one sentence.
+    ///
+    /// [`docs/troubleshooting/deck-stuck.md`] is the runbook, and its fourth rule
+    /// is the one this implements: on any write error, mark the device wedged and
+    /// stop. The deck comes back when it is unplugged long enough to lose power —
+    /// a minute — and the app tries again only when the user asks with RECONNECT.
+    fn wedge(&mut self, reason: &str) {
+        self.drop_deck();
+        self.wedged = true;
+        self.note = format!(
+            "The deck's USB endpoint halted ({reason}). Unplug it, wait a minute, \
+             plug it back in, then press RECONNECT."
+        )
+        .into();
+        diagnostics::record("deck wedged: the endpoint halted; waiting for a power cycle");
+    }
+
+    /// Whether an error means the deck's endpoint halted until it is power cycled.
+    ///
+    /// The driver states it once, as its own error: `0x1F` and `0x3E5` are not
+    /// "the deck is gone", they are "the firmware refused a report and every
+    /// later write will fail". Retrying extends the halt, so this is the one
+    /// transport failure that must **not** go through the reconnect loop.
+    fn is_wedged(error: &session::SessionError) -> bool {
+        matches!(
+            error,
+            session::SessionError::Deck(DeckError::Transport(deck_api::TransportError::Stalled(_)))
+        )
     }
 
     /// [`Controller::report`] for the calls that already speak `DeckError`.
@@ -2657,8 +2707,14 @@ impl Controller {
     fn maintain(&mut self) {
         self.collect_attempts();
 
-        // Try to reconnect if disconnected and backoff allows
-        if self.session.is_none() && !self.pending && Instant::now() >= self.reconnect_at {
+        // Try to reconnect if disconnected and backoff allows — and never while
+        // the endpoint is wedged: a retry there is one more rejected report, and
+        // the halt outlives every handle this process opens.
+        if self.session.is_none()
+            && !self.pending
+            && !self.wedged
+            && Instant::now() >= self.reconnect_at
+        {
             self.request_attempt();
         }
 
