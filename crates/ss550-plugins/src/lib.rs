@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use ss550_plugin_api::{Cadence, CellId, CellSpec, Plugin, PluginId, Reading};
 
 pub(crate) mod clock;
+pub(crate) mod media;
 pub mod system_stats;
 
 pub use system_stats::{temperature_hint, SystemStats};
@@ -117,7 +118,11 @@ const STOP_TIMEOUT: Duration = Duration::from_millis(500);
 /// built while the window opens — while the sampler must build every plugin it
 /// measures. [`built_in_descriptions`] is the first list, this is the second.
 fn built_in_plugins() -> Vec<Box<dyn Plugin>> {
-    vec![Box::new(SystemStats::new()), Box::new(clock::Clock::new())]
+    vec![
+        Box::new(SystemStats::new()),
+        Box::new(clock::Clock::new()),
+        Box::new(media::NowPlaying::new()),
+    ]
 }
 
 /// One plugin as the window sees it before anything is measured: what it calls
@@ -158,6 +163,7 @@ fn built_in_descriptions() -> Vec<PluginGroup> {
     [
         (system_stats::NAME, SystemStats::describe()),
         (clock::NAME, clock::Clock::describe()),
+        (media::NAME, media::NowPlaying::describe()),
     ]
     .into_iter()
     .filter_map(|(name, cells)| {
@@ -613,6 +619,7 @@ mod tests {
                 ("clock", "hours"),
                 ("clock", "minutes"),
                 ("clock", "seconds"),
+                ("media", "now"),
             ]
         );
         assert!(catalogue.knows("system-stats", "disk.free"));
@@ -628,7 +635,11 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            [("system-stats", "System stats", 6), ("clock", "Clock", 3)]
+            [
+                ("system-stats", "System stats", 6),
+                ("clock", "Clock", 3),
+                ("media", "Now playing", 1),
+            ]
         );
         assert_eq!(catalogue.cells_of("clock").len(), 3);
         assert!(catalogue.cells_of("no-such-plugin").is_empty());

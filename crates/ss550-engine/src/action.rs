@@ -838,7 +838,7 @@ mod tests {
             Action::Plugin {
                 plugin: "system-stats".to_string(),
                 cell: "cpu.usage".to_string(),
-            press: None,
+                press: None,
             }
         );
         let json = serde_json::to_string(&stored).expect("serialise");
@@ -867,7 +867,7 @@ mod tests {
             let action = Action::Plugin {
                 plugin: plugin.to_string(),
                 cell: cell.to_string(),
-            press: None,
+                press: None,
             };
             assert!(
                 action.validate().is_err(),

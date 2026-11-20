@@ -14,13 +14,21 @@ messages; the file below is a human summary, not a substitute for
   session** — Spotify, a browser tab or the system player, without this app
   knowing which. The editor gains a `MEDIA` segment with the four commands, and a
   key bound to one draws a letter (`P`, `N`, `B`, `S`) until it has a picture.
+- A third plugin, **`media`**, which reads the current session's **title and
+  artist** through WinRT and shows them on a key with its own face: words wrapped
+  and stepped down to fit, the artist smaller underneath. `Face::Title` joins
+  `Gauge` and `Number`; the plugin asks `ss550-sensors::media::now_playing`, so
+  the WinRT calls stay in the crate the project already allows `unsafe` in.
+- A **reading key may also act when pressed**. `Action::Plugin` gains an optional
+  `press` (absent from the file when unused, so old bindings stay identical): a
+  player's key shows the track and pauses it on the same press. The editor's
+  `LIVE STAT` form gains a `WHEN PRESSED` list, and a press that is itself a
+  reading is refused where it is written.
 - `docs/actions.md` states the split the feature is built on: an **action** is
   what a key does, a **plugin** is what a key shows, and the checklist for adding
-  either. Media control is an action; showing the track is the plugin that comes
-  next.
-- A media command is *delivered*, not started: `command_for` refuses it by name,
-  and a runner with no platform sender refuses it before it is queued — the same
-  rule a keystroke already followed.
+  either. Media control is the first; showing the track was the second.
+- `cargo run -p ss550-sensors --example now_playing` prints what Windows says is
+  playing, which is the first thing to check when a track key shows nothing.
 
 
 - The `CHOOSE AN APP` list now includes **packaged apps** — Settings, Calculator,

@@ -174,6 +174,10 @@ pub(crate) fn face(
         return number(&picture, reading.text(), family, value_ink, text);
     }
 
+    if cell.face() == ss550_plugin_api::Face::Title {
+        return title_face(&picture, reading, family, value_ink, text);
+    }
+
     // The bar goes under the words, so a caption that reaches too low covers
     // the track instead of the number growing a hole in it.
     if let Some(fraction) = reading.fraction() {
@@ -212,6 +216,60 @@ pub(crate) fn face(
         }
     }
 
+    picture
+}
+
+/// The words alone: the reading as a title, its detail under it.
+///
+/// A track name is not a number and does not fit like one. The title takes the
+/// upper part of the tile and wraps — [`TextEngine::draw_band`] steps the size
+/// down until it fits that band — and the artist sits in the strip below it,
+/// smaller and dimmer, so the two are never the same weight. No label and no bar:
+/// a player's key says what is playing, nothing else.
+fn title_face(
+    picture: &RgbaImage,
+    reading: &Reading,
+    family: &str,
+    ink_rgb: [u8; 3],
+    text: &mut TextEngine,
+) -> RgbaImage {
+    let (width, height) = picture.dimensions();
+    let margin = (width / 12).max(1);
+    let pad = (height / 16).max(1);
+    let title_height = (height * 58 / 100).max(1);
+    let gap = (height / 40).max(1);
+    let artist_top = pad + title_height + gap;
+    let artist_height = height.saturating_sub(artist_top + pad).max(1);
+
+    let title = Band {
+        top: pad,
+        height: title_height,
+        // The ceiling; the fit can only take it down.
+        px: u16::try_from(height / 6)
+            .unwrap_or(MIN_TYPE_PX)
+            .max(MIN_TYPE_PX),
+        margin,
+    };
+    let mut picture = text
+        .draw_band(picture, reading.text(), title, family, ink(ink_rgb))
+        .unwrap_or_else(|| picture.clone());
+
+    // A reading nothing measured says why under the title, in the place the
+    // artist would take: `nothing playing` is the useful half of a blank key.
+    let caption = reading.detail().or_else(|| reading.reason());
+    if let Some(caption) = caption {
+        let artist = Band {
+            top: artist_top,
+            height: artist_height,
+            px: u16::try_from(height / 14)
+                .unwrap_or(MIN_TYPE_PX)
+                .max(MIN_TYPE_PX),
+            margin,
+        };
+        if let Some(next) = text.draw_band(&picture, caption, artist, family, ink(DETAIL_INK)) {
+            picture = next;
+        }
+    }
     picture
 }
 

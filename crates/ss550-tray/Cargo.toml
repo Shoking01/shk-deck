@@ -64,6 +64,10 @@ windows = { version = "0.62", features = [
     # `SendInput`, and the `INPUT` record it takes: the keystroke sender.
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
+    # The current media session: Spotify, a browser tab, the system player.
+    # `GlobalSystemMediaTransportControlsSessionManager` is WinRT, and its calls
+    # are the one place this crate reads what the machine is playing.
+    "Media_Control",
 ] }
 
 [target.'cfg(windows)'.dev-dependencies]

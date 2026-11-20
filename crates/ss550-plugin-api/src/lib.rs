@@ -206,6 +206,10 @@ pub enum Face {
     Gauge,
     /// The number alone, centred and as large as the tile allows.
     Number,
+    /// Words instead of a number: the reading's text as the title, its detail
+    /// under it, both wrapped and shrunk to fit. What a player's key wants — a
+    /// track name is not a gauge.
+    Title,
 }
 
 /// One cell of one plugin: what it is called, what it measures, and how a key

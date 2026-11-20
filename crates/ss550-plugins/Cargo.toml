@@ -8,6 +8,10 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 ss550-plugin-api = { path = "../ss550-plugin-api" }
+# The current media session is WinRT, and every call in it is `unsafe` — this
+# crate is not allowed that. The read lives in `ss550-tray`, the crate the
+# project already trusts with the shell, and the plugin asks it a question.
+ss550-sensors = { path = "../ss550-sensors" }
 # CPU usage, memory and free space: the numbers a machine can answer without
 # asking for permission. Only the two feature sets this crate reads are
 # compiled in.

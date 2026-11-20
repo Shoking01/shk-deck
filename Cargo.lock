@@ -1109,6 +1109,7 @@ name = "ss550-sensors"
 version = "0.1.0"
 dependencies = [
  "libloading",
+ "windows",
 ]
 
 [[package]]

@@ -23,3 +23,12 @@ path = "src/bin/sensor_helper.rs"
 # The library is loaded at run time, from the copy AMD's driver installs.
 [target."cfg(windows)".dependencies]
 libloading = "0.8"
+# What the machine is *playing* is WinRT — `GlobalSystemMediaTransportControls-
+# SessionManager` — and every call in it is `unsafe`. This crate is where the
+# project keeps that, so the plugin that shows a track asks a safe question here
+# instead of reaching for WinRT itself.
+windows = { version = "0.62", features = [
+    "Media_Control",
+    "Win32_Foundation",
+    "Win32_System_Com",
+] }
