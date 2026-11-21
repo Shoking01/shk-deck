@@ -16,6 +16,10 @@ fn main() {
         Some(playing) => {
             println!("title:  {}", playing.title);
             println!("artist: {}", playing.artist);
+            match &playing.art {
+                Some(art) => println!("cover:  {} bytes", art.len()),
+                None => println!("cover:  none"),
+            }
         }
         None => println!("no session: nothing on this machine reports a current track"),
     }

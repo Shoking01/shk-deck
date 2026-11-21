@@ -711,14 +711,20 @@ mod tests {
         assert!(sampler.is_running());
 
         // Every cadence hands over its own cells, so the sampler is asked until
-        // the whole catalogue has answered once — the machine's walk and the
-        // clock's second are two messages, not one.
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // the whole catalogue has answered once — the machine's walk, the
+        // clock's second and the player's track are three messages, not one.
+        let catalogue = Catalogue::built_in();
+        let deadline = Instant::now() + Duration::from_secs(20);
         let mut collected = Samples::new();
-        let mut seen = 0;
-        while Instant::now() < deadline && seen < Catalogue::built_in().cells().len() {
+        let missing = |collected: &Samples| -> bool {
+            catalogue.cells().iter().any(|cell| {
+                collected
+                    .get_named(cell.plugin().as_str(), cell.cell().as_str())
+                    .is_none()
+            })
+        };
+        while Instant::now() < deadline && missing(&collected) {
             if let Some(samples) = sampler.try_recv() {
-                seen += samples.len();
                 collected.merge(samples);
             }
             std::thread::sleep(Duration::from_millis(25));

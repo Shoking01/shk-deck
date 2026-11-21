@@ -325,6 +325,13 @@ pub enum Reading {
         fraction: Option<f32>,
         /// The line under the number, when there is more to say.
         detail: Option<String>,
+        /// The picture the reading wants on its key, already encoded
+        /// (`JPEG`/`PNG`), when it has one.
+        ///
+        /// A player's cover art is the case: the window is the only thing that
+        /// can turn bytes into pixels, and a face that shows a picture has to be
+        /// re-sent when *that* changes, not only when the text does.
+        art: Option<Vec<u8>>,
     },
     /// Nothing could be measured, and this is why.
     Unavailable {
@@ -349,6 +356,7 @@ impl Reading {
             text: format!("{clamped:.0}%"),
             fraction: Some(clamped / 100.0),
             detail: None,
+            art: None,
         }
     }
 
@@ -374,6 +382,7 @@ impl Reading {
             text: format!("{value:.0}{suffix}"),
             fraction: None,
             detail: None,
+            art: None,
         }
     }
 
@@ -401,6 +410,7 @@ impl Reading {
             text: text.into(),
             fraction: None,
             detail: None,
+            art: None,
         }
     }
 
@@ -417,13 +427,35 @@ impl Reading {
                 text,
                 fraction,
                 detail: _,
+                art,
             } => Reading::Value {
                 value,
                 text,
                 fraction,
                 detail: Some(detail.into()),
+                art,
             },
             other => other,
+        }
+    }
+
+    /// The same reading, carrying the picture its key should show.
+    ///
+    /// The bytes are one encoded image (`JPEG`/`PNG`), already at whatever size
+    /// the source had: the window decodes and fits them, because turning bytes
+    /// into pixels is not something a plugin can do.
+    pub fn with_art(mut self, art: Vec<u8>) -> Self {
+        if let Reading::Value { art: slot, .. } = &mut self {
+            *slot = Some(art);
+        }
+        self
+    }
+
+    /// The picture this reading wants on its key, when it has one.
+    pub fn art(&self) -> Option<&[u8]> {
+        match self {
+            Reading::Value { art, .. } => art.as_deref(),
+            Reading::Unavailable { .. } => None,
         }
     }
 
@@ -489,6 +521,7 @@ impl Reading {
         self.text() == other.text()
             && self.detail() == other.detail()
             && self.reason() == other.reason()
+            && self.art() == other.art()
             && match (self.fraction(), other.fraction()) {
                 (None, None) => true,
                 (Some(left), Some(right)) => left == right,

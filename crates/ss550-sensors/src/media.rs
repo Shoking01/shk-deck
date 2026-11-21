@@ -22,13 +22,18 @@ use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
 
 /// COM, entered on this thread the first time the session is asked about.
 ///
-/// `RPC_E_CHANGED_MODE` is not a failure: the thread is already in another
-/// apartment, and WinRT answers a session manager in either.
+/// **Multithreaded on purpose.** A WinRT `RequestAsync` completes through the
+/// apartment's queue, and on a single-threaded apartment without a message pump
+/// that completion never runs: the wait below blocked a sampler thread for as
+/// long as the test let it. The MTA hands the completion to a pool thread, so the
+/// wait finishes wherever this is called from. `RPC_E_CHANGED_MODE` is not a
+/// failure: the thread is already in another apartment, and the media session
+/// manager answers in either.
 #[cfg(windows)]
 fn enter_apartment() -> Option<()> {
     use std::cell::Cell;
     use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
-    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
     thread_local! {
         static APARTMENT: Cell<Option<bool>> = const { Cell::new(None) };
@@ -38,9 +43,10 @@ fn enter_apartment() -> Option<()> {
         Some(entered) => entered.then_some(()),
         None => {
             // SAFETY: no reserved value is passed and the apartment model is the
-            // one a WinRT session manager expects. The apartment outlives this
-            // call on purpose: tearing COM down under a live object is a crash.
-            let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            // one a WinRT async operation can complete in. The apartment outlives
+            // this call on purpose: tearing COM down under a live object is a
+            // crash.
+            let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
             let entered = result.is_ok() || result == RPC_E_CHANGED_MODE;
             slot.set(Some(entered));
             entered.then_some(())
@@ -55,7 +61,20 @@ pub struct NowPlaying {
     pub title: String,
     /// The artist, or an empty string when the player names none.
     pub artist: String,
+    /// The cover art, already encoded, when the player publishes one.
+    ///
+    /// Not every player does: a video often has a still, a podcast may have
+    /// nothing, and a key that shows a picture has to fall back to words.
+    pub art: Option<Vec<u8>>,
 }
+
+/// The largest cover art this will carry, in bytes.
+///
+/// A player answers with whatever it has — a thumbnail is tens of kilobytes, a
+/// full-resolution cover can be a megabyte. Above this the key shows words: the
+/// picture would be resized to 112 pixels anyway, and the sample travels on a
+/// channel the window has to drain.
+const MAX_ART: u64 = 2 * 1024 * 1024;
 
 /// The current media session's title and artist, when there is one.
 ///
@@ -98,8 +117,35 @@ pub fn now_playing() -> Option<NowPlaying> {
         .map(|artist| artist.to_string())
         .unwrap_or_default();
 
+    // The cover is a stream, not a file: opened, read whole, and dropped. A
+    // player that publishes none is an ordinary answer, not a failure.
+    let art = properties
+        .Thumbnail()
+        .ok()
+        .and_then(|cover| read_cover(&cover));
+
     Some(NowPlaying {
         title: title.trim().to_string(),
         artist: artist.trim().to_string(),
+        art,
     })
+}
+
+/// The bytes of one cover-art stream, when it is small enough to carry.
+fn read_cover(
+    reference: &windows::Storage::Streams::IRandomAccessStreamReference,
+) -> Option<Vec<u8>> {
+    use windows::Storage::Streams::DataReader;
+
+    let stream = reference.OpenReadAsync().ok()?.join().ok()?;
+    let size = stream.Size().ok()?;
+    if size == 0 || size > MAX_ART {
+        return None;
+    }
+    let input = stream.GetInputStreamAt(0).ok()?;
+    let reader = DataReader::CreateDataReader(&input).ok()?;
+    let loaded = reader.LoadAsync(size as u32).ok()?.join().ok()?;
+    let mut bytes = vec![0u8; loaded as usize];
+    reader.ReadBytes(&mut bytes).ok()?;
+    Some(bytes)
 }

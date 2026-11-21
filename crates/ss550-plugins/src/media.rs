@@ -67,14 +67,18 @@ impl NowPlaying {
     /// The reading for one answer from the system.
     ///
     /// Split out from [`Plugin::sample`] so the formatting is a function over
-    /// text and a test can pick the track — a test that only looks at "now"
-    /// cannot tell an empty artist from a missing one.
-    pub(crate) fn reading(title: &str, artist: &str) -> Reading {
+    /// what the player said and a test can pick the track — a test that only
+    /// looks at "now" cannot tell an empty artist from a missing one.
+    pub(crate) fn reading(title: &str, artist: &str, art: Option<Vec<u8>>) -> Reading {
         let track = title.trim();
         let artist = artist.trim();
-        match artist.is_empty() {
+        let reading = match artist.is_empty() {
             true => Reading::spelled(track, 0.0),
             false => Reading::spelled(track, 0.0).with_detail(artist),
+        };
+        match art {
+            Some(art) => reading.with_art(art),
+            None => reading,
         }
     }
 }
@@ -98,7 +102,7 @@ impl Plugin for NowPlaying {
     /// frozen on the last track would be a lie about what the machine is doing.
     fn sample(&mut self) -> Snapshot {
         let reading = match ss550_sensors::media::now_playing() {
-            Some(playing) => Self::reading(&playing.title, &playing.artist),
+            Some(playing) => Self::reading(&playing.title, &playing.artist, playing.art),
             None => Reading::unavailable("nothing playing"),
         };
         let mut snapshot = Snapshot::new();
@@ -117,17 +121,33 @@ mod tests {
 
     #[test]
     fn a_track_is_its_title_and_the_artist_under_it() {
-        let reading = NowPlaying::reading("  Windowlicker ", " Aphex Twin ");
+        let reading = NowPlaying::reading("  Windowlicker ", " Aphex Twin ", None);
 
         assert_eq!(reading.text(), "Windowlicker");
         assert_eq!(reading.detail(), Some("Aphex Twin"));
+        assert_eq!(reading.art(), None, "no cover is an ordinary answer");
+    }
+
+    #[test]
+    fn a_cover_travels_with_the_reading_that_has_one() {
+        // The bytes are the player's; the window decodes them. What matters here
+        // is that the reading carries them, so a key with a picture is re-sent
+        // when *the picture* changes and not only when the words do.
+        let art = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        let reading = NowPlaying::reading("Windowlicker", "Aphex Twin", Some(art.clone()));
+
+        assert_eq!(reading.art(), Some(art.as_slice()));
+        assert!(
+            !reading.same_face(&NowPlaying::reading("Windowlicker", "Aphex Twin", None)),
+            "the same track with another cover is a different face"
+        );
     }
 
     #[test]
     fn a_track_with_no_artist_is_the_title_alone() {
         // A podcast or a video often names no artist; the reading must not grow a
         // blank line where the artist would be.
-        assert_eq!(NowPlaying::reading("A video", "  ").detail(), None);
+        assert_eq!(NowPlaying::reading("A video", "  ", None).detail(), None);
     }
 
     #[test]

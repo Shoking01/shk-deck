@@ -236,23 +236,40 @@ fn title_face(
     let (width, height) = picture.dimensions();
     let margin = (width / 12).max(1);
     let pad = (height / 16).max(1);
-    let title_height = (height * 58 / 100).max(1);
     let gap = (height / 40).max(1);
-    let artist_top = pad + title_height + gap;
+
+    // A player that publishes a cover gets the picture on the upper half and the
+    // words under it; one that does not gets the title and the artist alone.
+    let cover = reading
+        .art()
+        .and_then(decode_cover)
+        .map(|cover| draw_cover(picture, &cover, width, pad, height * 52 / 100));
+
+    let (picture, text_top) = match cover {
+        Some(picture) => (picture, pad + (height * 52 / 100) + gap),
+        None => (picture.clone(), pad),
+    };
+
+    let title_height = match reading.art().is_some() {
+        // Under a cover: the strip that is left, split between the two lines.
+        true => height.saturating_sub(text_top + pad).saturating_mul(62) / 100,
+        false => (height * 58 / 100).max(1),
+    };
+    let artist_top = text_top + title_height + gap;
     let artist_height = height.saturating_sub(artist_top + pad).max(1);
 
     let title = Band {
-        top: pad,
-        height: title_height,
+        top: text_top,
+        height: title_height.max(1),
         // The ceiling; the fit can only take it down.
-        px: u16::try_from(height / 6)
+        px: u16::try_from(height / 7)
             .unwrap_or(MIN_TYPE_PX)
             .max(MIN_TYPE_PX),
         margin,
     };
     let mut picture = text
-        .draw_band(picture, reading.text(), title, family, ink(ink_rgb))
-        .unwrap_or_else(|| picture.clone());
+        .draw_band(&picture, reading.text(), title, family, ink(ink_rgb))
+        .unwrap_or(picture);
 
     // A reading nothing measured says why under the title, in the place the
     // artist would take: `nothing playing` is the useful half of a blank key.
@@ -271,6 +288,48 @@ fn title_face(
         }
     }
     picture
+}
+
+/// The cover art, decoded, when the bytes are an image this build can read.
+fn decode_cover(bytes: &[u8]) -> Option<RgbaImage> {
+    image::load_from_memory(bytes)
+        .ok()
+        .map(|image| image.to_rgba8())
+}
+
+/// The cover, fitted whole inside the band and centred in it.
+///
+/// `contain`, not `cover`: a caratula cropped to a square slot loses the part
+/// that names the album. The bands around it are the tile's own background, so a
+/// narrow cover reads as a narrow picture on black rather than a stretched one.
+fn draw_cover(
+    picture: &RgbaImage,
+    cover: &RgbaImage,
+    width: u32,
+    top: u32,
+    band: u32,
+) -> RgbaImage {
+    let mut out = picture.clone();
+    let (cover_width, cover_height) = cover.dimensions();
+    if cover_width == 0 || cover_height == 0 || band == 0 {
+        return out;
+    }
+    let scale = f32::min(
+        width as f32 / cover_width as f32,
+        band as f32 / cover_height as f32,
+    );
+    let fitted_width = ((cover_width as f32 * scale) as u32).clamp(1, width);
+    let fitted_height = ((cover_height as f32 * scale) as u32).clamp(1, band);
+    let fitted = image::imageops::resize(
+        cover,
+        fitted_width,
+        fitted_height,
+        image::imageops::FilterType::Triangle,
+    );
+    let left = width.saturating_sub(fitted_width) / 2;
+    let top = top + band.saturating_sub(fitted_height) / 2;
+    image::imageops::overlay(&mut out, &fitted, i64::from(left), i64::from(top));
+    out
 }
 
 /// The number alone, centred on the tile, in the largest type that fits.
@@ -376,6 +435,69 @@ mod tests {
 
     fn engine() -> MutexGuard<'static, TextEngine> {
         test_engine()
+    }
+
+    #[test]
+    fn a_cover_takes_the_top_half_and_the_words_go_under_it() {
+        // Option B, as a test: the picture on top, the title and the artist
+        // below it on the tile's own background.
+        let mut text = engine();
+        let clock = CellSpec::new(
+            PluginId::parse("media").expect("a usable id"),
+            CellId::parse("now").expect("a usable id"),
+            "PLAY",
+            "what the player is showing",
+            [0x1d, 0xb9, 0x54],
+        )
+        .with_face(ss550_plugin_api::Face::Title);
+
+        let cover = tiny_png(0xFF, 0x00, 0x00);
+        let with_cover = face(
+            112,
+            112,
+            &clock,
+            &Reading::spelled("Windowlicker", 0.0)
+                .with_detail("Aphex Twin")
+                .with_art(cover),
+            "",
+            &mut text,
+        );
+        let words_only = face(
+            112,
+            112,
+            &clock,
+            &Reading::spelled("Windowlicker", 0.0).with_detail("Aphex Twin"),
+            "",
+            &mut text,
+        );
+
+        assert_ne!(
+            with_cover.as_raw(),
+            words_only.as_raw(),
+            "a cover changed nothing about the face"
+        );
+        // The top half holds the picture: something that is not the background.
+        let mut painted = 0;
+        for y in 0..56 {
+            for x in 0..112 {
+                if with_cover.get_pixel(x, y).0[..3]
+                    != [BACKGROUND[0], BACKGROUND[1], BACKGROUND[2]][..]
+                {
+                    painted += 1;
+                }
+            }
+        }
+        assert!(painted > 500, "the cover band is empty: {painted} pixels");
+    }
+
+    /// A one-colour PNG, built here so the test carries no image file.
+    fn tiny_png(red: u8, green: u8, blue: u8) -> Vec<u8> {
+        let image = RgbaImage::from_pixel(8, 8, Rgba([red, green, blue, 0xFF]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .expect("encode the test cover");
+        bytes.into_inner()
     }
 
     #[test]

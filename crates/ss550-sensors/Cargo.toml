@@ -29,6 +29,7 @@ libloading = "0.8"
 # instead of reaching for WinRT itself.
 windows = { version = "0.62", features = [
     "Media_Control",
+    "Storage_Streams",
     "Win32_Foundation",
     "Win32_System_Com",
 ] }
