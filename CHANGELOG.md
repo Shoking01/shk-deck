@@ -21,6 +21,9 @@ messages; the file below is a human summary, not a substitute for
 - Without RTSS, or for an application RTSS is not counting, the key says so
   instead of freezing on a stale number. `cargo run -p ss550-sensors --example
   fps_once` prints what RTSS is tracking, which is the first thing to check.
+- A key bound to a reading now **draws its own title** above the number, so the
+  rate can say `FPS`. The field is the one the editor already has: `TITLE`. A key
+  with no title — every clock key — keeps the whole tile for its digits.
 
 ### Added — media keys, so a deck key can control the player
 - A new action, **`Media`**, sends one of the system's media commands:
