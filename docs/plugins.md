@@ -1,6 +1,7 @@
-# Plugins — what they are, and the one this build ships
+# Plugins — what they are, and the two this build ships
 
-**Status:** the contract, the host and the first plugin are implemented. Loading
+**Status:** the contract, the host and two plugins (`system-stats`, `clock`) are
+implemented. Loading
 third-party code (WASM, or a native library) is a separate feature with its own
 sandbox, consent and safety work, and is **not** attempted here.
 
@@ -84,6 +85,39 @@ The order is: LibreHardwareMonitor's web server, then the two WMI namespaces,
 then ACPI. Each is tried once per sample and a missing one costs a failed
 connection or a failed query, never a stall: the timeouts are 200 ms to connect
 and 500 ms to read.
+
+## The cells of `clock`
+
+A clock is a plugin too, and it is the smallest one: it measures nothing about
+the machine, it reads the time. It publishes three cells so a key can be bound to
+one of them — three keys side by side read as one clock:
+
+| cell | label | what it shows | example |
+|---|---|---|---|
+| `hours` | HOUR | the hour, 24-hour, two digits | `07`, `23` |
+| `minutes` | MIN | the minute, two digits | `05`, `42` |
+| `seconds` | SEC | the second, two digits | `00`, `59` |
+
+Two digits always, including the leading zero: `7` on a key under `07` reads as a
+seven and not as half of a time. The face's label band is six characters wide, and
+that is why the labels are `HOUR`, `MIN` and `SEC` rather than the words.
+
+The clock does not ride the machine's walk. Reading the time costs nothing — the
+process already has it — while measuring a machine is one pass over the sensors,
+a helper for the processor's temperature and a driver for the card's. So the
+worker runs **one thread per cadence**: the machine walk every two seconds, and
+anything that asks for its own cadence on its own thread at the interval it
+names. The clock asks for one second, which is what makes its second hand advance
+by one instead of by two.
+
+Both cadences hand over their own cells, and the window folds each message into
+the readings it holds; one never blanks the other. The schedule is kept on
+absolute deadlines rather than by sleeping for the interval, because a sleep that
+pays for the walk out of the interval slips the phase and starts producing
+seconds that skip and repeat.
+
+Only a face that changed is a JPEG, so a clock's second is one write a second per
+clock key, and a percentage that is not moving costs nothing.
 
 ## The GPU could answer without a monitoring tool
 
@@ -170,9 +204,23 @@ reads correctly with no vendor tooling installed.
 ## How a reading reaches a key
 
 The deck receives one JPEG per key and nothing else — no text channel, no font,
-no widget. So a reading is **drawn**: label at the top, the number in the middle,
-the caption under it, and a bar when the number has a scale. A percentage has a
-bar; a temperature does not, because a bar needs a scale that means something.
+no widget. So a reading is **drawn**. A cell says which of two faces its key
+wears, because the plugin is the only place that knows what its number means:
+
+| face | what the key shows | who asks for it |
+|---|---|---|
+| `Gauge` | the label at the top, the number, the caption under it, and a bar when the number has a scale | a percentage or a temperature |
+| `Number` | the number alone, centred and as large as the tile allows | a clock |
+
+A percentage has a bar; a temperature does not, because a bar needs a scale that
+means something. A clock has neither label nor bar: `HOUR` over `00` is one word
+too many on a key read from across a desk.
+
+The type is the **key's own font**. `TITLE → FONT` sets it for the selected key,
+and a key with no style of its own wears the app's default, so the same control
+that names a title's family names a gauge's — and a clock's digits. A number is
+fitted against both sides of the tile: a size that fits the height but not the
+width wraps `00` into two lines, and two `0`s stacked is not a time.
 
 The drawing happens on a **worker thread of its own**
 (`crates/ss550-gui/src/facework.rs`), not on the one that draws frames: shaping
@@ -198,9 +246,16 @@ sample and says what the measurement is in the status line.
 
 ## Binding one
 
-In the editor, pick `LIVE STAT` and click the measurement. `SAVE BINDING` writes
-it like any other action, so it lives in the profile, moves with the page it is
-on, and is saved with the deck it belongs to:
+Two ways in, and both end on `SAVE BINDING`:
+
+- **In the editor**, pick `LIVE STAT` and click the measurement. The list holds
+  every cell of this build.
+- **From the rail**, drag a plugin's row — `Clock`, `System stats` — onto a key.
+  The editor opens on that key with the list narrowed to that plugin's cells and
+  a line saying so; `LIVE STAT` widens it back to every plugin.
+
+`SAVE BINDING` writes it like any other action, so it lives in the profile, moves
+with the page it is on, and is saved with the deck it belongs to:
 
 ```json
 {"type":"plugin","plugin":"system-stats","cell":"cpu.usage"}
@@ -236,11 +291,13 @@ minutes of samples as a sparkline — one bar per sample, two seconds apart.
 | path | what it holds |
 |---|---|
 | `crates/ss550-plugin-api` | the contract: ids, cells, readings, the `Plugin` trait |
-| `crates/ss550-plugins` | the catalogue, the sampler thread, and `system-stats` |
+| `crates/ss550-plugins` | the catalogue, the sampler thread, and the plugins: `system-stats`, `clock` |
+| `crates/ss550-plugins/src/clock.rs` | the clock: three cells, and the pure formatter behind them |
 | `crates/ss550-plugins/examples/stats_once.rs` | one walk over the machine, printed |
 | `crates/ss550-gui/src/plugintile.rs` | the face: proportions, label, number, caption, bar |
 | `crates/ss550-gui/src/facework.rs` | the thread that composes a face, and the queue back |
-| `crates/ss550-gui/src/ui/editor.rs` | the `LIVE STAT` list |
+| `crates/ss550-gui/src/ui/editor.rs` | the `LIVE STAT` list, narrowed when a plugin is dropped |
+| `crates/ss550-gui/src/ui/palette.rs` | the rail: one draggable row per plugin |
 
 `cargo run -p ss550-plugins --example stats_once` prints what this machine
 answers, which is the first thing to look at when a key shows `—`.

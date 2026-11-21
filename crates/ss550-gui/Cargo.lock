@@ -6487,6 +6487,7 @@ dependencies = [
 name = "ss550-plugins"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
  "ss550-plugin-api",
@@ -6507,6 +6508,7 @@ name = "ss550-sensors"
 version = "0.1.0"
 dependencies = [
  "libloading 0.8.9",
+ "windows 0.62.2",
 ]
 
 [[package]]

@@ -153,6 +153,14 @@ impl DeckSession {
         &self.rows
     }
 
+    /// Proves the deck still accepts a write, before anything is painted.
+    ///
+    /// A deck that answers its reads and refuses this one came back from its boot
+    /// halted: every later write fails too, and only a power cycle clears it.
+    pub fn preflight(&mut self) -> Result<(), SessionError> {
+        self.deck.preflight().map_err(SessionError::Deck)
+    }
+
     /// Paints one key, at the size and with the payload limit the deck states.
     ///
     /// The key is checked before anything is encoded: a key the deck does not

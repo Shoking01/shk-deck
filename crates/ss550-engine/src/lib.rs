@@ -54,7 +54,7 @@ pub mod runner;
 pub mod store;
 pub mod title;
 
-pub use action::{validate_url, Action};
+pub use action::{is_shell_address, validate_url, Action, MediaCommand};
 pub use appearance::Appearance;
 pub use assets::{Asset, AssetError, AssetLibrary, AssetName, ASSETS_DIR};
 pub use config::{bindings_path, bindings_path_for, config_dir, recents_path_for};

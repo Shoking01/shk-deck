@@ -17,11 +17,12 @@ You are an autonomous Rust development agent building `streamcraft-rs`, a native
   blanket allowance:
   - `ss550-tray`, the one crate allowed to call Win32 (hide/restore the native
     window, own the notification-area icon, read the logon key);
-  - `ss550-sensors`, the one crate allowed to call a vendor library: AMD's
-    `atiadlxx.dll` for the graphics card's temperature and activity, and
-    PawnIO's driver for the processor's. Every call in it is **read-only** —
-    it declares no setter of the vendor API — and every status is checked before
-    a value is used.
+  - `ss550-sensors`, the one crate allowed to call a vendor library and a
+    platform read: AMD's `atiadlxx.dll` for the graphics card's temperature and
+    activity, PawnIO's driver for the processor's, and WinRT's media session for
+    what the machine is playing. Every call in it is **read-only** — it declares
+    no setter of the vendor API and no command of the media session — and every
+    status is checked before a value is used.
 - **Formatting:** `rustfmt` with default settings — run `cargo fmt` before every commit
 - **Clippy:** Zero warnings — run `cargo clippy --all-targets --all-features`
 - **Documentation:** Every public API item must have doc comments with examples

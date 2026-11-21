@@ -25,21 +25,81 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use ss550_plugin_api::{CellId, CellSpec, Plugin, PluginId, Reading};
+use ss550_plugin_api::{Cadence, CellId, CellSpec, Plugin, PluginId, Reading};
 
+pub(crate) mod clock;
+pub(crate) mod media;
 pub mod system_stats;
 
 pub use system_stats::{temperature_hint, SystemStats};
 
 /// How often the sampler walks the machine.
 ///
-/// Two seconds is the compromise the deck's link asks for: a percentage that
-/// moves every second is a JPEG every second per key, and a person reading a key
-/// from across a desk cannot use a finer number than this anyway.
+/// Two seconds is what measuring a machine costs: one pass over the sensors, the
+/// processor's temperature through a helper, the card's through a driver. A
+/// plugin that only reads a value the process already has — a clock — does not
+/// ride this walk: it says [`Cadence::Own`] and gets a thread of its own, so a
+/// second hand ticks every second while the machine keeps its own pace.
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How many samples may wait for the window.
+///
+/// One slot was enough when every sample was a whole walk: the next one replaced
+/// it. With a clock on its own cadence a full slot would drop a *second*, so the
+/// channel holds a few — and still drops when the window has been stuck for
+/// seconds, because a window that far behind does not want a backlog either.
+const SLOTS: usize = 4;
 
 /// The longest the sampler sleeps without checking whether it was told to stop.
 const STOP_CHECK: Duration = Duration::from_millis(50);
+
+/// When the next walk is due.
+///
+/// The sampler must not sleep *for* the interval: that adds the walk's own time
+/// to every cycle, so the phase slips and — at a one-second interval — a clock's
+/// seconds start skipping and repeating. The deadline is held here and moved on
+/// by exactly one interval, so neither a walk that took longer nor a wake-up the
+/// system delayed can push the next one late.
+struct Schedule {
+    next: Instant,
+    interval: Duration,
+}
+
+impl Schedule {
+    /// A schedule whose first walk is due at once.
+    fn new(interval: Duration) -> Self {
+        Self {
+            next: Instant::now(),
+            interval,
+        }
+    }
+
+    /// Sleeps until the next walk is due, in short steps so a stop is answered
+    /// promptly. Returns `false` when it was told to stop first.
+    fn wait(&mut self, stop: &AtomicBool) -> bool {
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                return false;
+            }
+            let now = Instant::now();
+            if now >= self.next {
+                break;
+            }
+            std::thread::sleep(STOP_CHECK.min(self.next - now));
+        }
+
+        // The next walk is one interval after the slot this one occupied. A walk
+        // that overran its own slot leaves that deadline in the past, and the
+        // schedule starts again from now: the samples it ate are gone, and a
+        // burst of walks catching up would spend the link on old numbers.
+        let next = self.next + self.interval;
+        self.next = match next > Instant::now() {
+            true => next,
+            false => Instant::now() + self.interval,
+        };
+        true
+    }
+}
 
 /// How long a stopped sampler is waited for before it is left behind.
 ///
@@ -58,15 +118,59 @@ const STOP_TIMEOUT: Duration = Duration::from_millis(500);
 /// built while the window opens — while the sampler must build every plugin it
 /// measures. [`built_in_descriptions`] is the first list, this is the second.
 fn built_in_plugins() -> Vec<Box<dyn Plugin>> {
-    vec![Box::new(SystemStats::new())]
+    vec![
+        Box::new(SystemStats::new()),
+        Box::new(clock::Clock::new()),
+        Box::new(media::NowPlaying::new()),
+    ]
 }
 
-/// The cells of every plugin this build ships, without building one.
+/// One plugin as the window sees it before anything is measured: what it calls
+/// itself, and the cells it offers.
+///
+/// The palette needs the name — one draggable row per plugin is what a person
+/// recognises — and the editor needs the cells. Neither may build a plugin.
+#[derive(Debug, Clone)]
+pub struct PluginGroup {
+    id: String,
+    name: &'static str,
+    cells: Vec<CellSpec>,
+}
+
+impl PluginGroup {
+    /// The plugin's stable id, e.g. `clock`.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The name a person reads, e.g. `Clock`.
+    pub fn name(&self) -> &str {
+        self.name
+    }
+
+    /// The cells this plugin offers, in the order the editor lists them.
+    pub fn cells(&self) -> &[CellSpec] {
+        &self.cells
+    }
+}
+
+/// Every plugin this build ships, named, without building one.
 ///
 /// This is what the window lists, so it must stay free of I/O: a plugin's
-/// `describe` is a table of names, not a measurement.
-fn built_in_descriptions() -> Vec<Vec<CellSpec>> {
-    vec![SystemStats::describe()]
+/// `describe` is a table of names, not a measurement. The id is read from the
+/// cells themselves — a plugin states it once, in the cells it hands out.
+fn built_in_descriptions() -> Vec<PluginGroup> {
+    [
+        (system_stats::NAME, SystemStats::describe()),
+        (clock::NAME, clock::Clock::describe()),
+        (media::NAME, media::NowPlaying::describe()),
+    ]
+    .into_iter()
+    .filter_map(|(name, cells)| {
+        let id = cells.first()?.plugin().as_str().to_string();
+        Some(PluginGroup { id, name, cells })
+    })
+    .collect()
 }
 
 /// What the window needs to know about the plugins without measuring anything.
@@ -75,6 +179,7 @@ fn built_in_descriptions() -> Vec<Vec<CellSpec>> {
 /// editor binds them, and the sampler gets the plugins themselves.
 #[derive(Debug, Clone, Default)]
 pub struct Catalogue {
+    groups: Vec<PluginGroup>,
     cells: Vec<CellSpec>,
 }
 
@@ -87,8 +192,29 @@ impl Catalogue {
     /// thread, and `the_catalogue_lists_exactly_what_the_plugin_measures` holds
     /// the two lists together.
     pub fn built_in() -> Self {
-        let cells = built_in_descriptions().into_iter().flatten().collect();
-        Self { cells }
+        let groups = built_in_descriptions();
+        let cells = groups
+            .iter()
+            .flat_map(|group| group.cells.iter().cloned())
+            .collect();
+        Self { groups, cells }
+    }
+
+    /// Every plugin this build ships, in the order the palette lists them.
+    ///
+    /// One row per plugin, not per cell: a person drags "Clock", not "the
+    /// seconds of the clock".
+    pub fn groups(&self) -> &[PluginGroup] {
+        &self.groups
+    }
+
+    /// The cells of one plugin, or an empty slice when this build has no such
+    /// plugin.
+    pub fn cells_of(&self, plugin: &str) -> &[CellSpec] {
+        self.groups
+            .iter()
+            .find(|group| group.id() == plugin)
+            .map_or(&[], |group| group.cells())
     }
 
     /// Every cell, in the order the editor lists them.
@@ -164,70 +290,117 @@ impl Samples {
     pub fn taken_at(&self) -> Option<Instant> {
         self.at
     }
+
+    /// Every cell in the set, as its plugin, its cell and what it measured.
+    ///
+    /// The window records a cell's history from this, so a cell is recorded when
+    /// it was actually measured — not once per message, which would give a
+    /// sensor's graph two points for the same number whenever the clock's faster
+    /// cadence carried it.
+    pub fn iter(&self) -> impl Iterator<Item = (&PluginId, &CellId, &Reading)> {
+        self.readings
+            .iter()
+            .map(|((plugin, cell), reading)| (plugin, cell, reading))
+    }
+
+    /// Folds another sample into this one.
+    ///
+    /// Each cadence sends its own message — a clock's second is not a machine
+    /// walk — so a window that replaced its readings with the newest message
+    /// would blank every sensor key for a second. `at` is the newer of the two,
+    /// because the set is the newest reading of each cell, not the newest walk.
+    pub fn merge(&mut self, other: Samples) {
+        if other.at > self.at {
+            self.at = other.at;
+        }
+        self.readings.extend(other.readings);
+    }
 }
 
 /// Measures every plugin on a thread of its own.
 ///
-/// The thread is deliberately dumb: measure, hand the answer over, sleep. The
-/// answer is handed over on a one-slot channel and dropped when nobody has read
-/// the last one, so a window that is busy — or hidden — never makes the sampler
+/// The threads are deliberately dumb: measure, hand the answer over, wait. The
+/// answer goes on a channel with a few slots and is dropped when the window has
+/// not read them, so a window that is busy — or hidden — never makes the sampler
 /// queue minutes of stale readings.
 pub struct Sampler {
     readings: Receiver<Samples>,
     stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
+    /// One thread for the machine walk, and one for each cadence a plugin asked
+    /// for. Empty when no thread could start.
+    threads: Vec<JoinHandle<()>>,
 }
 
 impl Sampler {
-    /// Starts the sampler, measuring every plugin at `interval`.
+    /// Starts the sampler: the machine walk at `interval`, and every plugin that
+    /// asked for its own cadence at the interval it named.
     pub fn start(interval: Duration) -> Self {
-        let (sender, readings) = mpsc::sync_channel(1);
+        let (sender, readings) = mpsc::sync_channel(SLOTS);
         let stop = Arc::new(AtomicBool::new(false));
+        let mut threads = Vec::new();
 
-        let thread = std::thread::Builder::new()
+        // The plugins are split by the cadence they asked for before any thread
+        // starts: a plugin is measured by exactly one of them, and which one is
+        // the plugin's own statement, not a rule here.
+        let mut machine = Vec::new();
+        let mut own: BTreeMap<Duration, Vec<Box<dyn Plugin>>> = BTreeMap::new();
+        for plugin in built_in_plugins() {
+            match plugin.cadence() {
+                Cadence::Machine => machine.push(plugin),
+                Cadence::Own(every) => own.entry(every).or_default().push(plugin),
+            }
+        }
+
+        let walk = std::thread::Builder::new()
             .name("plugin-sampler".to_string())
             .spawn({
+                let sender = sender.clone();
                 let stop = Arc::clone(&stop);
-                move || run(interval, sender, stop)
+                move || run(interval, machine, sender, stop)
             });
+        if let Ok(thread) = walk {
+            threads.push(thread);
+        }
 
-        match thread {
-            Ok(thread) => Self {
-                readings,
-                stop,
-                thread: Some(thread),
-            },
-            Err(_) => {
-                // No thread is a quiet failure, not a broken window: the keys
-                // bound to a plugin keep the reading they had, and the editor
-                // still lists the cells.
-                Self {
-                    readings,
-                    stop,
-                    thread: None,
-                }
+        for (every, plugins) in own {
+            let own_thread = std::thread::Builder::new()
+                .name(format!("plugin-own-{}", every.as_millis()))
+                .spawn({
+                    let sender = sender.clone();
+                    let stop = Arc::clone(&stop);
+                    move || run_own(every, plugins, sender, stop)
+                });
+            if let Ok(thread) = own_thread {
+                threads.push(thread);
             }
+        }
+
+        // No thread is a quiet failure, not a broken window: the keys bound to a
+        // plugin keep the reading they had, and the editor still lists the cells.
+        Self {
+            readings,
+            stop,
+            threads,
         }
     }
 
-    /// Whether the thread is running.
+    /// Whether the sampler was started at all.
     pub fn is_running(&self) -> bool {
-        self.thread.is_some()
+        !self.threads.is_empty()
     }
 
-    /// Whether the thread is still alive, rather than merely started.
+    /// Whether every thread is still alive, rather than merely started.
     ///
-    /// [`Sampler::is_running`] answers "was a thread started"; this answers "is
-    /// it still there". A sampler that panicked leaves every reading frozen on
-    /// its last number, and a window that cannot tell the difference shows a
-    /// stale number as if it were live.
+    /// [`Sampler::is_running`] answers "was it started"; this answers "is it
+    /// still there". A sampler thread that panicked leaves its readings frozen on
+    /// their last numbers, and a window that cannot tell the difference shows a
+    /// stale number as if it were live. One dead thread is enough: the readings
+    /// it owned would never move again.
     pub fn is_alive(&self) -> bool {
-        self.thread
-            .as_ref()
-            .is_some_and(|thread| !thread.is_finished())
+        !self.threads.is_empty() && self.threads.iter().all(|thread| !thread.is_finished())
     }
 
-    /// Takes the newest walk, when it has not been taken already.
+    /// Takes the newest sample, when it has not been taken already.
     pub fn try_recv(&self) -> Option<Samples> {
         self.readings.try_recv().ok()
     }
@@ -236,25 +409,30 @@ impl Sampler {
 impl Drop for Sampler {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        let Some(thread) = self.thread.take() else {
-            return;
-        };
         // Waited for, but not forever: the flag is read between samples, so a
         // thread inside a slow provider has to be given a moment — and then left
         // to finish on its own rather than holding the window open.
         let deadline = Instant::now() + STOP_TIMEOUT;
-        while !thread.is_finished() && Instant::now() < deadline {
-            std::thread::sleep(STOP_CHECK);
+        for thread in &self.threads {
+            while !thread.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(STOP_CHECK);
+            }
         }
-        if thread.is_finished() {
-            let _ = thread.join();
+        for thread in self.threads.drain(..) {
+            if thread.is_finished() {
+                let _ = thread.join();
+            }
         }
     }
 }
 
-/// The sampler's thread: warm up, then measure until told to stop.
-fn run(interval: Duration, sender: SyncSender<Samples>, stop: Arc<AtomicBool>) {
-    let mut plugins = built_in_plugins();
+/// The sampler's machine walk: warm up, then measure until told to stop.
+fn run(
+    interval: Duration,
+    mut plugins: Vec<Box<dyn Plugin>>,
+    sender: SyncSender<Samples>,
+    stop: Arc<AtomicBool>,
+) {
     // The first reading of a usage counter is meaningless — a counter needs two
     // moments to have a rate — so the warm-up happens once, here, instead of
     // making the first two samples of every session read zero.
@@ -263,7 +441,10 @@ fn run(interval: Duration, sender: SyncSender<Samples>, stop: Arc<AtomicBool>) {
     }
     std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
 
-    while !stop.load(Ordering::SeqCst) {
+    // The loop is the schedule: it holds until a walk is due, and one walk is
+    // one slot. A stopped schedule ends the loop, which is the only way out.
+    let mut schedule = Schedule::new(interval);
+    while schedule.wait(&stop) {
         let mut merged = Samples {
             at: Some(Instant::now()),
             readings: BTreeMap::new(),
@@ -280,15 +461,34 @@ fn run(interval: Duration, sender: SyncSender<Samples>, stop: Arc<AtomicBool>) {
         match sender.try_send(merged) {
             Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
         }
+    }
+}
 
-        // Sleep in steps, so a window that closes does not wait two seconds for
-        // a thread it just told to stop.
-        let deadline = Instant::now() + interval;
-        while Instant::now() < deadline {
-            if stop.load(Ordering::SeqCst) {
-                return;
+/// One thread per cadence a plugin asked for: measure, hand over, keep the
+/// schedule. Nothing here warms a counter up — a plugin that asks for its own
+/// cadence is one that reads a value the process already has.
+fn run_own(
+    interval: Duration,
+    mut plugins: Vec<Box<dyn Plugin>>,
+    sender: SyncSender<Samples>,
+    stop: Arc<AtomicBool>,
+) {
+    let mut schedule = Schedule::new(interval);
+    while schedule.wait(&stop) {
+        let mut own = Samples {
+            at: Some(Instant::now()),
+            readings: BTreeMap::new(),
+        };
+        for plugin in &mut plugins {
+            let snapshot = plugin.sample();
+            for (cell, reading) in snapshot.iter() {
+                own.readings
+                    .insert((plugin.id().clone(), cell.clone()), reading.clone());
             }
-            std::thread::sleep(STOP_CHECK);
+        }
+
+        match sender.try_send(own) {
+            Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
         }
     }
 }
@@ -296,6 +496,107 @@ fn run(interval: Duration, sender: SyncSender<Samples>, stop: Arc<AtomicBool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ss550_plugin_api::Face;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn the_walk_keeps_its_phase_when_a_sample_takes_time() {
+        // A clock is sampled like any other cell, so a schedule that pays for
+        // the walk out of the interval makes its seconds slip, skip and repeat.
+        // Eight cycles are measured against the schedule's own clock: a sampler
+        // that slept *for* the interval would show interval + walk per cycle.
+        let interval = Duration::from_millis(60);
+        let walk = Duration::from_millis(20);
+        let stop = AtomicBool::new(false);
+        let mut schedule = Schedule::new(interval);
+        assert!(schedule.wait(&stop), "the first walk is due at once");
+
+        // Seven slots, each paying a walk out of its own interval.
+        let started = Instant::now();
+        for _ in 0..7 {
+            std::thread::sleep(walk);
+            assert!(schedule.wait(&stop), "the schedule was never stopped");
+        }
+        let elapsed = started.elapsed();
+
+        let slots = interval * 7;
+        assert!(
+            elapsed >= slots - Duration::from_millis(5),
+            "seven slots came early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < slots + Duration::from_millis(80),
+            "the walk was added to the schedule, so its phase is walking away: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_walk_that_overruns_its_slot_does_not_start_a_burst() {
+        // A provider that hangs for several slots must cost the samples it ate,
+        // not a burst of walks catching up on deadlines already spent.
+        let interval = Duration::from_millis(20);
+        let stop = AtomicBool::new(false);
+        let mut schedule = Schedule::new(interval);
+
+        assert!(schedule.wait(&stop));
+        std::thread::sleep(Duration::from_millis(200));
+
+        let started = Instant::now();
+        assert!(schedule.wait(&stop));
+        let first = started.elapsed();
+        assert!(schedule.wait(&stop));
+        let second = started.elapsed();
+
+        assert!(
+            first <= Duration::from_millis(5),
+            "the first walk after an overrun waited: {first:?}"
+        );
+        assert!(
+            second >= interval - Duration::from_millis(5),
+            "the sampler tried to catch up on slots it had lost: {second:?}"
+        );
+    }
+
+    #[test]
+    fn a_stopped_schedule_answers_at_once() {
+        let interval = Duration::from_secs(60);
+        let stop = AtomicBool::new(false);
+        let mut schedule = Schedule::new(interval);
+        assert!(schedule.wait(&stop));
+
+        stop.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        assert!(!schedule.wait(&stop), "a stopped schedule must say so");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a stopped schedule slept for its whole interval"
+        );
+    }
+
+    #[test]
+    fn the_clocks_cells_are_a_number_and_the_machines_are_a_gauge() {
+        // The face is the plugin's statement: a clock's key is a time to read at
+        // a glance, and a percentage's label is worth its line. This is what the
+        // paint code must not decide by look.
+        let catalogue = Catalogue::built_in();
+
+        for cell in catalogue.cells_of("clock") {
+            assert_eq!(cell.face(), Face::Number, "{} is not a number", cell.cell());
+        }
+        for cell in catalogue.cells_of("system-stats") {
+            assert_eq!(cell.face(), Face::Gauge, "{} is not a gauge", cell.cell());
+        }
+    }
+
+    #[test]
+    fn the_clock_asks_to_be_read_once_a_second() {
+        // The whole point of a cadence: reading the time costs nothing, so it
+        // must not be priced by the machine's walk, and a second hand that moved
+        // with the sensors would not be a clock.
+        let clock = clock::Clock::new();
+
+        assert_eq!(clock.cadence(), Cadence::Own(Duration::from_secs(1)));
+    }
 
     #[test]
     fn the_catalogue_lists_the_cells_the_system_stats_plugin_promises() {
@@ -315,12 +616,33 @@ mod tests {
                 ("system-stats", "gpu.temp"),
                 ("system-stats", "ram.usage"),
                 ("system-stats", "disk.free"),
+                ("clock", "hours"),
+                ("clock", "minutes"),
+                ("clock", "seconds"),
+                ("media", "now"),
             ]
         );
         assert!(catalogue.knows("system-stats", "disk.free"));
         assert!(!catalogue.knows("system-stats", "disk.used"));
         assert!(!catalogue.knows("other-plugin", "cpu.usage"));
         assert!(catalogue.find("system-stats", "cpu.temp").is_some());
+        // A plugin is one row in the palette, whatever it measures: the drift
+        // this pins is a palette with nine rows and a person looking for "Clock".
+        let names: Vec<(&str, &str, usize)> = catalogue
+            .groups()
+            .iter()
+            .map(|group| (group.id(), group.name(), group.cells().len()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("system-stats", "System stats", 6),
+                ("clock", "Clock", 3),
+                ("media", "Now playing", 1),
+            ]
+        );
+        assert_eq!(catalogue.cells_of("clock").len(), 3);
+        assert!(catalogue.cells_of("no-such-plugin").is_empty());
     }
 
     #[test]
@@ -330,7 +652,19 @@ mod tests {
         let described = SystemStats::describe();
         let built = SystemStats::new();
         assert_eq!(described, built.cells().to_vec());
-        assert_eq!(Catalogue::built_in().cells(), described.as_slice());
+        assert_eq!(
+            Catalogue::built_in().cells_of("system-stats"),
+            described.as_slice()
+        );
+
+        // And the same for the clock, which measures the time and nothing else.
+        let described = clock::Clock::describe();
+        let built = clock::Clock::new();
+        assert_eq!(described, built.cells().to_vec());
+        assert_eq!(
+            Catalogue::built_in().cells_of("clock"),
+            described.as_slice()
+        );
     }
 
     #[test]
@@ -376,22 +710,28 @@ mod tests {
         let sampler = Sampler::start(Duration::from_millis(50));
         assert!(sampler.is_running());
 
-        // The first walk happens before the first sleep, so a short wait is
-        // enough — and the wait is bounded, so a broken thread fails the test
-        // instead of hanging it.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut taken = None;
-        while Instant::now() < deadline {
+        // Every cadence hands over its own cells, so the sampler is asked until
+        // the whole catalogue has answered once — the machine's walk, the
+        // clock's second and the player's track are three messages, not one.
+        let catalogue = Catalogue::built_in();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut collected = Samples::new();
+        let missing = |collected: &Samples| -> bool {
+            catalogue.cells().iter().any(|cell| {
+                collected
+                    .get_named(cell.plugin().as_str(), cell.cell().as_str())
+                    .is_none()
+            })
+        };
+        while Instant::now() < deadline && missing(&collected) {
             if let Some(samples) = sampler.try_recv() {
-                taken = Some(samples);
-                break;
+                collected.merge(samples);
             }
             std::thread::sleep(Duration::from_millis(25));
         }
-        let samples = taken.expect("the sampler answered");
-        assert!(samples.taken_at().is_some());
+        assert!(collected.taken_at().is_some());
         for cell in Catalogue::built_in().cells() {
-            let reading = samples
+            let reading = collected
                 .get_named(cell.plugin().as_str(), cell.cell().as_str())
                 .unwrap_or_else(|| panic!("{} was not measured", cell.cell()));
             // A machine may answer "no sensor" for a temperature; it may never
@@ -399,13 +739,97 @@ mod tests {
             assert!(!reading.text().is_empty());
         }
 
-        // Dropping the sampler joins the thread; the test passes only if that
-        // returns instead of sleeping for the interval.
+        // Dropping the sampler joins every thread; the test passes only if that
+        // returns instead of sleeping for an interval. One of them is the
+        // clock's own one-second cadence, which is why the bound is not the
+        // machine's interval.
         let started = Instant::now();
         drop(sampler);
         assert!(
-            started.elapsed() < SAMPLE_INTERVAL,
-            "a stopped sampler waited for its interval"
+            started.elapsed() < Duration::from_secs(2),
+            "a stopped sampler waited for its clocks"
         );
+    }
+
+    #[test]
+    fn the_sampler_measures_the_clock_on_its_own_cadence() {
+        // The machine walk is asked for five times a second here and the clock
+        // for once; if they shared a walk the two counts would be equal, which
+        // is exactly the coupling this separates.
+        let sampler = Sampler::start(Duration::from_millis(200));
+
+        let until = Instant::now() + Duration::from_millis(3200);
+        let mut walks = 0;
+        let mut seconds = 0;
+        while Instant::now() < until {
+            if let Some(samples) = sampler.try_recv() {
+                if samples.get_named("clock", "seconds").is_some() {
+                    seconds += 1;
+                }
+                if samples.get_named("system-stats", "cpu.usage").is_some() {
+                    walks += 1;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            (2..=5).contains(&seconds),
+            "the clock answered {seconds} times in 3.2 s, not about once a second"
+        );
+        assert!(
+            walks >= 6,
+            "the machine walk answered only {walks} times in 3.2 s"
+        );
+        assert!(
+            walks > seconds,
+            "the machine walk and the clock moved together: {walks} walks, {seconds} seconds"
+        );
+    }
+
+    #[test]
+    fn a_sample_folds_into_the_one_it_joins() {
+        // Two cadences, two messages: the second one must not erase the first,
+        // or a clock's tick would blank every sensor key for a second.
+        let stats = PluginId::parse("system-stats").expect("a usable id");
+        let clock = PluginId::parse("clock").expect("a usable id");
+        let usage = CellId::parse("cpu.usage").expect("a usable id");
+        let seconds = CellId::parse("seconds").expect("a usable id");
+
+        let mut machine = Samples {
+            at: Some(Instant::now()),
+            readings: BTreeMap::new(),
+        };
+        machine
+            .readings
+            .insert((stats.clone(), usage.clone()), Reading::percent(12.0));
+        std::thread::sleep(Duration::from_millis(2));
+        let tick_at = Instant::now();
+        let mut tick = Samples {
+            at: Some(tick_at),
+            readings: BTreeMap::new(),
+        };
+        tick.readings.insert(
+            (clock.clone(), seconds.clone()),
+            Reading::spelled("07", 7.0),
+        );
+
+        machine.merge(tick);
+
+        // `at` is the newest of the two, because the set is the newest reading of
+        // each cell rather than one walk.
+        assert_eq!(machine.taken_at(), Some(tick_at));
+        assert_eq!(
+            machine
+                .get_named("system-stats", "cpu.usage")
+                .map(Reading::text),
+            Some("12%"),
+            "the sensor was erased by the clock's message"
+        );
+        assert_eq!(
+            machine.get_named("clock", "seconds").map(Reading::text),
+            Some("07")
+        );
+        assert_eq!(machine.len(), 2);
     }
 }

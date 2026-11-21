@@ -24,13 +24,6 @@ use crate::connection::Device;
 use crate::deck::Ss550Deck;
 use crate::error::Ss550Error;
 
-/// How long a remembered path is given before discovery takes over.
-///
-/// A stale path fails immediately — there is no handle to wait for — so this is
-/// really "try the path a few times", which covers a deck that is re-appearing
-/// on the same path after its boot.
-const PATH_TIMEOUT: Duration = Duration::from_secs(2);
-
 /// The deck's remembered address, and the one HID context this process builds.
 pub struct Locator {
     /// The context every open goes through. Built once, here, with the one walk
@@ -64,7 +57,7 @@ impl Locator {
     /// is paid once per moved deck, not once per retry.
     pub fn connect(&mut self, timeout: Duration) -> Result<Ss550Deck, Ss550Error> {
         if let Some(path) = self.path.clone() {
-            if let Ok(device) = Device::connect_at_path_with(&self.api, &path, PATH_TIMEOUT) {
+            if let Ok(device) = Device::connect_at_path_with(&mut self.api, &path, timeout) {
                 let deck = Ss550Deck::from_device(device);
                 self.path = deck.device_path();
                 return Ok(deck);

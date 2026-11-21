@@ -45,6 +45,7 @@
 #[cfg(windows)]
 mod adl;
 pub mod helper;
+pub mod media;
 #[cfg(windows)]
 mod pawnio;
 

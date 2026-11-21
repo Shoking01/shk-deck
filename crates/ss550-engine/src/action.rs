@@ -9,10 +9,63 @@ use crate::keys::KeyCombo;
 use crate::profiles::MAX_PAGE_NAME_CHARS;
 use crate::{ActionError, KeyComboError};
 
+/// Whether `text` is an address the shell resolves rather than a file.///
+/// A packaged app (`shell:AppsFolder\<AppUserModelId>`) and a registered URI
+/// (`steam://rungameid/â€¦`) are both started by handing the address over, and
+/// neither is a path anything can be read from. One rule, in one place: the
+/// window asks it before reading a picture, and the tray crate before asking the
+/// shell for one.
+pub fn is_shell_address(text: &str) -> bool {
+    text.starts_with("shell:") || text.contains("://")
+}
+
+/// One of the platform's media commands.
+///
+/// Four, because they are the four a player is driven with and every extra one is
+/// a promise: a key that sends `stop` is useful, a key that sends "shuffle" is a
+/// key that only one player honours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaCommand {
+    /// Start, or pause, whatever is playing.
+    PlayPause,
+    /// The next track.
+    Next,
+    /// The track before.
+    Previous,
+    /// Stop, without forgetting where the track was.
+    Stop,
+}
+
+impl MediaCommand {
+    /// Every command, in the order the editor lists them.
+    pub const ALL: [Self; 4] = [Self::PlayPause, Self::Next, Self::Previous, Self::Stop];
+
+    /// The command as it is stored and spelled in the profile.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PlayPause => "play_pause",
+            Self::Next => "next",
+            Self::Previous => "previous",
+            Self::Stop => "stop",
+        }
+    }
+
+    /// The words a person reads: the palette, the editor and the status line.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PlayPause => "Play / pause",
+            Self::Next => "Next track",
+            Self::Previous => "Previous track",
+            Self::Stop => "Stop",
+        }
+    }
+}
+
 /// What a key does when it is pressed.
 ///
-/// The catalogue is deliberately small — a program to run, a URL to open, or a
-/// keystroke to send — because every extra kind is a promise to keep.
+/// The catalogue is deliberately small â€” a program to run, a URL to open, or a
+/// keystroke to send â€” because every extra kind is a promise to keep.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
@@ -52,6 +105,31 @@ pub enum Action {
         /// The combination to send.
         keys: KeyCombo,
     },
+    /// Sends one of the platform's **media** commands to whatever player is
+    /// listening: play/pause, next track, previous track, stop.
+    ///
+    /// This is an action and not a plugin on purpose. A plugin *measures*
+    /// something and a key shows the answer; a media command *does* something
+    /// when the key is pressed, which is what an action is. The player does not
+    /// have to be named: Windows delivers the command to the active media
+    /// session, so Spotify, a browser tab and the system's own player all obey
+    /// the same key.
+    ///
+    /// ```
+    /// use ss550_engine::{Action, MediaCommand};
+    ///
+    /// let action = Action::Media {
+    ///     command: MediaCommand::PlayPause,
+    /// };
+    /// assert_eq!(action.summary(), "MEDIA PLAY_PAUSE");
+    ///
+    /// let json = serde_json::to_string(&action).expect("serialise");
+    /// assert_eq!(json, r#"{"type":"media","command":"play_pause"}"#);
+    /// ```
+    Media {
+        /// Which command the key sends.
+        command: MediaCommand,
+    },
     /// Shows another page of this profile: what a folder is on the deck.
     ///
     /// Navigation is not an action that runs anywhere: it changes what the deck
@@ -72,24 +150,40 @@ pub enum Action {
         /// The profile's name, exactly as the store spells it.
         name: String,
     },
-    /// Shows a live reading from a plugin on this key.
+    /// Shows a live reading from a plugin on this key, and may also **do**
+    /// something when it is pressed.
     ///
     /// The key becomes a gauge: the window draws the plugin's reading into the
-    /// key's picture and keeps it up to date, so pressing it runs nothing. It is
-    /// stored like any other action, which is what lets a key be moved, copied
-    /// and saved with the profile it belongs to.
+    /// key's picture and keeps it up to date. What a press does is `press` â€” by
+    /// default nothing, because a reading is a fact and a fact is not a button.
+    /// A player's key is the exception the field exists for: it shows the track
+    /// and pauses it on the same press.
     ///
     /// ```
-    /// use ss550_engine::Action;
+    /// use ss550_engine::{Action, MediaCommand};
     ///
     /// let action = Action::Plugin {
     ///     plugin: "system-stats".to_string(),
     ///     cell: "cpu.usage".to_string(),
+    ///     press: None,
     /// };
     /// assert!(action.validate().is_ok());
     /// assert_eq!(
     ///     serde_json::to_string(&action).expect("serialise"),
     ///     r#"{"type":"plugin","plugin":"system-stats","cell":"cpu.usage"}"#
+    /// );
+    ///
+    /// let player = Action::Plugin {
+    ///     plugin: "media".to_string(),
+    ///     cell: "now".to_string(),
+    ///     press: Some(Box::new(Action::Media {
+    ///         command: MediaCommand::PlayPause,
+    ///     })),
+    /// };
+    /// assert!(player.validate().is_ok());
+    /// assert_eq!(
+    ///     serde_json::to_string(&player).expect("serialise"),
+    ///     r#"{"type":"plugin","plugin":"media","cell":"now","press":{"type":"media","command":"play_pause"}}"#
     /// );
     /// ```
     Plugin {
@@ -97,6 +191,12 @@ pub enum Action {
         plugin: String,
         /// The cell inside that plugin, e.g. `cpu.usage`.
         cell: String,
+        /// What a press does, on top of refreshing the reading.
+        ///
+        /// Absent from the file when there is nothing to do, which is what keeps
+        /// every binding written before this field existed byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        press: Option<Box<Action>>,
     },
 }
 
@@ -144,17 +244,37 @@ impl Action {
             // A `KeyCombo` is proof that the combination parses, and its fields
             // are private, so there is nothing left to check here.
             Action::Keys { .. } => Ok(()),
+            // A command is one of four values the type states; there is nothing
+            // a caller could have typed for it to be wrong.
+            Action::Media { .. } => Ok(()),
             Action::Folder { page } => Self::validate_page_name(page),
             Action::Back => Ok(()),
             Action::Profile { name } => Self::validate_profile_name(name),
-            Action::Plugin { plugin, cell } => Self::validate_plugin_cell(plugin, cell),
+            Action::Plugin {
+                plugin,
+                cell,
+                press,
+            } => {
+                Self::validate_plugin_cell(plugin, cell)?;
+                if let Some(press) = press {
+                    // A reading on a reading would never run, and the field's
+                    // whole purpose is something the key *does*.
+                    if press.is_reading() {
+                        return Err(ActionError::NestedReading {
+                            action: press.summary(),
+                        });
+                    }
+                    press.validate()?;
+                }
+                Ok(())
+            }
         }
     }
 
     /// A copy with accidental wrapping quotes removed.
     ///
     /// Explorer's *Copy as path* wraps the path in double quotes, so a pasted
-    /// path almost always arrives as `"C:\…\app.exe"`. Those quotes are **not**
+    /// path almost always arrives as `"C:\â€¦\app.exe"`. Those quotes are **not**
     /// part of the name: `CreateProcess` rejects them with
     /// `ERROR_INVALID_NAME` (os error 123), which reads as a broken path even
     /// though the path is perfect. A pasted URL has the same problem.
@@ -199,6 +319,9 @@ impl Action {
             // would save that copy and force every caller to deal with a type
             // it does not need.
             Action::Keys { keys } => Action::Keys { keys: keys.clone() },
+            // A command is a value of a closed set: nothing to clean, nothing to
+            // re-spell.
+            Action::Media { command } => Action::Media { command: *command },
             // Navigation carries a name and nothing to clean: a name is trimmed
             // when it is validated, and rewriting it here would give one page
             // two spellings.
@@ -209,9 +332,16 @@ impl Action {
             // padded id is cleaned here: ` cpu.usage ` is not a cell, and a
             // binding that cannot match the catalogue is a key that never
             // updates.
-            Action::Plugin { plugin, cell } => Action::Plugin {
+            Action::Plugin {
+                plugin,
+                cell,
+                press,
+            } => Action::Plugin {
                 plugin: plugin.trim().to_string(),
                 cell: cell.trim().to_string(),
+                press: press
+                    .as_ref()
+                    .map(|press| Box::new(press.without_wrapping_quotes())),
             },
         }
     }
@@ -248,8 +378,8 @@ impl Action {
 
     /// Checks that a plugin binding names two ids the contract accepts.
     ///
-    /// The spelling rule is the plugin contract's own — `ss550-plugin-api`
-    /// states it once — so a binding this build writes and a plugin a later
+    /// The spelling rule is the plugin contract's own â€” `ss550-plugin-api`
+    /// states it once â€” so a binding this build writes and a plugin a later
     /// loader provides cannot disagree about what a cell is called.
     fn validate_plugin_cell(plugin: &str, cell: &str) -> Result<(), ActionError> {
         PluginId::parse(plugin).map_err(|source| ActionError::PluginId { source })?;
@@ -285,6 +415,9 @@ impl Action {
             Action::Launch { program, .. } => format!("LAUNCH {}", file_label(program)),
             Action::OpenUrl { url } => format!("OPEN {}", host_of(url)),
             Action::Keys { keys } => keys.to_string(),
+            // The dashboard's one-line label names the command, not the player:
+            // the player is whatever is playing.
+            Action::Media { command } => format!("MEDIA {}", command.as_str().to_uppercase()),
             Action::Folder { page } => format!("FOLDER {}", page.to_uppercase()),
             Action::Back => "BACK".to_string(),
             Action::Profile { name } => format!("PROFILE {}", name.to_uppercase()),
@@ -320,7 +453,24 @@ impl Action {
     /// The plugin and cell this action names, when it names one.
     pub fn plugin_cell(&self) -> Option<(&str, &str)> {
         match self {
-            Action::Plugin { plugin, cell } => Some((plugin, cell)),
+            Action::Plugin { plugin, cell, .. } => Some((plugin, cell)),
+            _ => None,
+        }
+    }
+
+    /// What a key bound to this action should wear as its picture.
+    ///
+    /// A program starts itself, so its own file is its picture. A launch that
+    /// hands the shell an **address** instead â€” a packaged app, a registered URI â€”
+    /// wears the picture of that address: the program it runs is `explorer.exe`,
+    /// and Explorer's folder on a key that opens Minecraft is a lie about what the
+    /// key does. `None` for every action that is not a launch; those draw a glyph.
+    pub fn picture(&self) -> Option<&std::path::Path> {
+        match self {
+            Action::Launch { program, args } => match args.first() {
+                Some(first) if is_shell_address(first) => Some(std::path::Path::new(first)),
+                _ => Some(program),
+            },
             _ => None,
         }
     }
@@ -337,19 +487,28 @@ impl Action {
             }
             Action::OpenUrl { url } => format!("Open {url}"),
             Action::Keys { keys } => format!("Send {keys}"),
+            Action::Media { command } => format!("Send the media command {}", command.label()),
             Action::Folder { page } => format!("Open the page {page}"),
             Action::Back => "Go back to the page this one was opened from".to_string(),
             Action::Profile { name } => format!("Switch to the profile {name}"),
-            Action::Plugin { plugin, cell } => {
-                format!("Show {cell}, measured by the plugin {plugin}")
-            }
+            Action::Plugin {
+                plugin,
+                cell,
+                press,
+            } => match press {
+                Some(press) => format!(
+                    "Show {cell}, measured by the plugin {plugin}, and {} when pressed",
+                    press.describe()
+                ),
+                None => format!("Show {cell}, measured by the plugin {plugin}"),
+            },
         }
     }
 }
 
 /// Checks that a string is a URL this app is willing to open.
 ///
-/// A URL needs a scheme (`https://`, `mailto:`, `steam:` …). A bare string is
+/// A URL needs a scheme (`https://`, `mailto:`, `steam:` â€¦). A bare string is
 /// rejected instead of being guessed at: guessing is how a path turns into
 /// something the user never asked to open.
 ///
@@ -452,6 +611,66 @@ fn strip_wrapping_quotes(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_launch_that_hands_the_shell_an_address_wears_that_address() {
+        // The picker binds a packaged app as `explorer.exe` with its address: the
+        // key must wear the app's mark, not Explorer's folder.
+        let packaged = Action::Launch {
+            program: std::path::PathBuf::from(r"C:\Windows\explorer.exe"),
+            args: vec![
+                r"shell:AppsFolder\Microsoft.4297127D64EC6_8wekyb3d8bbwe!Minecraft".to_string(),
+            ],
+        };
+        assert_eq!(
+            packaged.picture(),
+            Some(std::path::Path::new(
+                r"shell:AppsFolder\Microsoft.4297127D64EC6_8wekyb3d8bbwe!Minecraft"
+            ))
+        );
+
+        let game = Action::Launch {
+            program: std::path::PathBuf::from(r"C:\Windows\explorer.exe"),
+            args: vec!["steam://rungameid/993090".to_string()],
+        };
+        assert_eq!(
+            game.picture(),
+            Some(std::path::Path::new("steam://rungameid/993090"))
+        );
+    }
+
+    #[test]
+    fn a_launch_that_runs_a_program_wears_the_program() {
+        // An argument that is not an address is a parameter: the picture is still
+        // the program's own.
+        let with_arguments = Action::Launch {
+            program: std::path::PathBuf::from(r"C:\Program Files\Brave\brave.exe"),
+            args: vec!["--incognito".to_string()],
+        };
+        assert_eq!(
+            with_arguments.picture(),
+            Some(std::path::Path::new(r"C:\Program Files\Brave\brave.exe"))
+        );
+
+        let plain = Action::Launch {
+            program: std::path::PathBuf::from(r"C:\Program Files\Brave\brave.exe"),
+            args: Vec::new(),
+        };
+        assert_eq!(
+            plain.picture(),
+            Some(std::path::Path::new(r"C:\Program Files\Brave\brave.exe"))
+        );
+
+        // A key that opens a URL or sends a keystroke has no program to wear; the
+        // grid draws its glyph instead.
+        assert_eq!(
+            Action::OpenUrl {
+                url: "https://example.com".to_string()
+            }
+            .picture(),
+            None
+        );
+    }
 
     #[test]
     fn accepts_urls_with_a_scheme() {
@@ -611,6 +830,7 @@ mod tests {
         let typed = Action::Plugin {
             plugin: " system-stats ".to_string(),
             cell: " cpu.usage ".to_string(),
+            press: None,
         };
         let stored = typed.without_wrapping_quotes();
         assert_eq!(
@@ -618,6 +838,7 @@ mod tests {
             Action::Plugin {
                 plugin: "system-stats".to_string(),
                 cell: "cpu.usage".to_string(),
+                press: None,
             }
         );
         let json = serde_json::to_string(&stored).expect("serialise");
@@ -646,6 +867,7 @@ mod tests {
             let action = Action::Plugin {
                 plugin: plugin.to_string(),
                 cell: cell.to_string(),
+                press: None,
             };
             assert!(
                 action.validate().is_err(),
@@ -655,6 +877,7 @@ mod tests {
         assert!(Action::Plugin {
             plugin: "system-stats".to_string(),
             cell: "cpu.usage".to_string(),
+            press: None,
         }
         .validate()
         .is_ok());
@@ -665,6 +888,7 @@ mod tests {
         let action = Action::Plugin {
             plugin: "system-stats".to_string(),
             cell: "cpu.usage".to_string(),
+            press: None,
         };
         let error = crate::run_action(&action).expect_err("the runner refuses it");
         assert!(

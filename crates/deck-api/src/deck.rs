@@ -76,6 +76,19 @@ pub trait Deck {
         })
     }
 
+    /// Proves the transport accepts one write, before a paint session starts.
+    ///
+    /// The runbook's sixth rule: a deck that **reads** fine and refuses a single
+    /// harmless write is already halted, and no host can clear that. Asking first
+    /// is what keeps a dead endpoint from being fed fifteen images, and it turns
+    /// "the deck went away" into "the deck came back halted".
+    ///
+    /// The default answers `Ok`: a deck that cannot be probed this way — the
+    /// simulator among them — has nothing to prove.
+    fn preflight(&mut self) -> Result<(), DeckError> {
+        Ok(())
+    }
+
     /// Moves one dial to `value`, from
     /// [`VALUE_MIN`](crate::VALUE_MIN) to [`VALUE_MAX`](crate::VALUE_MAX).
     ///

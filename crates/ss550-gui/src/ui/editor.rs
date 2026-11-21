@@ -120,7 +120,22 @@ pub(crate) fn key_editor(
             cx,
             |this, _window, cx| {
                 this.draft = DraftKind::Plugin;
+                // The segment is the way back to the whole list: a filter left
+                // by a drag would keep hiding every other plugin's cells.
+                this.draft_plugin_filter = None;
                 this.note = "Pick a measurement, then press SAVE BINDING.".into();
+                cx.notify();
+            },
+        ))
+        .child(segment(
+            SharedString::from("draft-media"),
+            "MEDIA",
+            draft == DraftKind::Media,
+            tokens,
+            cx,
+            |this, _window, cx| {
+                this.draft = DraftKind::Media;
+                this.note = "Pick a player command, then press SAVE BINDING.".into();
                 cx.notify();
             },
         ));
@@ -189,6 +204,7 @@ pub(crate) fn key_editor(
         DraftKind::OpenUrl => url_fields,
         DraftKind::Keys => key_fields,
         DraftKind::Plugin => plugin_fields(controller, tokens, cx),
+        DraftKind::Media => media_fields(controller, tokens, cx),
     };
 
     let save_row = div()
@@ -334,6 +350,62 @@ pub(crate) fn editor_heading(number: ss550_engine::KeyNumber, tokens: Tokens) ->
         .child(micro_label(format!("#{}", number.get()), tokens))
 }
 
+/// The four media commands, as buttons.
+///
+/// A media key is one command and nothing else: there is no field to fill, so the
+/// form is the list. The chosen command is the draft's, and SAVE BINDING turns it
+/// into the action — the same path an app or a keystroke takes.
+fn media_fields(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller>) -> Div {
+    let chosen = controller.draft_media;
+    let mut list = div().flex().flex_col().gap(px(2.)).w_full();
+
+    for command in ss550_engine::MediaCommand::ALL {
+        let picked = chosen == command;
+        let row = div()
+            .id(SharedString::from(format!("media-{}", command.as_str())))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .h(px(34.))
+            .w_full()
+            .min_w(px(0.))
+            .px(px(8.))
+            .rounded(px(RADIUS_SM))
+            .bg(match picked {
+                true => tokens.accent_tint,
+                false => tokens.elevated,
+            })
+            .child(one_line(command.label(), FONT_SUB, tokens.ink));
+
+        list = list.child(activate(row, cx, move |this, _window, cx| {
+            this.draft = DraftKind::Media;
+            this.draft_media = command;
+            this.note = format!(
+                "{} will be sent when key #{} is pressed — press SAVE BINDING.",
+                command.label(),
+                this.selected_key.get()
+            )
+            .into();
+            cx.notify();
+        }));
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .w_full()
+        .child(micro_label("PLAYER · what the key sends", tokens))
+        .child(list)
+        .child(one_line(
+            "Windows hands this to whichever player is active: Spotify, a browser tab, \
+             or the system's own.",
+            FONT_CAPTION,
+            tokens.soft,
+        ))
+}
+
 /// The measurement a key shows, chosen from what the plugins of this build
 /// publish.
 ///
@@ -343,7 +415,26 @@ pub(crate) fn editor_heading(number: ss550_engine::KeyNumber, tokens: Tokens) ->
 /// its cells once, when it is built.
 fn plugin_fields(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller>) -> Div {
     let chosen = controller.draft_plugin.clone();
-    let cells: Vec<ss550_plugin_api::CellSpec> = controller.plugins.cells().to_vec();
+    // A plugin dragged onto the key narrows the list to its own cells; every
+    // other way in — `LIVE STAT` on a key that already shows a reading, a key
+    // just selected — lists the whole build. The filter decides what is *shown*,
+    // never what may be saved: the binding is still checked against the
+    // catalogue on the way to the store.
+    let filter = controller.draft_plugin_filter.clone();
+    let cells: Vec<ss550_plugin_api::CellSpec> = match &filter {
+        Some(plugin) => controller.plugins.cells_of(plugin).to_vec(),
+        None => controller.plugins.cells().to_vec(),
+    };
+    let filter_name = filter
+        .as_deref()
+        .and_then(|id| {
+            controller
+                .plugins
+                .groups()
+                .iter()
+                .find(|group| group.id() == id)
+        })
+        .map(|group| group.name().to_string());
 
     let mut list = div().flex().flex_col().gap(px(2.)).w_full();
     for (position, cell) in cells.iter().enumerate() {
@@ -402,18 +493,84 @@ fn plugin_fields(controller: &mut Controller, tokens: Tokens, cx: &mut Context<C
         }));
     }
 
-    div()
+    let mut card = div()
         .flex()
         .flex_col()
         .gap(px(8.))
         .w_full()
-        .child(micro_label("MEASUREMENT · what this key shows", tokens))
-        .child(list)
+        .child(micro_label("MEASUREMENT · what this key shows", tokens));
+
+    if let Some(name) = filter_name {
+        // The list is short because the drop asked for one plugin, not because
+        // the others went away — and the way back is the segment above. Short
+        // enough to fit the panel: this is a fixed sentence, and one that ends
+        // in an ellipsis explains nothing.
+        card = card.child(one_line(
+            format!("{name} only. LIVE STAT lists every plugin."),
+            FONT_CAPTION,
+            tokens.soft,
+        ));
+    }
+
+    card.child(list)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .w_full()
+                .child(micro_label("WHEN PRESSED · what the key also does", tokens))
+                .child(press_choices(controller, tokens, cx)),
+        )
         .child(one_line(
-            "The key redraws itself as the measurement moves. Pressing it refreshes it.",
+            "The key redraws itself as the measurement moves. Pressing it refreshes it, \
+         and sends the command above when one is picked.",
             FONT_CAPTION,
             tokens.soft,
         ))
+}
+
+/// The press a reading key may carry: nothing, or one media command.
+///
+/// Nothing is the ordinary gauge. A player's key is the case the field exists
+/// for: the same press that refreshes the track pauses it.
+fn press_choices(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller>) -> Div {
+    let chosen = controller.draft_press;
+    let options: Vec<(Option<ss550_engine::MediaCommand>, &str)> =
+        std::iter::once((None, "Nothing — a gauge only"))
+            .chain(
+                ss550_engine::MediaCommand::ALL
+                    .into_iter()
+                    .map(|command| (Some(command), command.label())),
+            )
+            .collect();
+
+    let mut list = div().flex().flex_col().gap(px(2.)).w_full();
+    for (position, (command, label)) in options.into_iter().enumerate() {
+        let picked = chosen == command;
+        let row = div()
+            .id(SharedString::from(format!("press-{position}")))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .h(px(30.))
+            .w_full()
+            .min_w(px(0.))
+            .px(px(8.))
+            .rounded(px(RADIUS_SM))
+            .bg(match picked {
+                true => tokens.accent_tint,
+                false => tokens.elevated,
+            })
+            .child(one_line(label, FONT_SUB, tokens.ink));
+
+        list = list.child(activate(row, cx, move |this, _window, cx| {
+            this.draft_press = command;
+            cx.notify();
+        }));
+    }
+    list
 }
 
 /// The picture the key would wear for the program in the field.

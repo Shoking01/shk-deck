@@ -7,6 +7,98 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Added — media keys, so a deck key can control the player
+- A new action, **`Media`**, sends one of the system's media commands:
+  `play_pause`, `next`, `previous`, `stop`. It is delivered as the virtual keys a
+  keyboard's own media keys use, so Windows hands it to the **active media
+  session** — Spotify, a browser tab or the system player, without this app
+  knowing which. The editor gains a `MEDIA` segment with the four commands, and a
+  key bound to one draws a letter (`P`, `N`, `B`, `S`) until it has a picture.
+- A third plugin, **`media`**, which reads the current session's **title and
+  artist** through WinRT and shows them on a key with its own face: words wrapped
+  and stepped down to fit, the artist smaller underneath. `Face::Title` joins
+  `Gauge` and `Number`; the plugin asks `ss550-sensors::media::now_playing`, so
+  the WinRT calls stay in the crate the project already allows `unsafe` in.
+- A **reading key may also act when pressed**. `Action::Plugin` gains an optional
+  `press` (absent from the file when unused, so old bindings stay identical): a
+  player's key shows the track and pauses it on the same press. The editor's
+  `LIVE STAT` form gains a `WHEN PRESSED` list, and a press that is itself a
+  reading is refused where it is written.
+- `docs/actions.md` states the split the feature is built on: an **action** is
+  what a key does, a **plugin** is what a key shows, and the checklist for adding
+  either. Media control is the first; showing the track was the second.
+- `cargo run -p ss550-sensors --example now_playing` prints what Windows says is
+  playing, which is the first thing to check when a track key shows nothing.
+
+
+- The `CHOOSE AN APP` list now includes **packaged apps** — Settings, Calculator,
+  Photos, Paint, Terminal, the Microsoft Store, and anything else registered in
+  the shell's `AppsFolder` — which have no shortcut to walk to. A key starts one
+  by handing `shell:AppsFolder\<AppUserModelId>` to the shell, and the picker
+  fills `ARGUMENTS` with exactly that.
+- The same walk now adds a **file the folder publishes** (`Riot Client`) and a
+  **registered URI** a launcher installs (`steam://rungameid/…`), so a game
+  without an executable of its own is a row like any other. Web pages (`https://`)
+  are deliberately left out: `OPEN URL` is the action for those.
+- A shortcut's **arguments** are read and carried with it, and two shortcuts are
+  one application only when they start the same program *the same way*. Visual
+  Studio's six developer prompts are one `cmd.exe` with six argument lines, and
+  VLC's "skinned" and "reset preferences" entries are one `vlc.exe` twice; the
+  list used to collapse each family into a single row.
+- `cargo run -p ss550-tray --example apps_once` prints what the scan found, with
+  an optional name filter: it answers "why is this application not in the list"
+  without a debugger — including whether its icon could be read.
+- The **picture of a packaged app** comes from the shell's image factory
+  (`IShellItemImageFactory`), not from a file's resources: an app registered in
+  `AppsFolder` has no file whose icon could be read, so Calculator, the Store and
+  the Minecraft launcher were drawing a bare initial. They now draw their own
+  mark, at the 256-pixel size the shell keeps.
+
+
+- A cell states which **face** its key wears: `Gauge` (the label, the number, the
+  caption and the bar — what a percentage wants) or `Number` (the number alone,
+  centred and as large as the tile allows). `clock` asks for `Number`, so its keys
+  stop saying `SEC` over `00`, and the digits are fitted against both sides of the
+  tile so they can never wrap into two lines.
+- A reading is drawn in the **key's own font**, not the app's default: `TITLE →
+  FONT` now reaches a gauge and a clock's digits the way it already reached a
+  title. A key with no style of its own still wears the default.
+
+### Changed — one cadence per plugin, so the clock alone ticks every second
+- A plugin now states **how often it wants to be measured**. The machine walk —
+  which reads the sensors, a temperature through a helper and the card's through a
+  driver — keeps its two seconds; the clock asks for its own cadence and gets a
+  thread of its own, so its seconds advance by one while the percentages keep
+  their own pace. Dropping the whole walk to one second made every key on the deck
+  repaint with the second hand.
+- A sample from one cadence is **folded into** the readings the window holds
+  instead of replacing them: a clock's second must not blank the sensors, and the
+  machine's walk must not erase the seconds. A cell's history gets one point per
+  time that cell was measured, so the Stats graph does not show a sensor twice per
+  second.
+- The schedule is driven by **absolute deadlines**, not by sleeping for the
+  interval: a sleep that pays for the walk out of its own interval slips the
+  phase, and a clock that skips or repeats a second is not a clock. A walk that
+  overruns its slot costs the samples it ate, never a burst of catch-up walks.
+- A composed face is **painted as soon as it exists**, on the fast loop. It used
+  to wait for the half-second maintenance tick, which left its key marked as "in
+  flight" long enough that the next sample was refused for that key: one second in
+  five went missing from the clock.
+
+### Added — a clock, as three keys
+- `ss550-plugins` ships a second plugin, **`clock`**: three cells (`hours`,
+  `minutes`, `seconds`) that publish the local time as two digits each, so three
+  keys side by side read as one clock. Two digits always — `07`, not `7` — and the
+  labels are `HOUR`, `MIN`, `SEC` because the face draws them in a six-character
+  band.
+- The rail's `ACTIONS` section now lists **one draggable row per plugin** instead
+  of a single `Live stat` row: dropping `Clock` on a key opens the reading editor
+  with the cell list narrowed to its three cells, and `LIVE STAT` widens it back to
+  every plugin. The list is read from the catalogue, so a plugin this build ships
+  is a row without anyone adding one.
+- A reading can now be **spelled**, not only numbered: `Reading::spelled` covers a
+  value whose text is not a measurement — a time, a state — and has no bar.
+
 ### Added — plugins, and the first one: system stats
 - The **graphics card's temperature needs no other program**: `ss550-sensors` asks
   AMD's own display library (`atiadlxx.dll`, installed with the Radeon driver)

@@ -1,6 +1,6 @@
 //! What each measurement did over the last few minutes.
 //!
-//! The sampler hands the window one walk over the machine every two seconds, and
+//! The sampler hands the window one walk over the machine every second, and
 //! a number that only ever shows "now" cannot answer the question a person
 //! actually asks — *is it rising?* — so the window keeps the last few minutes of
 //! each cell.
@@ -17,9 +17,10 @@ use ss550_plugin_api::{CellId, PluginId, Reading};
 
 /// How many samples one cell keeps.
 ///
-/// At the sampler's two-second interval this is four minutes: long enough to see
-/// a compile start and finish, short enough that a value from another session
-/// never influences the graph.
+/// At the machine walk's two-second interval this is four minutes: long enough to
+/// see a compile start and finish, short enough that a value from another session
+/// never influences the graph. The cadence and this number are one decision —
+/// `the_graph_still_holds_four_minutes` holds them together.
 pub(crate) const DEPTH: usize = 120;
 
 /// How bad a reading is, in the only three states a threshold needs.
@@ -102,6 +103,20 @@ mod tests {
             PluginId::parse("system-stats").expect("a usable id"),
             CellId::parse("cpu.usage").expect("a usable id"),
         )
+    }
+
+    #[test]
+    fn the_graph_still_holds_four_minutes() {
+        // The depth and the sampler's cadence are one decision: the Stats page
+        // says "the last four minutes", so a sampler that walks faster must not
+        // quietly shorten the graph it draws.
+        let seconds = DEPTH as u32 * ss550_plugins::SAMPLE_INTERVAL.as_secs() as u32;
+
+        assert_eq!(
+            seconds,
+            4 * 60,
+            "the sparkline no longer holds four minutes"
+        );
     }
 
     #[test]

@@ -320,6 +320,8 @@ enum DraftKind {
     Keys,
     /// Show a live reading from a plugin on this key.
     Plugin,
+    /// Send one of the platform's media commands: play, next, previous, stop.
+    Media,
 }
 
 impl DraftKind {
@@ -333,6 +335,7 @@ impl DraftKind {
             DraftKind::OpenUrl => "open a URL",
             DraftKind::Keys => "send a keystroke",
             DraftKind::Plugin => "show a live reading",
+            DraftKind::Media => "send a media command",
         }
     }
 }
@@ -607,6 +610,14 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 /// seconds. It is also the ceiling that keeps the shift from overflowing.
 const MAX_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
+/// How long a connection must last before it counts as the deck working.
+///
+/// The deck re-enumerates one to three seconds after it is powered: a start at
+/// logon answers, dies inside that window and answers again a moment later. None
+/// of those is a working deck, and treating them as one is what kept the retry at
+/// its shortest interval for as long as the machine was up.
+const STABLE_CONNECTION: Duration = Duration::from_secs(10);
+
 /// Outcome of one connection attempt, produced by the connector worker.
 enum Attempt {
     /// The deck answered and is ready to be spoken to.
@@ -737,6 +748,12 @@ struct Controller {
     attempts: u32,
     /// When the connection and heartbeat work last ran.
     last_tick: Instant,
+    /// When the current connection was adopted, while there is one.
+    ///
+    /// What decides whether a disconnect starts the backoff over: a deck that
+    /// worked for a while and then went away is a new event, and one that died
+    /// inside its own boot is not.
+    connected_at: Option<Instant>,
     /// When it's safe to try reconnecting again (for backoff).
     reconnect_at: Instant,
     /// What every key does, and where it is saved.
@@ -760,6 +777,23 @@ struct Controller {
     /// Held apart from the inputs because a cell is two ids, not a string: the
     /// list under the form sets it, and SAVE BINDING turns it into the action.
     draft_plugin: Option<(String, String)>,
+    /// The plugin whose cells the reading editor lists, when a plugin row is
+    /// what opened it.
+    ///
+    /// Set by dropping a plugin row on a key and cleared by every other way into
+    /// the editor. It narrows a list; it never restricts what may be bound, so a
+    /// key already bound to another plugin still shows every cell.
+    draft_plugin_filter: Option<String>,
+    /// The media command the editor has chosen, while the draft is a media key.
+    ///
+    /// A media key is one command and nothing else, so the draft holds the value
+    /// the button sets and SAVE BINDING turns it into the action.
+    draft_media: ss550_engine::MediaCommand,
+    /// What a reading key does when it is pressed, when it does anything.
+    ///
+    /// `None` is the ordinary gauge: pressing it refreshes the face and runs
+    /// nothing. A player's key sets a command here, so the same press pauses.
+    draft_press: Option<ss550_engine::MediaCommand>,
     program_input: Entity<InputState>,
     args_input: Entity<TextareaState>,
     url_input: Entity<InputState>,
@@ -820,6 +854,12 @@ struct Controller {
     last_frame: Duration,
     /// True when the window was told not to look for a deck at all.
     blind: bool,
+    /// True while the deck's endpoint is halted and waiting to be power cycled.
+    ///
+    /// A halted endpoint answers a handle and refuses every report until power
+    /// is cut; retrying extends the halt, so this state suppresses the automatic
+    /// attempt and only RECONNECT clears it.
+    wedged: bool,
     /// Profile management for this deck.
     profile_store: ss550_engine::ProfileStore,
     /// The pictures a key can show.
@@ -1142,6 +1182,11 @@ impl Controller {
             cx.background_executor().timer(POLL).await;
             let alive = this.update(cx, |this, cx| {
                 let mut changed = this.poll_deck();
+                // A composed face is painted as soon as it exists. It used to
+                // wait for the maintenance tick, which left the key marked as in
+                // flight for up to half a second — long enough that the next
+                // sample found it busy and the key skipped a second of a clock.
+                changed |= this.collect_faces();
                 // A rebuild that finds titled keys and no font asks for the scan
                 // here, where there is a context to spawn it with.
                 this.pump_fonts(cx);
@@ -1210,6 +1255,7 @@ impl Controller {
             pending: false,
             attempts: 0,
             last_tick: Instant::now(),
+            connected_at: None,
             reconnect_at: Instant::now(),
             store,
             store_path,
@@ -1218,6 +1264,9 @@ impl Controller {
             selected_key: KeyNumber::default(),
             draft: DraftKind::Launch,
             draft_plugin: None,
+            draft_plugin_filter: None,
+            draft_media: ss550_engine::MediaCommand::PlayPause,
+            draft_press: None,
             program_input,
             args_input,
             url_input,
@@ -1240,6 +1289,7 @@ impl Controller {
             frames: 0,
             last_frame: Duration::ZERO,
             blind,
+            wedged: false,
             profile_store: ss550_engine::ProfileStore::new(),
             assets: ss550_engine::AssetLibrary::at_config_dir(&ss550_engine::config_dir()),
             picture: PictureDialog::default(),
@@ -1298,7 +1348,11 @@ impl Controller {
                         continue;
                     }
                     self.pending = false;
-                    self.attempts = 0;
+                    // A connection is not proof that it will last: at a logon the
+                    // deck answers, dies inside its re-enumeration and answers
+                    // again. The counter is started again by a connection that
+                    // *lasted* (see `schedule_retry`), not by this one.
+                    self.connected_at = Some(Instant::now());
                     // Reset backoff on successful connection
                     self.reconnect_at = Instant::now();
                     // Remember where it was found: the next start opens that
@@ -1358,11 +1412,21 @@ impl Controller {
     /// selected key — is built here from the deck's own geometry, once. Nothing
     /// below has a key count of its own.
     fn adopt(&mut self, deck: ss550_driver::Ss550Deck) {
-        let session = session::DeckSession::new(Box::new(deck));
+        let mut session = session::DeckSession::new(Box::new(deck));
         let key_count = session.key_count();
         // What the app found, and what shape it is: the one line a start that
         // "does not connect" needs in order to say why.
         diagnostics::record(&format!("connected: {}", session.label()));
+
+        // One harmless write before any image: a deck that answers its reads and
+        // refuses this one came back from its boot already halted, and pushing
+        // fifteen images at it would only extend the halt. This is the runbook's
+        // sixth rule, and the difference between "the deck went away" and the
+        // truth.
+        if let Err(error) = session.preflight() {
+            self.wedge(&error.to_string());
+            return;
+        }
 
         let path = ss550_engine::bindings_path_for(session.key());
         let (store, mut note) = self.load_store(&path, &session);
@@ -1843,8 +1907,18 @@ impl Controller {
     /// Every failed attempt goes through here, not only the disconnect the
     /// window noticed: a deck that stays away must keep backing off, or the
     /// app spams the USB bus for as long as it is unplugged.
+    ///
+    /// A connection that **lasted** is the one case that starts the count again.
+    /// At a logon the deck answers, dies inside its own re-enumeration and
+    /// answers again; resetting the backoff on each of those turned the retry
+    /// into a three-second loop that never gave the deck the quiet it needs to
+    /// finish booting. A deck that worked for a while and then went away is a new
+    /// event, and starts over.
     fn schedule_retry(&mut self) {
-        self.attempts = self.attempts.saturating_add(1);
+        self.attempts = match self.connected_at.take() {
+            Some(at) if at.elapsed() >= STABLE_CONNECTION => 1,
+            _ => self.attempts.saturating_add(1),
+        };
         self.reconnect_at = Instant::now() + self.retry_delay();
     }
 
@@ -1859,6 +1933,10 @@ impl Controller {
             // the retries: nothing is opened until it is started without it.
             return;
         }
+        // Asking is the only thing that clears a halted endpoint's state in this
+        // app: the user has read the sentence, unplugged the deck, and pressed
+        // the button. That is consent to try once more; a failure wedges it again.
+        self.wedged = false;
         let generation = self.generation + 1;
         if self.commands.try_send(generation).is_err() {
             // A request is already queued: it will produce a fresh attempt.
@@ -1974,6 +2052,15 @@ impl Controller {
     /// must not claim it lost a deck that just told it exactly what it cannot
     /// do. Transport failure is the only thing that means the link is gone.
     fn report(&mut self, error: session::SessionError) {
+        // A halted endpoint is not a deck that went away: it is a deck that is
+        // there and refusing every report until it is power cycled. Retrying is
+        // the one thing that makes it worse — each rejected report extends the
+        // halt — so it is its own state, and the user is told what to do.
+        if Self::is_wedged(&error) {
+            let reason = error.to_string();
+            self.wedge(&reason);
+            return;
+        }
         // Both of these mean the deck is no longer there to talk to: a transport
         // failure on a read or a write, and the device not being enumerable at
         // all. Anything else — a refusal, a wrong size — leaves the session
@@ -1991,6 +2078,36 @@ impl Controller {
         } else {
             self.note = error.to_string().into();
         }
+    }
+
+    /// The state a halted endpoint leaves: no deck, no retry, and one sentence.
+    ///
+    /// [`docs/troubleshooting/deck-stuck.md`] is the runbook, and its fourth rule
+    /// is the one this implements: on any write error, mark the device wedged and
+    /// stop. The deck comes back when it is unplugged long enough to lose power —
+    /// a minute — and the app tries again only when the user asks with RECONNECT.
+    fn wedge(&mut self, reason: &str) {
+        self.drop_deck();
+        self.wedged = true;
+        self.note = format!(
+            "The deck's USB endpoint halted ({reason}). Unplug it, wait a minute, \
+             plug it back in, then press RECONNECT."
+        )
+        .into();
+        diagnostics::record("deck wedged: the endpoint halted; waiting for a power cycle");
+    }
+
+    /// Whether an error means the deck's endpoint halted until it is power cycled.
+    ///
+    /// The driver states it once, as its own error: `0x1F` and `0x3E5` are not
+    /// "the deck is gone", they are "the firmware refused a report and every
+    /// later write will fail". Retrying extends the halt, so this is the one
+    /// transport failure that must **not** go through the reconnect loop.
+    fn is_wedged(error: &session::SessionError) -> bool {
+        matches!(
+            error,
+            session::SessionError::Deck(DeckError::Transport(deck_api::TransportError::Stalled(_)))
+        )
     }
 
     /// [`Controller::report`] for the calls that already speak `DeckError`.
@@ -2303,11 +2420,27 @@ impl Controller {
         }
 
         // A reading is a gauge, not a button: pressing it refreshes what it
-        // shows from the newest sample and runs nothing. Saying which
-        // measurement it is keeps the press from feeling like nothing happened.
-        if action.is_reading() {
+        // shows from the newest sample. A plugin **may** also state what a press
+        // does — a player's key shows the track and pauses it — and that is the
+        // one case where a reading runs something, so it goes through the same
+        // path every other action takes, after the refresh.
+        if let Action::Plugin { press, .. } = &action {
             let key = u16::try_from(idx + 1).unwrap_or(u16::MAX);
             let refreshed = self.repaint_key(key);
+            if let Some(press) = press.as_deref() {
+                let summary = press.summary();
+                match self.runner.submit(press.clone()) {
+                    Ok(()) => self.note = format!("Key #{} pressed - {summary}.", idx + 1).into(),
+                    Err(err) => {
+                        self.note = format!(
+                            "Key #{} pressed, but the action was refused: {err}",
+                            idx + 1
+                        )
+                        .into()
+                    }
+                }
+                return;
+            }
             self.note = if refreshed {
                 // `describe` starts with the verb, so the template does not add
                 // one: "Key #3: Show cpu.usage, measured by the plugin …".
@@ -2615,18 +2748,23 @@ impl Controller {
     fn maintain(&mut self) {
         self.collect_attempts();
 
-        // Try to reconnect if disconnected and backoff allows
-        if self.session.is_none() && !self.pending && Instant::now() >= self.reconnect_at {
+        // Try to reconnect if disconnected and backoff allows — and never while
+        // the endpoint is wedged: a retry there is one more rejected report, and
+        // the halt outlives every handle this process opens.
+        if self.session.is_none()
+            && !self.pending
+            && !self.wedged
+            && Instant::now() >= self.reconnect_at
+        {
             self.request_attempt();
         }
 
         self.heartbeat();
-        // The newest walk over the machine, the keys it moved, the faces that are
-        // ready to paint, and the sentence the tray icon is showing. All four
-        // happen here, on the thread that owns the deck: the measurement and the
-        // drawing ran on threads of their own.
+        // The newest walk over the machine, and the keys it moved. The faces it
+        // queues are collected by the fast loop instead: a face that sat here
+        // until the next half-second tick would keep its key marked as in flight,
+        // and the sample after it would be refused for that key.
         self.pump_samples();
-        self.collect_faces();
         self.refresh_tray_tooltip();
     }
 
@@ -2822,6 +2960,22 @@ impl Controller {
     fn load_draft(&mut self, number: KeyNumber, window: &mut Window, cx: &mut Context<Self>) {
         let binding = self.store.get(number).cloned();
 
+        // Taken from the binding before it is destructured: the media command is
+        // part of what the key does, and the form opens with it picked.
+        self.draft_media = match &binding {
+            Some(Action::Media { command }) => *command,
+            _ => self.draft_media,
+        };
+        // A reading key's press, when it has one. Only a media command is offered
+        // by the form, so anything else reads as "nothing to do".
+        self.draft_press = match &binding {
+            Some(Action::Plugin { press, .. }) => match press.as_deref() {
+                Some(Action::Media { command }) => Some(*command),
+                _ => None,
+            },
+            _ => None,
+        };
+
         // Every field is written on every load, empty included: a field left
         // holding the previous key's value is how the wrong program gets saved
         // onto the wrong key.
@@ -2850,9 +3004,19 @@ impl Controller {
                 DraftKind::Keys,
                 None,
             ),
+            // A media key has no field either: the draft remembers the command,
+            // and the four buttons under the form choose it.
+            Some(Action::Media { .. }) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                DraftKind::Media,
+                None,
+            ),
             // A reading is edited by the list under the form, which is the only
             // place that knows which cells this build has.
-            Some(Action::Plugin { plugin, cell }) => (
+            Some(Action::Plugin { plugin, cell, .. }) => (
                 String::new(),
                 String::new(),
                 String::new(),
@@ -2884,6 +3048,11 @@ impl Controller {
 
         self.draft = kind;
         self.draft_plugin = chosen;
+        // A key loaded into the editor is looked at whole: the list of readings
+        // is every cell this build has, with the bound one picked inside it. A
+        // filter left over from a drag would hide the siblings of the very cell
+        // the key already shows.
+        self.draft_plugin_filter = None;
         // The key's face is decided by the program in the field, so the icon
         // cache is told which one it is before the editor draws. A field that is
         // only text has no picture, and the editor draws the initial instead.
@@ -2933,8 +3102,9 @@ impl Controller {
                 .keys_input
                 .update(cx, |state, cx| state.focus(window, cx)),
             // A reading is chosen by clicking a row, not by typing: the caret
-            // has nowhere to go, and the list is already on screen.
-            DraftKind::Plugin => {}
+            // has nowhere to go, and the list is already on screen. A media
+            // command is the same: four buttons and no field.
+            DraftKind::Plugin | DraftKind::Media => {}
         }
     }
 
@@ -2997,11 +3167,18 @@ impl Controller {
         };
         let name = choice.name.clone();
         let program = choice.program.clone();
+        let arguments = choice.arguments.join("\n");
+        // The picture is the application's, not the launcher's: a packaged app is
+        // started by `explorer.exe`, so asking about the program would put
+        // Explorer's icon on a key that opens Settings.
+        let icon_source = choice.target.clone();
         let text = program.display().to_string();
 
         self.program_input
             .update(cx, |state, cx| state.set_value(text, window, cx));
-        self.draft_program = Some(program);
+        self.args_input
+            .update(cx, |state, cx| state.set_value(arguments, window, cx));
+        self.draft_program = Some(icon_source);
         self.rebuild_icons();
         self.app_picker_open = false;
         // The next time the list opens it opens whole: the search was for the
@@ -3020,9 +3197,11 @@ impl Controller {
     /// A template is an intent: it selects the key and aims the editor at that
     /// kind, in place — the drop happens on the `Deck` page, where the key is,
     /// so the window must not move to another page to show a form. The key is
-    /// not touched until SAVE BINDING. An action that is already bound has
-    /// nothing left to ask for, so it goes straight to the save path — the same
-    /// one the editor uses, file and deck included.
+    /// not touched until SAVE BINDING. A plugin row is the same intent one step
+    /// further in: the editor opens on the reading list narrowed to that
+    /// plugin, and which cell is bound is still the user's click. An action that
+    /// is already bound has nothing left to ask for, so it goes straight to the
+    /// save path — the same one the editor uses, file and deck included.
     fn drop_palette_entry(
         &mut self,
         number: KeyNumber,
@@ -3031,14 +3210,27 @@ impl Controller {
         cx: &mut Context<Self>,
     ) {
         match ui::palette::drop_plan(drag) {
-            ui::palette::DropPlan::OpenEditor(kind) => {
+            ui::palette::DropPlan::OpenEditor { kind, plugin } => {
                 self.select_key(number, window, cx);
+                // Read after `select_key`, which hands the editor a whole list
+                // again: the drop is what narrows it.
+                let name = plugin
+                    .as_deref()
+                    .and_then(|id| self.plugins.groups().iter().find(|group| group.id() == id))
+                    .map(|group| group.name().to_string());
+                self.draft_plugin_filter = plugin;
                 self.open_editor(kind, window, cx);
-                self.note = format!(
-                    "Key #{} — set it to {} and press SAVE BINDING.",
-                    number.get(),
-                    kind.label()
-                )
+                self.note = match name {
+                    Some(name) => format!(
+                        "Key #{} — pick which part of {name} it shows, then press SAVE BINDING.",
+                        number.get()
+                    ),
+                    None => format!(
+                        "Key #{} — set it to {} and press SAVE BINDING.",
+                        number.get(),
+                        kind.label()
+                    ),
+                }
                 .into();
             }
             ui::palette::DropPlan::Assign(action) => {
@@ -3112,12 +3304,23 @@ impl Controller {
                             .into();
                     return;
                 }
-                Some((plugin, cell)) => Action::Plugin { plugin, cell },
+                Some((plugin, cell)) => Action::Plugin {
+                    plugin,
+                    cell,
+                    press: self
+                        .draft_press
+                        .map(|command| Box::new(Action::Media { command })),
+                },
                 None => {
                     self.note =
                         "Choose a measurement from the list, then press SAVE BINDING.".into();
                     return;
                 }
+            },
+            // One command, chosen from four: there is nothing to validate and
+            // nothing to type.
+            DraftKind::Media => Action::Media {
+                command: self.draft_media,
             },
         };
 
@@ -3777,7 +3980,10 @@ impl Controller {
             cell,
             spec,
             reading,
-            family: self.title_style.family.clone(),
+            // The key's own family, not the app's: a reading is drawn like the
+            // words on that key, so the FONT control under TITLE works on a gauge
+            // and on a clock's number the same way it works on a title.
+            family: self.style_for(key).family,
             image,
         };
         if self.faces.submit(job) {
@@ -3888,8 +4094,12 @@ impl Controller {
         let Some(samples) = self.sampler.as_ref().and_then(Sampler::try_recv) else {
             return false;
         };
-        self.samples = samples;
-        self.record_history();
+        // Each cadence hands over its own cells, so a sample is folded in rather
+        // than replaced: the clock's second must not wipe the machine's numbers,
+        // and the machine's walk must not blank the seconds. What was measured is
+        // recorded before the merge, one history point per cell measured.
+        self.record_history(&samples);
+        self.samples.merge(samples);
         self.repaint_changed_readings()
     }
 
@@ -3947,17 +4157,12 @@ impl Controller {
     ///
     /// Called once per received sample, before the keys are repainted, so the
     /// graph and the key are always describing the same walk over the machine.
-    fn record_history(&mut self) {
-        let cells: Vec<(ss550_plugin_api::PluginId, ss550_plugin_api::CellId)> = self
-            .plugins
-            .cells()
-            .iter()
-            .map(|spec| (spec.plugin().clone(), spec.cell().clone()))
-            .collect();
-        for (plugin, cell) in &cells {
-            if let Some(reading) = self.samples.get(plugin, cell).cloned() {
-                self.history.record(plugin, cell, &reading);
-            }
+    /// Only the cells the message carries are recorded: cadences differ, and a
+    /// sensor would otherwise get a second point for the same number every time
+    /// the clock's faster message carried it.
+    fn record_history(&mut self, samples: &ss550_plugins::Samples) {
+        for (plugin, cell, reading) in samples.iter() {
+            self.history.record(plugin, cell, reading);
         }
     }
 
@@ -4429,6 +4634,7 @@ mod tests {
         let plugin = |id: &str| Action::Plugin {
             plugin: "system-stats".to_string(),
             cell: id.to_string(),
+            press: None,
         };
         let actions = vec![
             Some(plugin("cpu.usage")),
@@ -4462,6 +4668,7 @@ mod tests {
         let action = Action::Plugin {
             plugin: "system-stats".to_string(),
             cell: "cpu.usage".to_string(),
+            press: None,
         };
         let mut samples = Samples::new();
         samples.set(

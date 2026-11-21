@@ -146,10 +146,26 @@ impl IconPixels {
 /// extra-large list second, the 32×32 large icon last — so a caller that draws
 /// it on a large tile shrinks it instead of magnifying a thumbnail.
 pub fn program_icon(path: &Path) -> Option<IconPixels> {
+    // A packaged app has no file to ask about: its address is a shell name
+    // (`shell:AppsFolder\…`) or a registered URI, and the shell's own image
+    // factory is the only thing that knows what that address looks like.
+    if is_shell_address(path) {
+        return platform::shell_icon(&path.to_string_lossy());
+    }
     // The one step that has to happen before the shell is asked: which file the
     // picture is about.
     let source = shortcut::icon_source(path);
     platform::program_icon(&source)
+}
+
+/// Whether `path` is a shell address rather than a file.
+///
+/// The list the picker offers holds both: a Start Menu entry is a path, and a
+/// packaged app or a game a launcher registered is an address the shell resolves.
+/// The rule is the engine's — one place decides what an address is, so a binding
+/// and a picker row cannot disagree about it.
+fn is_shell_address(path: &Path) -> bool {
+    ss550_engine::is_shell_address(&path.to_string_lossy())
 }
 
 /// Straight RGBA from a top-down DIB whose pixels are B, G, R, A.
@@ -219,6 +235,7 @@ mod platform {
     use std::path::Path;
 
     use windows::core::PCWSTR;
+    use windows::Win32::Foundation::SIZE;
     use windows::Win32::Graphics::Gdi::{
         CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
         BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, RGBQUAD,
@@ -226,8 +243,9 @@ mod platform {
     use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
     use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
     use windows::Win32::UI::Shell::{
-        SHGetFileInfoW, SHGetImageList, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
-        SHGFI_SYSICONINDEX, SHIL_EXTRALARGE, SHIL_JUMBO,
+        IShellItemImageFactory, SHCreateItemFromParsingName, SHGetFileInfoW, SHGetImageList,
+        SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_SYSICONINDEX, SHIL_EXTRALARGE, SHIL_JUMBO,
+        SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
 
@@ -287,6 +305,48 @@ mod platform {
         // Nothing bigger: the 32×32 icon, which is what this module answered
         // with before the image lists were asked.
         large_icon(&wide)
+    }
+
+    /// Asks the shell for the picture of an address rather than of a file.
+    ///
+    /// A packaged app — Calculator, Settings, Minecraft Launcher — has no file
+    /// whose resources could be read: the shell composes its picture from the
+    /// package's assets. `IShellItemImageFactory` is the interface that answers
+    /// that, and it is asked for the icon alone at the largest size it has: a
+    /// thumbnail of the package's window would be a screenshot, not a mark.
+    pub(super) fn shell_icon(address: &str) -> Option<IconPixels> {
+        // The image factory is a COM object like the image lists: the shell
+        // answers nothing until this thread has an apartment.
+        crate::shortcut::enter_apartment()?;
+
+        let wide: Vec<u16> = address.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: `wide` is a live, nul-terminated UTF-16 string, and the
+        // interface is released by its own `Drop` before this returns.
+        let factory: IShellItemImageFactory =
+            unsafe { SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None) }.ok()?;
+
+        // SAFETY: the size is a plain value and the flags ask for the icon alone,
+        // at whatever size the shell has. A failed call answers an error instead
+        // of a handle, which is why the bitmap is checked before it is read.
+        let bitmap = unsafe {
+            factory.GetImage(
+                SIZE { cx: 256, cy: 256 },
+                SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
+            )
+        }
+        .ok()?;
+        if bitmap.is_invalid() {
+            return None;
+        }
+
+        // A shell image is 32-bit with an alpha channel, so the mask is never
+        // read: an image without one is dropped rather than painted as a
+        // rectangle.
+        let pixels = read_colour(bitmap, HBITMAP(std::ptr::null_mut()));
+        // SAFETY: the bitmap came from `GetImage`, is not selected into any
+        // device context, and is not used again.
+        let _ = unsafe { DeleteObject(bitmap.into()) };
+        pixels.filter(|icon| !icon.is_blank())
     }
 
     /// One icon out of one of the shell's shared image lists.
@@ -487,6 +547,10 @@ mod platform {
     pub(super) fn program_icon(_path: &Path) -> Option<IconPixels> {
         None
     }
+
+    pub(super) fn shell_icon(_address: &str) -> Option<IconPixels> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -553,6 +617,44 @@ mod windows_tests {
     use std::path::{Path, PathBuf};
 
     use super::{program_icon, ICON_SIDE, ICON_SIDE_JUMBO};
+
+    #[test]
+    fn an_address_the_shell_resolves_is_not_asked_about_as_a_file() {
+        // `SHGetFileInfoW` answers about a file it is given; a packaged app's name
+        // is not a file, and asking anyway is how a key ended up with an initial
+        // instead of the application's mark.
+        use super::is_shell_address;
+        use std::path::Path;
+
+        assert!(is_shell_address(Path::new(
+            "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
+        )));
+        assert!(is_shell_address(Path::new("steam://rungameid/993090")));
+        assert!(!is_shell_address(Path::new(
+            r"C:\Program Files\Brave\brave.exe"
+        )));
+        assert!(!is_shell_address(Path::new(r"C:\Windows\explorer.exe")));
+    }
+
+    #[test]
+    #[ignore = "reads the icons this machine's Store apps were installed with"]
+    fn a_packaged_app_answers_with_its_own_picture() {
+        // The live half of the rule above: on a Windows machine with the
+        // Calculator installed, its address has pixels. Ignored by default
+        // because a runner without Store apps would fail a test about the
+        // machine rather than about this code.
+        let icon = program_icon(std::path::Path::new(
+            "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+        ))
+        .expect("the Calculator's own icon");
+
+        assert!(!icon.is_blank(), "an icon with no pixels is not an icon");
+        assert!(
+            icon.width() >= ICON_SIDE,
+            "the shell answered a thumbnail: {}",
+            icon.width()
+        );
+    }
     use crate::scratch::ScratchDir;
     use crate::shortcut::fixture::write_shortcut;
 

@@ -314,6 +314,39 @@ impl TextEngine {
             tallest.max(run.line_top + run.line_height)
         })
     }
+
+    /// The largest type at or below `ceiling` that draws `text` **on one line**
+    /// inside a box.
+    ///
+    /// [`TextEngine::draw_band`] steps its size down until the words fit the
+    /// band's height, which is right for a caption and wrong for a number: a
+    /// `00` that does not fit the width wraps, and two `0`s stacked is not a
+    /// time. A face that is only a number asks here instead.
+    pub(crate) fn fit_one_line(
+        &mut self,
+        text: &str,
+        family: &str,
+        ceiling: u16,
+        box_width: u32,
+        box_height: u32,
+    ) -> u16 {
+        let family = match family.is_empty() {
+            true => Family::SansSerif,
+            false => Family::Name(family),
+        };
+        let box_height = f32::from(u16::try_from(box_height).unwrap_or(u16::MAX));
+
+        fitted_px(ceiling, |px| {
+            let buffer = self.buffer_family(text, family, px, box_width);
+            let mut lines = 0usize;
+            let mut block = 0.0f32;
+            for run in buffer.layout_runs() {
+                lines += 1;
+                block = block.max(run.line_top + run.line_height);
+            }
+            lines <= 1 && block <= box_height
+        })
+    }
 }
 
 /// The family a style draws with, or the system's own sans when it names none.

@@ -158,6 +158,22 @@ pub enum ActionError {
         /// The combination, as a key tile writes it.
         keys: String,
     },
+    /// A media command is sent, not started, so it has no program to run.
+    #[error("the media command {command} is sent, not launched: it is not a program")]
+    MediaIsNotAProgram {
+        /// The command, as the profile spells it.
+        command: String,
+    },
+
+    /// A reading cannot be the action a reading performs when it is pressed.
+    ///
+    /// The field exists so a key that shows something can also *do* something;
+    /// another reading would never run, so it is refused where it is written.
+    #[error("{action} is a reading, and a key that shows one cannot press one")]
+    NestedReading {
+        /// The action that was offered as a press.
+        action: String,
+    },
 
     /// The platform sender could not deliver the combination.
     #[error("could not send {keys}: {reason}")]

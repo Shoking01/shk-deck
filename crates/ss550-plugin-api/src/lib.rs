@@ -36,6 +36,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -191,6 +192,28 @@ fn parse_id(text: &str, max: usize, segments: bool) -> Result<String, IdError> {
 /// rather than in the window because a plugin knows what it measures: a
 /// temperature and a disk share no palette, and the plugin is the only place
 /// that can decide without the window learning every plugin's name.
+/// What a key bound to this cell shows, beyond the number itself.
+///
+/// A plugin knows what its reading means and the window does not: `HOUR` over
+/// `00` is a label a person has to read, while `00` alone on a key is a clock.
+/// Saying it here is what keeps that judgement out of the paint code, which would
+/// otherwise have to learn every plugin's name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Face {
+    /// The label above, the number, the caption under it, and a bar when the
+    /// number has a scale: what a percentage or a temperature wants.
+    #[default]
+    Gauge,
+    /// The number alone, centred and as large as the tile allows.
+    Number,
+    /// Words instead of a number: the reading's text as the title, its detail
+    /// under it, both wrapped and shrunk to fit. What a player's key wants — a
+    /// track name is not a gauge.
+    Title,
+}
+
+/// One cell of one plugin: what it is called, what it measures, and how a key
+/// bound to it should look.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CellSpec {
     plugin: PluginId,
@@ -198,6 +221,7 @@ pub struct CellSpec {
     label: String,
     hint: String,
     accent: [u8; 3],
+    face: Face,
 }
 
 impl CellSpec {
@@ -219,7 +243,22 @@ impl CellSpec {
             label: label.into(),
             hint: hint.into(),
             accent,
+            face: Face::Gauge,
         }
+    }
+
+    /// The same cell, drawn as the number alone.
+    ///
+    /// For a reading that is its own label — a clock's `00`, where `HOUR` above
+    /// it is a word to read instead of a time to glance at.
+    pub fn with_face(mut self, face: Face) -> Self {
+        self.face = face;
+        self
+    }
+
+    /// What a key bound to this cell shows beyond the number.
+    pub fn face(&self) -> Face {
+        self.face
     }
 
     /// The plugin this cell belongs to.
@@ -286,6 +325,13 @@ pub enum Reading {
         fraction: Option<f32>,
         /// The line under the number, when there is more to say.
         detail: Option<String>,
+        /// The picture the reading wants on its key, already encoded
+        /// (`JPEG`/`PNG`), when it has one.
+        ///
+        /// A player's cover art is the case: the window is the only thing that
+        /// can turn bytes into pixels, and a face that shows a picture has to be
+        /// re-sent when *that* changes, not only when the text does.
+        art: Option<Vec<u8>>,
     },
     /// Nothing could be measured, and this is why.
     Unavailable {
@@ -310,6 +356,7 @@ impl Reading {
             text: format!("{clamped:.0}%"),
             fraction: Some(clamped / 100.0),
             detail: None,
+            art: None,
         }
     }
 
@@ -335,6 +382,35 @@ impl Reading {
             text: format!("{value:.0}{suffix}"),
             fraction: None,
             detail: None,
+            art: None,
+        }
+    }
+
+    /// A reading whose text is its own, for something that is not a number with
+    /// a unit.
+    ///
+    /// A clock's `07` is the case: the leading zero is the reading, and
+    /// `whole(7.0, "")` would show `7` — a different thing to look at. The number
+    /// travels beside the text because a history graph and a threshold still want
+    /// it, exactly as in [`Reading::whole`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let minute = ss550_plugin_api::Reading::spelled("07", 7.0);
+    /// assert_eq!(minute.text(), "07");
+    /// assert_eq!(minute.value(), Some(7.0));
+    /// ```
+    pub fn spelled(text: impl Into<String>, value: f32) -> Self {
+        if !value.is_finite() {
+            return Self::unavailable("no answer");
+        }
+        Reading::Value {
+            value,
+            text: text.into(),
+            fraction: None,
+            detail: None,
+            art: None,
         }
     }
 
@@ -351,13 +427,35 @@ impl Reading {
                 text,
                 fraction,
                 detail: _,
+                art,
             } => Reading::Value {
                 value,
                 text,
                 fraction,
                 detail: Some(detail.into()),
+                art,
             },
             other => other,
+        }
+    }
+
+    /// The same reading, carrying the picture its key should show.
+    ///
+    /// The bytes are one encoded image (`JPEG`/`PNG`), already at whatever size
+    /// the source had: the window decodes and fits them, because turning bytes
+    /// into pixels is not something a plugin can do.
+    pub fn with_art(mut self, art: Vec<u8>) -> Self {
+        if let Reading::Value { art: slot, .. } = &mut self {
+            *slot = Some(art);
+        }
+        self
+    }
+
+    /// The picture this reading wants on its key, when it has one.
+    pub fn art(&self) -> Option<&[u8]> {
+        match self {
+            Reading::Value { art, .. } => art.as_deref(),
+            Reading::Unavailable { .. } => None,
         }
     }
 
@@ -423,6 +521,7 @@ impl Reading {
         self.text() == other.text()
             && self.detail() == other.detail()
             && self.reason() == other.reason()
+            && self.art() == other.art()
             && match (self.fraction(), other.fraction()) {
                 (None, None) => true,
                 (Some(left), Some(right)) => left == right,
@@ -462,6 +561,23 @@ impl Snapshot {
     }
 }
 
+/// How often the sampler asks a plugin to measure.
+///
+/// A plugin is measured on a cadence, not by a global clock: what a machine
+/// measurement costs is what decides how often it can be taken, and a reading the
+/// process already has must not be held back by a provider that blocks. The
+/// sampler takes the machine walk as one pass — the plugin that reads a
+/// processor's temperature and the disk's free space belong together, because
+/// they are the same walk — and gives a plugin that asks for its own cadence a
+/// thread of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cadence {
+    /// With the machine walk, at the interval the window asked for.
+    Machine,
+    /// On its own thread, at this interval, whatever the machine walk is doing.
+    Own(Duration),
+}
+
 /// One plugin of this build.
 ///
 /// `Send` because the sampler measures on a thread of its own: reading a
@@ -482,6 +598,17 @@ pub trait Plugin: Send {
     /// cells it owns, not as an error: one dead sensor must not stop the rest of
     /// the sample.
     fn sample(&mut self) -> Snapshot;
+
+    /// How often this plugin wants to be measured.
+    ///
+    /// The default is the machine walk: a plugin that measures the machine is
+    /// priced by what that costs, and pretending otherwise is how a window ends
+    /// up walking the machine every second. A plugin that only reads a value the
+    /// process already holds says [`Cadence::Own`] and is asked on its own, so a
+    /// blocking provider cannot make its readings late.
+    fn cadence(&self) -> Cadence {
+        Cadence::Machine
+    }
 }
 
 #[cfg(test)]
@@ -490,6 +617,63 @@ mod tests {
 
     fn cell(text: &str) -> CellId {
         CellId::parse(text).expect("a usable cell id")
+    }
+
+    /// A plugin that offers one cell and measures nothing, for the contract's
+    /// own defaults.
+    struct Silent {
+        id: PluginId,
+        cells: Vec<CellSpec>,
+    }
+
+    impl Plugin for Silent {
+        fn id(&self) -> &PluginId {
+            &self.id
+        }
+        fn name(&self) -> &str {
+            "Silent"
+        }
+        fn cells(&self) -> &[CellSpec] {
+            &self.cells
+        }
+        fn sample(&mut self) -> Snapshot {
+            Snapshot::new()
+        }
+    }
+
+    #[test]
+    fn a_plugin_that_says_nothing_is_measured_with_the_machine_walk() {
+        // The default is the expensive cadence on purpose: a plugin that reads a
+        // sensor must say so before the window pays for it every second, and one
+        // that says nothing is priced like the walk it joins.
+        let silent = Silent {
+            id: PluginId::parse("silent").expect("a usable id"),
+            cells: Vec::new(),
+        };
+
+        assert_eq!(silent.cadence(), Cadence::Machine);
+    }
+
+    #[test]
+    fn a_reading_can_spell_its_own_text_and_keep_the_number_beside_it() {
+        // A clock shows `07`, and `whole` would show `7`: the leading zero is the
+        // reading, so the text is the plugin's to write.
+        let minute = Reading::spelled("07", 7.0);
+        assert_eq!(minute.text(), "07");
+        assert_eq!(minute.value(), Some(7.0));
+        assert!(
+            minute.same_face(&Reading::spelled("07", 7.0)),
+            "the same text is the same face"
+        );
+        assert!(
+            !minute.same_face(&Reading::spelled("08", 8.0)),
+            "a different minute is a repaint"
+        );
+        // A reading with no number at all is still the unavailable kind.
+        assert!(matches!(
+            Reading::spelled("--", f32::NAN),
+            Reading::Unavailable { .. }
+        ));
     }
 
     #[test]
