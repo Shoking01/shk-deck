@@ -153,6 +153,7 @@ pub(crate) fn face(
     cell: &CellSpec,
     reading: &Reading,
     family: &str,
+    title: Option<&str>,
     text: &mut TextEngine,
 ) -> RgbaImage {
     let width = width.max(1);
@@ -171,7 +172,7 @@ pub(crate) fn face(
     };
 
     if cell.face() == ss550_plugin_api::Face::Number {
-        return number(&picture, reading.text(), family, value_ink, text);
+        return number(&picture, reading.text(), family, title, value_ink, text);
     }
 
     if cell.face() == ss550_plugin_api::Face::Title {
@@ -342,6 +343,7 @@ fn number(
     picture: &RgbaImage,
     text_value: &str,
     family: &str,
+    title: Option<&str>,
     ink_rgb: [u8; 3],
     text: &mut TextEngine,
 ) -> RgbaImage {
@@ -349,7 +351,31 @@ fn number(
     let margin = (width / 8).max(1);
     let pad = (height / 16).max(1);
     let box_width = width.saturating_sub(margin * 2).max(1);
-    let box_height = height.saturating_sub(pad * 2).max(1);
+
+    // The key's own words, when it has any, take a strip at the top and the
+    // number fits in what is left. A key with no title — the clock's — keeps the
+    // whole tile for its digits.
+    let title_height = match title {
+        Some(_) => (height / 6).max(1),
+        None => 0,
+    };
+    let number_top = pad + title_height;
+    let box_height = height.saturating_sub(number_top + pad).max(1);
+
+    let mut picture = picture.clone();
+    if let Some(title) = title {
+        let band = Band {
+            top: pad,
+            height: title_height,
+            px: u16::try_from(height / 10)
+                .unwrap_or(MIN_TYPE_PX)
+                .max(MIN_TYPE_PX),
+            margin,
+        };
+        if let Some(next) = text.draw_band(&picture, title.trim(), band, family, ink(DETAIL_INK)) {
+            picture = next;
+        }
+    }
 
     // A digit is about 0.55 em wide, so this is roughly the size the box's width
     // can hold: the ladder only has to correct it by a few pixels either way
@@ -365,13 +391,13 @@ fn number(
     let px = text.fit_one_line(text_value, family, ceiling, box_width, box_height);
 
     let band = Band {
-        top: pad,
+        top: number_top,
         height: box_height,
         px,
         margin,
     };
-    text.draw_band(picture, text_value, band, family, ink(ink_rgb))
-        .unwrap_or_else(|| picture.clone())
+    text.draw_band(&picture, text_value, band, family, ink(ink_rgb))
+        .unwrap_or(picture)
 }
 
 /// The deck's own payload for a face.
@@ -460,6 +486,7 @@ mod tests {
                 .with_detail("Aphex Twin")
                 .with_art(cover),
             "",
+            None,
             &mut text,
         );
         let words_only = face(
@@ -468,6 +495,7 @@ mod tests {
             &clock,
             &Reading::spelled("Windowlicker", 0.0).with_detail("Aphex Twin"),
             "",
+            None,
             &mut text,
         );
 
@@ -501,6 +529,62 @@ mod tests {
     }
 
     #[test]
+    fn a_number_face_draws_the_title_the_key_gave_it() {
+        // A rate is a number with a name: `FPS` over it, in the strip the title
+        // takes. The clock's keys have no title and keep their digits alone.
+        let mut text = engine();
+        let fps = CellSpec::new(
+            PluginId::parse("fps").expect("a usable id"),
+            CellId::parse("fps").expect("a usable id"),
+            "FPS",
+            "frames per second",
+            [0x8a, 0xd6, 0x4f],
+        )
+        .with_face(ss550_plugin_api::Face::Number);
+
+        let titled = face(
+            112,
+            112,
+            &fps,
+            &Reading::whole(75.0, ""),
+            "",
+            Some("FPS"),
+            &mut text,
+        );
+        let plain = face(
+            112,
+            112,
+            &fps,
+            &Reading::whole(75.0, ""),
+            "",
+            None,
+            &mut text,
+        );
+
+        assert_ne!(titled.as_raw(), plain.as_raw(), "the title changed nothing");
+        // The words sit in the top strip and the digits under them: both halves
+        // of the tile carry ink.
+        let mut top = 0;
+        let mut bottom = 0;
+        for y in 0..112 {
+            for x in 0..112 {
+                let ink =
+                    titled.get_pixel(x, y).0[..3] != [BACKGROUND[0], BACKGROUND[1], BACKGROUND[2]];
+                if !ink {
+                    continue;
+                }
+                if y < 20 {
+                    top += 1;
+                } else if y > 40 {
+                    bottom += 1;
+                }
+            }
+        }
+        assert!(top > 20, "the title band is empty: {top} pixels");
+        assert!(bottom > 200, "the number is gone: {bottom} pixels");
+    }
+
+    #[test]
     fn a_number_face_draws_the_number_and_nothing_else() {
         let mut text = engine();
         let accent = [0x60u8, 0x9a, 0xf0];
@@ -519,6 +603,7 @@ mod tests {
             &clock,
             &Reading::spelled("07", 7.0),
             "",
+            None,
             &mut text,
         );
 
@@ -555,6 +640,7 @@ mod tests {
             &clock,
             &Reading::spelled("07", 7.0),
             "",
+            None,
             &mut text,
         );
         let gauge = face(
@@ -563,6 +649,7 @@ mod tests {
             &clock.clone().with_face(ss550_plugin_api::Face::Gauge),
             &Reading::spelled("07", 7.0),
             "",
+            None,
             &mut text,
         );
 
@@ -609,6 +696,7 @@ mod tests {
             &clock,
             &Reading::spelled("07", 7.0),
             "A Family This Machine Does Not Have",
+            None,
             &mut text,
         );
 
@@ -635,7 +723,15 @@ mod tests {
     #[test]
     fn the_face_has_the_decks_own_size_and_its_background() {
         let mut text = engine();
-        let picture = face(112, 112, &cell(), &Reading::percent(42.0), "", &mut text);
+        let picture = face(
+            112,
+            112,
+            &cell(),
+            &Reading::percent(42.0),
+            "",
+            None,
+            &mut text,
+        );
         assert_eq!(picture.dimensions(), (112, 112));
         assert_eq!(
             picture.get_pixel(1, 1).0,
@@ -648,8 +744,24 @@ mod tests {
         let mut text = engine();
         let layout = Layout::of(112, 112);
 
-        let empty = face(112, 112, &cell(), &Reading::percent(0.0), "", &mut text);
-        let full = face(112, 112, &cell(), &Reading::percent(100.0), "", &mut text);
+        let empty = face(
+            112,
+            112,
+            &cell(),
+            &Reading::percent(0.0),
+            "",
+            None,
+            &mut text,
+        );
+        let full = face(
+            112,
+            112,
+            &cell(),
+            &Reading::percent(100.0),
+            "",
+            None,
+            &mut text,
+        );
         let (top, bar_height) = layout.bar;
         let row = top + bar_height / 2;
         assert_eq!(
@@ -670,6 +782,7 @@ mod tests {
             &cell(),
             &Reading::temperature(56.0),
             "",
+            None,
             &mut text,
         );
         assert_eq!(heat.get_pixel(60, row).0[..3], BACKGROUND);
@@ -678,13 +791,22 @@ mod tests {
     #[test]
     fn a_reading_nothing_measured_is_drawn_dimmer_than_a_number() {
         let mut text = engine();
-        let measured = face(112, 112, &cell(), &Reading::percent(42.0), "", &mut text);
+        let measured = face(
+            112,
+            112,
+            &cell(),
+            &Reading::percent(42.0),
+            "",
+            None,
+            &mut text,
+        );
         let missing = face(
             112,
             112,
             &cell(),
             &Reading::unavailable("no sensor"),
             "",
+            None,
             &mut text,
         );
         assert_ne!(
@@ -697,11 +819,35 @@ mod tests {
     #[test]
     fn the_same_reading_draws_the_same_bytes_so_a_skipped_repaint_is_safe() {
         let mut text = engine();
-        let left = face(112, 112, &cell(), &Reading::percent(42.0), "", &mut text);
-        let right = face(112, 112, &cell(), &Reading::percent(42.0), "", &mut text);
+        let left = face(
+            112,
+            112,
+            &cell(),
+            &Reading::percent(42.0),
+            "",
+            None,
+            &mut text,
+        );
+        let right = face(
+            112,
+            112,
+            &cell(),
+            &Reading::percent(42.0),
+            "",
+            None,
+            &mut text,
+        );
         assert_eq!(left.as_raw(), right.as_raw());
 
-        let other = face(112, 112, &cell(), &Reading::percent(57.0), "", &mut text);
+        let other = face(
+            112,
+            112,
+            &cell(),
+            &Reading::percent(57.0),
+            "",
+            None,
+            &mut text,
+        );
         assert_ne!(
             left.as_raw(),
             other.as_raw(),
@@ -724,7 +870,7 @@ mod tests {
             Reading::unavailable("no sensor"),
         ];
         for reading in faces {
-            let picture = face(112, 112, &cell(), &reading, "", &mut text);
+            let picture = face(112, 112, &cell(), &reading, "", None, &mut text);
             let jpeg = encode(spec, &cell(), &picture).unwrap_or_else(|| {
                 panic!(
                     "{:?} did not fit {} bytes",
@@ -746,7 +892,15 @@ mod tests {
     fn the_face_encodes_at_the_decks_size() {
         let mut text = engine();
         let spec = deck_api::ImageSpec::new(112, 112, 4096, deck_api::ImageFormat::Jpeg);
-        let picture = face(112, 112, &cell(), &Reading::percent(42.0), "", &mut text);
+        let picture = face(
+            112,
+            112,
+            &cell(),
+            &Reading::percent(42.0),
+            "",
+            None,
+            &mut text,
+        );
         let jpeg = encode(spec, &cell(), &picture).expect("a payload");
         assert!(jpeg.starts_with(&[0xFF, 0xD8]), "a JPEG starts with SOI");
         assert!(jpeg.len() <= spec.max_bytes());
@@ -765,6 +919,7 @@ mod tests {
                 &cell(),
                 &Reading::percent(50.0),
                 "",
+                None,
                 &mut text,
             );
             assert_eq!(picture.dimensions(), (width, height));

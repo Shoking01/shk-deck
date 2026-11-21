@@ -49,6 +49,12 @@ pub(crate) struct FaceJob {
     pub(crate) reading: Reading,
     /// The family the window draws titles in, so a face matches them.
     pub(crate) family: String,
+    /// The words the key itself says, when it has a title.
+    ///
+    /// A reading key used to ignore its title, because a gauge *is* its reading.
+    /// A rate is the case that changed it: `FPS` over the number names what the
+    /// number is, and the clock's keys simply have no title.
+    pub(crate) title: Option<String>,
     /// The deck's tile size, which is what makes the payload a payload.
     pub(crate) image: ImageSpec,
 }
@@ -150,6 +156,7 @@ fn run(jobs: Receiver<FaceJob>, done: Sender<FaceDone>) {
             &job.spec,
             &job.reading,
             &job.family,
+            job.title.as_deref(),
             &mut text,
         );
         let jpeg = match plugintile::encode(job.image, &job.spec, &picture) {
@@ -196,6 +203,7 @@ mod tests {
             ),
             reading: Reading::percent(42.0).with_detail("12 threads"),
             family: String::new(),
+            title: None,
             image: ImageSpec::new(112, 112, 4096, deck_api::ImageFormat::Jpeg),
         }
     }
