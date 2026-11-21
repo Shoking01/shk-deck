@@ -43,17 +43,51 @@ const MAPPING: &str = "RTSSSharedMemoryV2";
 const SIGNATURE: u32 = 0x5254_5353;
 
 /// One application RTSS is counting frames for.
+///
+/// The three numbers that matter are a **period**, not a running total: RTSS
+/// rotates `time0`, `time1` and `frames` once per second, and its own header says
+/// how to read them:
+///
+/// ```text
+/// 1000.0 * dwFrames / (dwTime1 - dwTime0)
+/// or
+/// 1000000.0 / dwFrameTime
+/// ```
+///
+/// Subtracting two of *our* samples would compare two different periods — which is
+/// how a key came to show one to three frames per second for a game running at
+/// sixty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameCounter {
     /// The application's process id.
     pub pid: u32,
     /// What RTSS calls it: the game's executable, usually.
     pub name: String,
-    /// Frames counted so far. Only the *difference* between two reads means
-    /// anything, which is why nothing here divides.
+    /// Frames rendered during the measurement period.
     pub frames: u32,
-    /// When the last frame was counted, in milliseconds on RTSS's own clock.
-    pub time_ms: u32,
+    /// When the measurement period started, in milliseconds. Zero until RTSS has
+    /// seen two moments, and its header is explicit that a zero cannot be used.
+    pub time0: u32,
+    /// When the measurement period ended, in milliseconds.
+    pub time1: u32,
+    /// The last frame's time, in microseconds.
+    pub frame_time_us: u32,
+}
+
+impl FrameCounter {
+    /// The rate RTSS is reporting, by the header's own formula.
+    ///
+    /// `None` when the period is unusable: RTSS has not measured two moments yet
+    /// (`time0` zero, or `time1` not after it), which is what the first second of
+    /// a freshly hooked game looks like.
+    pub fn fps(&self) -> Option<f32> {
+        if self.time0 == 0 || self.time1 <= self.time0 {
+            return None;
+        }
+        let elapsed = self.time1.checked_sub(self.time0)?;
+        let frames = f64::from(self.frames) * 1000.0 / f64::from(elapsed);
+        frames.is_finite().then_some(frames as f32)
+    }
 }
 
 /// The process id of the window in the foreground, when there is one.
@@ -130,15 +164,20 @@ fn read_entries(base: *const u8) -> Vec<FrameCounter> {
             continue;
         }
         let name = read_name(base, entry + 4);
-        // SAFETY: `dwTime1` and `dwFrames` sit at the offsets every published
-        // RTSS layout agrees on, inside the same entry.
-        let time_ms = unsafe { u32_at(base, entry + 272) };
+        // SAFETY: the fields sit at the offsets RTSS's own header states, inside
+        // the entry the header described: `dwTime0`, `dwTime1`, `dwFrames`,
+        // `dwFrameTime`.
+        let time0 = unsafe { u32_at(base, entry + 268) };
+        let time1 = unsafe { u32_at(base, entry + 272) };
         let frames = unsafe { u32_at(base, entry + 276) };
+        let frame_time_us = unsafe { u32_at(base, entry + 280) };
         counters.push(FrameCounter {
             pid,
             name,
             frames,
-            time_ms,
+            time0,
+            time1,
+            frame_time_us,
         });
     }
     counters
@@ -201,14 +240,41 @@ mod tests {
 
     #[test]
     fn a_counter_carries_the_two_numbers_a_rate_needs() {
-        // The rate is a difference, so both halves have to survive the read.
+        // A period, as the header states it: sixty frames in one second is sixty
+        // per second, with the same three numbers RTSS publishes.
         let counter = FrameCounter {
             pid: 4242,
             name: "game.exe".to_string(),
-            frames: 12_345,
-            time_ms: 67_890,
+            frames: 60,
+            time0: 50_000,
+            time1: 51_000,
+            frame_time_us: 16_667,
         };
-        assert_eq!(counter.frames, 12_345);
-        assert_eq!(counter.time_ms, 67_890);
+        assert_eq!(counter.fps(), Some(60.0));
+    }
+
+    #[test]
+    fn a_period_that_has_not_started_is_no_measurement() {
+        // The header is explicit: `dwTime0` has to be non-zero. A game hooked a
+        // moment ago has not measured two moments yet.
+        let fresh = FrameCounter {
+            pid: 1,
+            name: "game.exe".to_string(),
+            frames: 0,
+            time0: 0,
+            time1: 0,
+            frame_time_us: 0,
+        };
+        assert_eq!(fresh.fps(), None);
+
+        let empty_period = FrameCounter {
+            time1: 50_000,
+            ..fresh
+        };
+        assert_eq!(
+            empty_period.fps(),
+            None,
+            "a period of no length divides by nothing"
+        );
     }
 }
