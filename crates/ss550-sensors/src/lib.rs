@@ -44,6 +44,7 @@
 
 #[cfg(windows)]
 mod adl;
+pub mod fps;
 pub mod helper;
 pub mod media;
 #[cfg(windows)]

@@ -7,6 +7,21 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Added — an FPS key, from the counter RTSS already keeps
+- A fourth plugin, **`FPS`**, shows how fast the application **in the foreground**
+  is drawing. The number comes from RivaTuner Statistics Server's shared memory
+  (`RTSSSharedMemoryV2`): `ss550-sensors` maps it read-only and copies each
+  application's frame counter and its clock — nothing is injected, and the only
+  process inside a game is RTSS's own signed one.
+- The rate is the difference between two readings, computed in the plugin: an
+  outside read cannot know how much time passed, so the subtraction is a pure
+  function with a test for each way it can go wrong (a counter that did not move,
+  one that went backwards when a game restarted, another application taking the
+  foreground, two readings of the same millisecond).
+- Without RTSS, or for an application RTSS is not counting, the key says so
+  instead of freezing on a stale number. `cargo run -p ss550-sensors --example
+  fps_once` prints what RTSS is tracking, which is the first thing to check.
+
 ### Added — media keys, so a deck key can control the player
 - A new action, **`Media`**, sends one of the system's media commands:
   `play_pause`, `next`, `previous`, `stop`. It is delivered as the virtual keys a
