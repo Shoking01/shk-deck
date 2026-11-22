@@ -63,6 +63,7 @@ pub mod icon;
 pub mod install;
 pub mod instance;
 mod keysend;
+pub mod mark;
 #[cfg(test)]
 mod scratch;
 mod shortcut;
