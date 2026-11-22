@@ -36,7 +36,6 @@ use std::time::{Duration, Instant};
 
 use deck_api::{ButtonState, DeckError, ImageSpec, KeyId};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
-use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{
     px, size, AnyWindowHandle, AppContext as _, Context, Entity, IntoElement, Render, SharedString,
     Subscription, Window, WindowBounds, WindowOptions,
@@ -55,6 +54,7 @@ mod apps;
 mod diagnostics;
 mod facework;
 mod favicons;
+mod flavour;
 mod history;
 mod icons;
 mod pictures;
@@ -907,6 +907,13 @@ struct Controller {
     /// change repaints every titled key through the same path a title edit uses.
     /// The icon cache is told the same style, so the two cannot disagree.
     title_style: titlestyle::TitleStyle,
+    /// The palette the whole program is painted in.
+    ///
+    /// Loaded once at start, before the first frame, and changed only from the
+    /// appearance card, where the change repaints the deck through the same path
+    /// a page switch uses: a key whose initial is drawn on the accent is wearing
+    /// the old flavour until it is painted again.
+    flavour: &'static flavour::Flavour,
     /// The fonts a title is drawn with.
     ///
     /// `None` until the background scan answers: reading the system's fonts is
@@ -1221,6 +1228,11 @@ impl Controller {
         })
         .detach();
 
+        // The palette is installed before anything is drawn, so the first frame
+        // is already the flavour the user chose. A flavour is a theme, so this
+        // reaches the library's controls and this crate's chrome in one step.
+        let flavour = flavour::load();
+        flavour.apply(cx);
         // The title style is read once, before the first key is painted. A file
         // that exists and cannot be read replaces the startup note: the user's
         // choice was lost, and that matters more than "looking for the deck".
@@ -1297,6 +1309,7 @@ impl Controller {
             icons: icons::IconCache::new(),
             tiles: None,
             title_style: title_style.clone(),
+            flavour,
             page_path: Vec::new(),
             viewport_h: 880.,
             text: None,
@@ -1654,6 +1667,10 @@ impl Controller {
             true => self.text.as_mut(),
             false => None,
         };
+        // A key whose initial is drawn on the accent is wearing this flavour, so
+        // the cache is told before it builds: a different accent is a different
+        // picture, and the deck must not keep the old one.
+        self.icons.accent(self.flavour.accent_rgb());
         self.icons
             .prepare(spec, &faces, self.draft_program.as_deref(), text);
     }
@@ -3407,6 +3424,34 @@ impl Controller {
         cx.notify();
     }
 
+    /// Paints the whole program in another flavour.
+    ///
+    /// The theme is installed first, then the file is written, so the sentence
+    /// the status line carries is about the save and not about the paint — the
+    /// same order the title style uses. A flavour the deck's pictures were drawn
+    /// on has to reach them too: the initials are repainted through
+    /// [`Controller::show_current_page`], which is the one path that reads every
+    /// picture again and paints every key.
+    fn set_flavour(&mut self, flavour: &'static flavour::Flavour, cx: &mut Context<Self>) {
+        if std::ptr::eq(flavour, self.flavour) {
+            return;
+        }
+        self.flavour = flavour;
+        flavour.apply(cx);
+
+        let saved = flavour::save(flavour.name);
+        self.show_current_page();
+        self.note = match &saved {
+            Ok(()) => format!("The window is wearing {}.", flavour.name).into(),
+            Err(error) => format!(
+                "The window is wearing {}, but not saved: {error}",
+                flavour.name
+            )
+            .into(),
+        };
+        cx.notify();
+    }
+
     /// Gives one key its own title style, or puts it back on the default.
     ///
     /// The style lives in the profile, beside the words, so switching profile
@@ -4608,7 +4653,6 @@ fn main() {
                     window.activate_window();
                 }
                 window.set_window_title("Sh-Deck");
-                Theme::change(ThemeMode::Dark, Some(window), cx);
                 let singleton = singleton.take();
                 cx.new(move |cx| {
                     let mut controller = Controller::new(window, cx);
