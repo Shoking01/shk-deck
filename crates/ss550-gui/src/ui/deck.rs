@@ -16,12 +16,13 @@ use gpui_kit::{
 use std::sync::Arc;
 
 use super::{
-    activate, body, card, color, editor, micro_label, muted, one_line, palette, Tokens, CARD_PAD,
-    FONT_APP, FONT_CAPTION, FONT_MICRO, FONT_SUB, FONT_TITLE, RADIUS_MD, RADIUS_SM,
+    activate, body, card, color, editor, icon_label, micro_label, muted, one_line, palette, Tokens,
+    CARD_PAD, FONT_APP, FONT_CAPTION, FONT_MICRO, FONT_SUB, FONT_TITLE, RADIUS_MD, RADIUS_SM,
 };
 use crate::icons::{glyph_letter, Artwork};
 use crate::titlestyle::{TitleLook as _, TitlePosition, TitleStyle};
 use crate::{key_number, Controller, Paint, Slot};
+use gpui_kit::assets::IconName;
 /// The width a grid of keys may grow into before the tiles stop growing. Tiles
 /// are square, so this is also the height they aim for.
 const GRID_BUDGET: f32 = 600.;
@@ -254,7 +255,7 @@ fn key_card(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Contro
                 .items_center()
                 .justify_between()
                 .gap(px(8.))
-                .child(micro_label("KEYS", tokens))
+                .child(icon_label(IconName::Frame, "KEYS", tokens))
                 .child(muted(format!("{bound} of {keys} bound"), tokens)),
         )
         .child(toolbar(controller, tokens, cx))
@@ -284,6 +285,7 @@ fn toolbar(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Control
     let clear_all = match capabilities {
         Some(caps) if caps.clear_all() => Button::new("clear-all")
             .ghost()
+            .icon(IconName::Delete)
             .label("CLEAR ALL")
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.clear_all();
@@ -342,7 +344,7 @@ fn brightness_row(current: u8, tokens: Tokens, cx: &mut Context<Controller>) -> 
         .flex_row()
         .items_center()
         .gap(px(8.))
-        .child(micro_label("BRIGHTNESS", tokens))
+        .child(icon_label(IconName::Sun, "BRIGHTNESS", tokens))
         .children(chips)
 }
 
@@ -862,6 +864,7 @@ fn deck_actions(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Co
             row = row.child(
                 Button::new("keepalive")
                     .ghost()
+                    .icon(IconName::Heart)
                     .label("KEEP ALIVE")
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.heartbeat();
@@ -874,6 +877,7 @@ fn deck_actions(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Co
         .child(
             Button::new("reconnect")
                 .ghost()
+                .icon(IconName::RefreshCw)
                 .label("RECONNECT")
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.reconnect();
@@ -883,6 +887,7 @@ fn deck_actions(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Co
         .child(
             Button::new("hide")
                 .ghost()
+                .icon(IconName::EyeOff)
                 .label("HIDE · KEEPS RUNNING")
                 .on_click(cx.listener(|this, _: &ClickEvent, _, _| {
                     this.hide_window();
@@ -982,7 +987,7 @@ fn inspector_card(
 
     card(tokens)
         .w_full()
-        .child(micro_label("SELECTED KEY", tokens))
+        .child(icon_label(IconName::Inspector, "SELECTED KEY", tokens))
         .child(
             div()
                 .flex()
@@ -1007,7 +1012,7 @@ fn inspector_card(
                 .flex_col()
                 .gap(px(4.))
                 .min_w(px(0.))
-                .child(micro_label("ACTION", tokens))
+                .child(icon_label(IconName::Play, "ACTION", tokens))
                 .child(one_line(action, FONT_SUB, tokens.ink)),
         )
         .child(editor::key_editor(controller, tokens, cx))
@@ -1019,7 +1024,7 @@ fn inspector_card(
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .child(micro_label("COLOUR", tokens))
+                .child(icon_label(IconName::Palette, "COLOUR", tokens))
                 .child(
                     div()
                         .flex()
@@ -1032,6 +1037,7 @@ fn inspector_card(
                         .child(match can_clear {
                             true => Button::new("inspector-clear")
                                 .ghost()
+                                .icon(IconName::Ban)
                                 .label("BLANK")
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                     let index =
@@ -1130,7 +1136,7 @@ fn profile_card(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Co
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .child(micro_label("PROFILE", tokens))
+                .child(icon_label(IconName::User, "PROFILE", tokens))
                 .child(muted(format!("{count} saved"), tokens)),
         )
         .child(match rows.is_empty() {

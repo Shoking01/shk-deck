@@ -4,6 +4,8 @@
 //! no window: a page whose title is empty, or two pages that share a title,
 //! would leave the rail and the page header disagreeing.
 
+use gpui_kit::assets::IconName;
+
 /// A page of the controller window.
 ///
 /// The order of [`Page::ALL`] is the order of the rail, so the first page is
@@ -45,6 +47,24 @@ impl Page {
         }
     }
 
+    /// The icon the rail and the page heading wear.
+    ///
+    /// One icon per page, chosen for what the page is about rather than for what
+    /// it contains: the deck is the grid of keys, actions are what the keys run,
+    /// stats are the readings, settings are the settings.
+    ///
+    /// Only names in `gpui_kit`'s bundled set are drawn: the enum lists every
+    /// Lucide icon, but the asset source carries the curated subset in
+    /// `crates/assets/default-icons.txt`, and a name outside it paints nothing.
+    pub(crate) fn icon(self) -> IconName {
+        match self {
+            Page::Deck => IconName::LayoutDashboard,
+            Page::Actions => IconName::SquareTerminal,
+            Page::Stats => IconName::ChartPie,
+            Page::Settings => IconName::Settings,
+        }
+    }
+
     /// One sentence under the heading, saying what the page is for.
     pub(crate) fn description(self) -> &'static str {
         match self {
@@ -82,6 +102,18 @@ mod tests {
             );
             assert!(!page.label().trim().is_empty(), "{page:?} has no nav label");
         }
+    }
+
+    #[test]
+    fn no_two_pages_wear_the_same_icon() {
+        // Two rows of the rail that look alike are two rows the eye cannot tell
+        // apart, which is the one thing an icon must not do.
+        let icons: BTreeSet<String> = Page::ALL
+            .iter()
+            .map(|page| format!("{:?}", page.icon()))
+            .collect();
+
+        assert_eq!(icons.len(), Page::ALL.len(), "two pages share an icon");
     }
 
     #[test]
