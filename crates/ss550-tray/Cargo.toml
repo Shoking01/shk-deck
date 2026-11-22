@@ -73,3 +73,9 @@ windows = { version = "0.62", features = [
 [target.'cfg(windows)'.dev-dependencies]
 # The ignored round-trip test restores a logon entry it did not create.
 winreg = "0.56"
+
+[dev-dependencies]
+# The mark generator (`examples/render-mark.rs`): it rasterises the geometry in
+# `src/mark.rs` into the `.png`, the `.ico` and the tray's raw pixels. PNG only,
+# because that is the one format those three files are written in.
+image = { version = "0.25", default-features = false, features = ["png"] }
