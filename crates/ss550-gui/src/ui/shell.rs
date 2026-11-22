@@ -7,7 +7,7 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{
     div, px, AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
@@ -16,11 +16,13 @@ use gpui_kit::{
 use super::page::Page;
 use super::stats;
 use super::{
-    activate, body, color, dot, micro_label, muted, one_line, palette, panels, Tokens, APP_BAR_H,
-    FONT_APP, FONT_CAPTION, FONT_MICRO, FONT_SUB, FONT_TITLE, PAGE_PAD, RADIUS_PILL, RADIUS_SM,
-    RAIL_W, STATUS_BAR_H,
+    activate, body, color, dot, icon, icon_label, muted, one_line, palette, panels, Tokens,
+    APP_BAR_H, FONT_APP, FONT_CAPTION, FONT_MICRO, FONT_SUB, FONT_TITLE, PAGE_PAD, RADIUS_PILL,
+    RADIUS_SM, RAIL_W, STATUS_BAR_H,
 };
 use crate::{ms_text, Controller, Link};
+use gpui_kit::assets::IconName;
+use ss550_tray::mark as art;
 
 /// Builds the whole window: bar, rail, page and status line.
 pub(crate) fn app_shell(controller: &mut Controller, cx: &mut Context<Controller>) -> Div {
@@ -95,51 +97,49 @@ fn app_bar(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Control
                 .flex_none()
                 .child(connection_pill(controller, tokens))
                 .child(profile_button(controller, cx))
-                .child(theme_button(cx)),
+                .child(flavour_button(controller, tokens, cx)),
         )
 }
 
-/// The window's own mark: a rounded accent square holding a small key grid,
-/// drawn from two rows of three dots.
+/// The window's own mark: the deck's face, drawn from the same geometry the
+/// `.ico` and the tray icon are rasterised from.
 ///
 /// Drawn from elements, not loaded: an image asset would have to be fetched,
-/// cached, scaled and re-exported for every window, and this is the shape at
-/// every size. It is a mark, not a picture of any deck.
+/// cached, scaled and re-exported for every window, and this is fifteen rounded
+/// squares at one size. What matters is that the numbers come from
+/// [`ss550_tray::mark`] — the program has one face, and a second copy of it here
+/// is how a release ends up with two.
 fn mark(tokens: Tokens) -> Div {
-    let pip = || {
-        div()
-            .w(px(5.))
-            .h(px(5.))
-            .rounded(px(2.))
-            .bg(color(0xffffff).opacity(0.95))
-    };
-    let row = || {
-        div()
-            .flex()
-            .flex_row()
-            .gap(px(3.))
-            .child(pip())
-            .child(pip())
-            .child(pip())
-    };
+    /// The badge's side in the app bar, in pixels.
+    const SIDE: f32 = 32.;
 
-    div()
+    let mut badge = div()
         .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(px(32.))
-        .h(px(32.))
-        .rounded(px(RADIUS_SM))
-        .bg(tokens.accent)
-        .child(
+        .relative()
+        .w(px(SIDE))
+        .h(px(SIDE))
+        .rounded(px(art::BADGE_RADIUS * SIDE))
+        .bg(tokens.accent);
+
+    for (index, (left, top, key)) in art::KEYS.iter().copied().enumerate() {
+        let side = key * SIDE;
+        let ink = match art::is_lit(index) {
+            true => 1.,
+            false => art::KEY_INK,
+        };
+        badge = badge.child(
             div()
-                .flex()
-                .flex_col()
-                .gap(px(3.))
-                .child(row())
-                .child(row()),
-        )
+                .absolute()
+                .left(px(left * SIDE))
+                .top(px(top * SIDE))
+                .w(px(side))
+                .h(px(side))
+                .rounded(px(art::KEY_RADIUS * side))
+                .bg(color(0xffffff).opacity(ink)),
+        );
+    }
+
+    badge
 }
 
 /// The one line under the window's name: the deck's shape, or the reason there
@@ -229,29 +229,47 @@ fn profile_button(controller: &mut Controller, cx: &mut Context<Controller>) -> 
         }))
 }
 
-/// The theme control. The window is dark by default and says so; one click
-/// turns it over.
-fn theme_button(cx: &mut Context<Controller>) -> Button {
-    let is_dark = cx.theme().is_dark();
+/// The flavour control: the palette the window is wearing, as a swatch and its
+/// name.
+///
+/// It is a door, not a menu: the choice lives on the appearance card, where each
+/// flavour can say what it looks like, and this is the shortcut that says which
+/// one is in force from anywhere in the window. Clicking it opens that card.
+fn flavour_button(
+    controller: &mut Controller,
+    tokens: Tokens,
+    cx: &mut Context<Controller>,
+) -> AnyElement {
+    let flavour = controller.flavour;
+    let name = SharedString::from(super::shorten(flavour.name, 18));
 
-    Button::new("theme-toggle")
-        .secondary()
-        .compact()
-        .label(if is_dark { "DARK" } else { "LIGHT" })
-        .tooltip(if is_dark {
-            "Switch this window to the light theme"
-        } else {
-            "Switch this window to the dark theme"
-        })
-        .on_click(cx.listener(|_, _: &ClickEvent, window, cx| {
-            let next = if cx.theme().mode.is_dark() {
-                ThemeMode::Light
-            } else {
-                ThemeMode::Dark
-            };
-            Theme::change(next, Some(window), cx);
-            cx.notify();
-        }))
+    let control = div()
+        .id("flavour-button")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.))
+        .h(px(32.))
+        .px(px(10.))
+        .rounded(px(RADIUS_SM))
+        .bg(tokens.elevated)
+        .border_1()
+        .border_color(tokens.border)
+        .hover(|style| style.bg(tokens.hover).border_color(tokens.accent))
+        .child(super::swatch(tokens, flavour.accent, 12.))
+        .child(
+            div()
+                .text_size(px(FONT_MICRO))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(tokens.soft)
+                .child(name),
+        );
+
+    activate(control, cx, |this, _window, cx| {
+        this.show_page(Page::Settings);
+        cx.notify();
+    })
+    .into_any_element()
 }
 
 /// The navigation rail: three pages, the action palette, then what the window is
@@ -290,31 +308,25 @@ fn rail(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
         .child(rail_deck_card(controller, tokens, cx))
 }
 
-/// One rail row: a 36 px target with a marker, a radius, and a hover bed.
+/// One rail row: a 36 px target with the page's icon, a radius, and a hover bed.
 fn nav_item(page: Page, active: bool, tokens: Tokens, cx: &mut Context<Controller>) -> AnyElement {
-    let marker = div()
-        .flex_none()
-        .w(px(6.))
-        .h(px(6.))
-        .rounded(px(RADIUS_PILL))
-        .bg(if active {
-            tokens.accent
-        } else {
-            tokens.soft.opacity(0.45)
-        });
+    let tone = match active {
+        true => tokens.accent_ink,
+        false => tokens.soft,
+    };
 
     let row = div()
         .id(SharedString::from(format!("nav-{}", page.label())))
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(12.))
+        .gap(px(10.))
         .h(px(36.))
         .w_full()
         .px(px(12.))
         .rounded(px(RADIUS_SM))
         .text_size(px(FONT_SUB))
-        .child(marker)
+        .child(icon(page.icon(), 16., tone))
         .child(div().flex_1().min_w(px(0.)).truncate().child(page.label()));
 
     let row = if active {
@@ -365,13 +377,14 @@ fn rail_deck_card(
 
     let Some(session) = controller.session.as_ref() else {
         return block
-            .child(micro_label("DECK", tokens))
+            .child(icon_label(IconName::HardDrive, "DECK", tokens))
             .child(body("No deck connected", tokens))
             .child(muted("Plug one in and this card fills itself in.", tokens))
             .child(
                 Button::new("rail-reconnect")
                     .ghost()
                     .compact()
+                    .icon(IconName::RefreshCw)
                     .label("RECONNECT")
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.reconnect();
@@ -391,17 +404,19 @@ fn rail_deck_card(
     );
     let (identity, detail) = deck_identity(session.label(), &shape);
 
-    let mut block = block.child(micro_label("DECK", tokens)).child(
-        // The deck's own name, allowed to wrap. This card has the bottom of the
-        // rail to itself, and a name cut to "100x1…" says less than one extra
-        // line does.
-        div()
-            .w_full()
-            .min_w(px(0.))
-            .text_size(px(FONT_SUB))
-            .text_color(tokens.ink)
-            .child(SharedString::from(identity)),
-    );
+    let mut block = block
+        .child(icon_label(IconName::HardDrive, "DECK", tokens))
+        .child(
+            // The deck's own name, allowed to wrap. This card has the bottom of the
+            // rail to itself, and a name cut to "100x1…" says less than one extra
+            // line does.
+            div()
+                .w_full()
+                .min_w(px(0.))
+                .text_size(px(FONT_SUB))
+                .text_color(tokens.ink)
+                .child(SharedString::from(identity)),
+        );
     if let Some(detail) = detail {
         block = block.child(one_line(detail, FONT_CAPTION, tokens.soft));
     }
@@ -444,7 +459,7 @@ fn content(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Control
         )
 }
 
-/// The heading every page opens with.
+/// The heading every page opens with: its icon, its name, and what it is for.
 fn page_header(page: Page, tokens: Tokens) -> Div {
     div()
         .flex()
@@ -453,10 +468,18 @@ fn page_header(page: Page, tokens: Tokens) -> Div {
         .w_full()
         .child(
             div()
-                .text_size(px(FONT_TITLE))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(tokens.ink)
-                .child(page.title()),
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(10.))
+                .child(icon(page.icon(), 20., tokens.accent_ink))
+                .child(
+                    div()
+                        .text_size(px(FONT_TITLE))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(tokens.ink)
+                        .child(page.title()),
+                ),
         )
         .child(
             div()

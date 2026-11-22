@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::form::Field;
 use gpui_kit::component::input::{Input, Textarea};
@@ -215,6 +216,7 @@ pub(crate) fn key_editor(
         .child(
             Button::new("save-binding")
                 .primary()
+                .icon(IconName::Check)
                 .label("SAVE BINDING")
                 .disabled(!has_deck)
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -227,6 +229,7 @@ pub(crate) fn key_editor(
         .child(
             Button::new("clear-binding")
                 .ghost()
+                .icon(IconName::Ban)
                 .label("CLEAR KEY")
                 .disabled(!has_deck)
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -269,6 +272,7 @@ pub(crate) fn key_editor(
                         .child(
                             Button::new("save-title")
                                 .ghost()
+                                .icon(IconName::Check)
                                 .label("SAVE TITLE")
                                 .disabled(!has_deck)
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -700,6 +704,7 @@ fn app_picker(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Cont
         .child(
             Button::new("scan-apps")
                 .primary()
+                .icon(IconName::Search)
                 .label("SCAN")
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.scan_apps(cx);
@@ -838,6 +843,7 @@ pub(crate) fn picture_block(
         .child(
             Button::new("choose-picture")
                 .primary()
+                .icon(IconName::GalleryVerticalEnd)
                 .label("CHOOSE A PICTURE")
                 .disabled(!has_deck)
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -851,6 +857,7 @@ pub(crate) fn picture_block(
         .child(
             Button::new("remove-picture")
                 .ghost()
+                .icon(IconName::Delete)
                 .label("REMOVE PICTURE")
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.remove_artwork();
@@ -904,6 +911,7 @@ pub(crate) fn picture_block(
                 .child(
                     Button::new("open-picture-folder")
                         .ghost()
+                        .icon(IconName::FolderOpen)
                         .label("OPEN FOLDER")
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.open_assets_folder();
