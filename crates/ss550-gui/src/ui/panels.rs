@@ -7,9 +7,10 @@
 //! the key's tile is fed from, and the picture itself is chosen and imported on
 //! a click.
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
+use gpui_kit::component::{ActiveTheme as _, Icon};
 use gpui_kit::{
     div, px, AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, SharedString, Styled as _,
@@ -17,10 +18,10 @@ use gpui_kit::{
 use std::sync::Arc;
 
 use super::{
-    activate, body, card, color, micro_label, muted, one_line, path_line, segment, titlecontrols,
-    Tokens, FONT_CAPTION, FONT_MICRO, FONT_SUB, RADIUS_MD, RADIUS_SM,
+    activate, body, card, color, icon_label, micro_label, muted, one_line, path_line, swatch,
+    titlecontrols, Tokens, FONT_CAPTION, FONT_MICRO, FONT_SUB, RADIUS_MD, RADIUS_SM,
 };
-use crate::{ms_text, Controller};
+use crate::{flavour, ms_text, Controller};
 
 // ── Actions ─────────────────────────────────────────────────────────────
 
@@ -47,7 +48,7 @@ pub(crate) fn actions_page(
             .flex_row()
             .items_center()
             .justify_between()
-            .child(micro_label("KEYS", tokens))
+            .child(icon_label(IconName::Frame, "KEYS", tokens))
             .child(muted(
                 match has_deck {
                     true => format!("Editing key #{}", selected.get()),
@@ -199,6 +200,7 @@ fn bound_card(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Cont
             Ok(key) => Button::new(SharedString::from(format!("unbind-{number}")))
                 .ghost()
                 .compact()
+                .icon(IconName::Delete)
                 .label("REMOVE")
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.remove_binding(key, window, cx);
@@ -222,7 +224,7 @@ fn bound_card(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Cont
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .child(micro_label("BOUND RIGHT NOW", tokens))
+                .child(icon_label(IconName::Inbox, "BOUND RIGHT NOW", tokens))
                 .child(muted(
                     format!("{count} key{}", if count == 1 { "" } else { "s" }),
                     tokens,
@@ -241,6 +243,88 @@ fn bound_card(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Cont
 
 // ── Settings ────────────────────────────────────────────────────────────
 
+/// One flavour in the appearance card: its accent, its name, what it looks like,
+/// and the mode it carries.
+///
+/// The whole row is the target, not a radio button inside it: a list of palettes
+/// is a list of things to try, and a hit area the width of the card is what makes
+/// trying them cheap. The active one is ringed and ticked, so the state is said
+/// twice — colour and mark — and never by colour alone.
+fn flavour_row(
+    controller: &mut Controller,
+    flavour: &'static flavour::Flavour,
+    tokens: Tokens,
+    cx: &mut Context<Controller>,
+) -> AnyElement {
+    let active = controller.flavour.name == flavour.name;
+    let mode = match flavour.mode.is_dark() {
+        true => "DARK",
+        false => "LIGHT",
+    };
+
+    let mut row = div()
+        .id(SharedString::from(format!("flavour-{}", flavour.name)))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(12.))
+        .w_full()
+        .min_w(px(0.))
+        .p(px(10.))
+        .rounded(px(RADIUS_SM))
+        .border_1()
+        .border_color(if active { tokens.accent } else { tokens.border })
+        .bg(if active {
+            tokens.accent_tint
+        } else {
+            tokens.elevated
+        })
+        .hover(|style| style.bg(tokens.hover).border_color(tokens.accent))
+        .child(swatch(tokens, flavour.accent, 14.))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .flex_1()
+                .min_w(px(0.))
+                .child(
+                    div()
+                        .text_size(px(FONT_SUB))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(if active {
+                            tokens.accent_ink
+                        } else {
+                            tokens.ink
+                        })
+                        .child(SharedString::from(flavour.name)),
+                )
+                .child(one_line(flavour.note, FONT_CAPTION, tokens.soft)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .flex_none()
+                .child(micro_label(mode, tokens)),
+        );
+
+    if active {
+        row = row.child(
+            Icon::new(IconName::Check)
+                .size(px(14.))
+                .text_color(tokens.accent_ink),
+        );
+    }
+
+    activate(row, cx, move |this, _window, cx| {
+        this.set_flavour(flavour, cx);
+    })
+    .into_any_element()
+}
+
 /// How the controller behaves when the window is closed, and where it keeps
 /// what it knows.
 pub(crate) fn settings_page(
@@ -248,7 +332,6 @@ pub(crate) fn settings_page(
     tokens: Tokens,
     cx: &mut Context<Controller>,
 ) -> Div {
-    let is_dark = cx.theme().is_dark();
     let mono = cx.theme().mono_font_family.clone();
     let tray_note = match &controller.tray_error {
         Some(error) => format!("The tray icon is missing: {error}"),
@@ -258,7 +341,7 @@ pub(crate) fn settings_page(
     // ── Startup ──
     let mut startup = card(tokens)
         .w_full()
-        .child(micro_label("STARTUP", tokens))
+        .child(icon_label(IconName::Bot, "STARTUP", tokens))
         .child(
             Switch::new("start-with-windows")
                 .checked(controller.starts_with_windows)
@@ -314,43 +397,21 @@ pub(crate) fn settings_page(
     }
 
     // ── Appearance ──
-    let appearance = card(tokens)
+    let mut appearance = card(tokens)
         .w_full()
-        .child(micro_label("APPEARANCE", tokens))
+        .child(icon_label(IconName::Palette, "APPEARANCE", tokens))
         .child(muted(
-            "The window follows the theme at once. Keys keep the colours they show: those are \
-             the deck's, not the window's.",
+            "A flavour repaints the whole window at once: this chrome and the controls on it. A \
+             key whose initial is drawn on the accent is repainted on the deck too, so the two \
+             never show different colours.",
             tokens,
-        ))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.))
-                .child(segment(
-                    SharedString::from("theme-dark"),
-                    "DARK",
-                    is_dark,
-                    tokens,
-                    cx,
-                    |_this, window, cx| {
-                        Theme::change(ThemeMode::Dark, Some(window), cx);
-                        cx.notify();
-                    },
-                ))
-                .child(segment(
-                    SharedString::from("theme-light"),
-                    "LIGHT",
-                    !is_dark,
-                    tokens,
-                    cx,
-                    |_this, window, cx| {
-                        Theme::change(ThemeMode::Light, Some(window), cx);
-                        cx.notify();
-                    },
-                )),
-        );
+        ));
+
+    let mut flavours = div().flex().flex_col().gap(px(6.)).w_full();
+    for flavour in flavour::FLAVOURS {
+        flavours = flavours.child(flavour_row(controller, flavour, tokens, cx));
+    }
+    appearance = appearance.child(flavours);
 
     // ── Files ──
     let bindings = match &controller.store_path {
@@ -359,7 +420,7 @@ pub(crate) fn settings_page(
     };
     let files = card(tokens)
         .w_full()
-        .child(micro_label("FILES", tokens))
+        .child(icon_label(IconName::FolderOpen, "FILES", tokens))
         .child(info_row(
             "CONFIG",
             path_line(
@@ -406,6 +467,7 @@ pub(crate) fn settings_page(
                 .child(
                     Button::new("install-app")
                         .primary()
+                        .icon(IconName::Star)
                         .label("INSTALL TO START MENU")
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.install_app();
@@ -428,7 +490,7 @@ pub(crate) fn settings_page(
     // ── About ──
     let about = card(tokens)
         .w_full()
-        .child(micro_label("ABOUT", tokens))
+        .child(icon_label(IconName::Info, "ABOUT", tokens))
         .child(info_row(
             "VERSION",
             body(format!("v{}", env!("CARGO_PKG_VERSION")), tokens),
@@ -475,7 +537,7 @@ fn thresholds_card(
 ) -> Div {
     let mut card_body = card(tokens)
         .w_full()
-        .child(micro_label("THRESHOLDS", tokens))
+        .child(icon_label(IconName::TriangleAlert, "THRESHOLDS", tokens))
         .child(muted(
             "Where the Stats page turns a card amber, and then red.",
             tokens,
@@ -645,7 +707,11 @@ fn titles_card(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Con
 
     card(tokens)
         .w_full()
-        .child(micro_label("TITLE DEFAULTS", tokens))
+        .child(icon_label(
+            IconName::CaseSensitive,
+            "TITLE DEFAULTS",
+            tokens,
+        ))
         .child(muted(
             "How a title is drawn when the key does not say otherwise: the words are set in a \
              font the system already has, at a pixel size, and a title too long for its band steps \
