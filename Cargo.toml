@@ -4,6 +4,7 @@ members = [
     "crates/deck-conformance",
     "crates/deck-simulator",
     "crates/ss550-driver",
+    "crates/ss550-discord",
     "crates/ss550-engine",
     "crates/ss550-perf",
     "crates/ss550-sensors",

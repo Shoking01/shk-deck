@@ -24,6 +24,36 @@ command. `internal::runner::command_for` — the function that turns an action i
 a process — refuses both by name, because a key that is delivered has no program
 to run. That refusal is a test, not a convention.
 
+## Why Discord mute is not an action here
+
+A deck key that silences the microphone and shows whether it is silenced was
+built, measured and removed. Discord's local pipe offers two families of
+commands, and neither one does both:
+
+- `SET_VOICE_SETTINGS_2` and the `VOICE_SETTINGS_UPDATE_2` event are in the
+  `rpc.local` scope, so any local connection may call them — but they are an
+  **application-private sandbox**. The command changes nothing in the client and
+  the event reports nothing about it: with the microphone muted and unmuted in
+  Discord's own window for two minutes, the pipe carried only the initial
+  snapshot.
+- `SET_VOICE_SETTINGS` and `GET_VOICE_SETTINGS` are the real ones, and they need
+  the `rpc.voice.read` / `rpc.voice.write` scopes. `AUTHORIZE` answers
+  `5000 invalid_scope` for them — while the same call with `identify` grants
+  consent and authenticates — and even authenticated, `GET_VOICE_SETTINGS`
+  answers `4006 Not authenticated or invalid scope`. Discord reserves those
+  scopes for applications with partner approval.
+
+So the key that exists is `Keys` sending Discord's own global bind:
+
+```text
+ctrl+shift+m    toggle mute
+ctrl+shift+d    toggle deafen
+```
+
+It mutes for real and needs no grant. It cannot show the state, because Discord
+will not state it. `crates/ss550-discord` keeps the pipe and the probes that
+proved this, and its crate docs say the same thing.
+
 ## Why media control is an action
 
 `Media` sends `VK_MEDIA_PLAY_PAUSE`, `VK_MEDIA_NEXT_TRACK`, `VK_MEDIA_PREV_TRACK`
