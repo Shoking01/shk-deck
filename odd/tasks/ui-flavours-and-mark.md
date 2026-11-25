@@ -28,9 +28,9 @@ Branch: `feat/ui-flavours` · Delivery: single PR per work unit · Runner: `carg
 
 | ID | Specs | Route | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| T1 | S3 | inline | in progress | — |
-| T2 | S1, S2 | inline | pending | — |
-| T3 | S4 | inline | pending | — |
+| T1 | S3 | inline | done | `c448042`; 209 gui tests green; seen live: Mocha applied from the picker, Latte from `flavour.txt`, both across chrome and hosted controls |
+| T2 | S1, S2 | inline | done | `bea9322`; icons on rail, page heading, section labels, palette rows and the buttons with an obvious symbol |
+| T3 | S4 | inline | done | `f1ddefc` + `bea9322`; mark drawn in the window from the same geometry the `.png`, `.ico` and tray pixels are rasterised from |
 
 ## Log
 
@@ -39,3 +39,5 @@ Branch: `feat/ui-flavours` · Delivery: single PR per work unit · Runner: `carg
 - **L3** (evidence): gpui-kit already installs `gpui_kit::assets::Assets` (`main.rs:4584`) and bundles 1830 Lucide icons; the app uses none. `ThemeRegistry` + `Theme::apply_config` make JSON themes first class, so flavours need no new rendering machinery.
 - **L4** (decision): the deck glyph accent follows the flavour. A key's initial is drawn on the accent (`icons::GLYPH_ACCENT`), so a flavour that did not reach it would leave the window and the deck showing two accents. The accent becomes a cache input and a flavour change repaints, through the same rebuild the font scan already uses.
 - **L5** (decision): the DARK/LIGHT toggle is replaced by a flavour list. A flavour carries its own mode, so two buttons cannot express four palettes.
+- **L6** (discovery): gpui-kit's `IconName` lists all 1830 Lucide icons, but its asset bundle carries only the 106 named in `crates/assets/default-icons.txt`. A name outside that set compiles and paints **nothing**. Every icon used here is in the set, and `page::tests::no_two_pages_wear_the_same_icon` guards the one mapping that matters most.
+- **L7** (evidence): the window was screenshotted after each step (Ink, Mocha, Latte), and the flavour survives a restart because it is read before the first frame.
