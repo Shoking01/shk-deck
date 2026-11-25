@@ -22,16 +22,17 @@
 //! function over plain data, so "a template never writes" is a test and not a
 //! convention.
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
-    div, px, AnyElement, AppContext as _, Context, Div, FontWeight, InteractiveElement as _,
+    div, px, AnyElement, AppContext as _, Context, Div, FontWeight, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
     Styled as _, Window,
 };
 use ss550_engine::{Action, Recents};
 use ss550_plugins::Catalogue;
 
-use super::{micro_label, one_line, Tokens, FONT_CAPTION, FONT_MICRO, FONT_SUB, RADIUS_SM};
+use super::{icon, icon_label, one_line, Tokens, FONT_CAPTION, FONT_MICRO, FONT_SUB, RADIUS_SM};
 use crate::{Controller, DraftKind};
 
 /// What `RECENTS` says when this deck has not been given anything yet.
@@ -192,7 +193,7 @@ pub(crate) fn actions_palette(controller: &Controller, tokens: Tokens) -> Div {
         .gap(px(6.))
         .w_full()
         .min_w(px(0.))
-        .child(micro_label("ACTIONS", tokens));
+        .child(icon_label(IconName::Plus, "ACTIONS", tokens));
 
     if !droppable {
         actions = actions.child(
@@ -222,7 +223,7 @@ pub(crate) fn actions_palette(controller: &Controller, tokens: Tokens) -> Div {
         .gap(px(6.))
         .w_full()
         .min_w(px(0.))
-        .child(micro_label("RECENTS", tokens));
+        .child(icon_label(IconName::RotateCw, "RECENTS", tokens));
 
     if recent_rows.is_empty() {
         recents = recents.child(
@@ -277,6 +278,7 @@ fn row(
     // which the payload alone cannot spell — hence the copy taken here.
     let adds = !matches!(entry.drag, PaletteDrag::Action(_));
     let ghost_label = entry.label.clone();
+    let glyph = entry_icon(&entry.drag);
 
     let row = div()
         .id(SharedString::from(format!("{namespace}-{position}")))
@@ -290,7 +292,10 @@ fn row(
         .px(px(8.))
         .rounded(px(RADIUS_SM))
         .text_size(px(FONT_SUB))
-        .child(marker(adds, tokens))
+        .child(marker(
+            glyph,
+            if adds { tokens.accent_ink } else { tokens.soft },
+        ))
         .child(one_line(entry.label, FONT_SUB, tokens.ink));
 
     if !droppable {
@@ -316,16 +321,66 @@ fn row(
         .into_any_element()
 }
 
-/// The little mark in front of a row: an entry that adds something to a key, or
-/// an action that already exists.
-fn marker(adds: bool, tokens: Tokens) -> Div {
-    div()
-        .flex_none()
-        .w(px(10.))
-        .text_size(px(FONT_MICRO))
-        .font_weight(FontWeight::BOLD)
-        .text_color(if adds { tokens.accent_ink } else { tokens.soft })
-        .child(if adds { "+" } else { "·" })
+/// The little mark in front of a row: what the entry would do, in one icon.
+///
+/// A template or a plugin *adds* something to a key, so it wears the accent; a
+/// recent action already exists, so it wears the secondary ink. The colour is
+/// the only difference — the icon says what kind of thing the row is, which is
+/// what makes a column of eight rows scannable.
+fn marker(glyph: IconName, ink: Hsla) -> Div {
+    div().flex_none().child(icon(glyph, 14., ink))
+}
+
+/// The icon a row wears, from what dragging it would offer.
+fn entry_icon(drag: &PaletteDrag) -> IconName {
+    match drag {
+        PaletteDrag::Template(kind) => template_icon(*kind),
+        PaletteDrag::Plugin(plugin) => plugin_icon(plugin),
+        PaletteDrag::Action(action) => action_icon(action),
+    }
+}
+
+/// The icon a template wears: the thing it makes the key able to do.
+///
+/// Every name here is in `gpui_kit`'s bundled set; the enum lists all of Lucide,
+/// but an icon the asset source does not carry paints nothing at all.
+fn template_icon(kind: DraftKind) -> IconName {
+    match kind {
+        DraftKind::Launch => IconName::SquareTerminal,
+        DraftKind::OpenUrl => IconName::Globe,
+        DraftKind::Keys => IconName::CaseSensitive,
+        DraftKind::Plugin => IconName::ChartPie,
+        DraftKind::Media => IconName::Play,
+    }
+}
+
+/// The icon a plugin's own row wears.
+///
+/// A plugin this build ships is named here; one it does not is a row from a
+/// catalogue that grew, and the generic reading mark is the honest fallback
+/// rather than a guess at what the plugin measures.
+fn plugin_icon(id: &str) -> IconName {
+    match id {
+        "system-stats" => IconName::Cpu,
+        "clock" => IconName::Calendar,
+        "media" => IconName::Play,
+        "fps" => IconName::ChartPie,
+        _ => IconName::ChartPie,
+    }
+}
+
+/// The icon a finished action wears, by what it does when pressed.
+fn action_icon(action: &Action) -> IconName {
+    match action {
+        Action::Launch { .. } => IconName::SquareTerminal,
+        Action::OpenUrl { .. } => IconName::Globe,
+        Action::Keys { .. } => IconName::CaseSensitive,
+        Action::Media { .. } => IconName::Play,
+        Action::Folder { .. } => IconName::FolderOpen,
+        Action::Back => IconName::ArrowLeft,
+        Action::Profile { .. } => IconName::User,
+        Action::Plugin { .. } => IconName::ChartPie,
+    }
 }
 
 /// What follows the pointer while a palette entry is dragged.

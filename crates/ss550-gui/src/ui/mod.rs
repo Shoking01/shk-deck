@@ -1,13 +1,18 @@
 //! The window's shared visual language: tokens, spacing, type scale, and the
 //! few primitives every page is built from.
 //!
-//! One place owns the palette, so three pages cannot drift apart. The dark
-//! values are the design's fixed palette; the light values are derived from the
-//! active theme, because a window painted with a dark palette in light mode is
-//! an unreadable window. The two colours a key can show are *data* — they are
-//! painted by a key tile and never used for a border, a label or a button.
+//! One place owns the palette, so three pages cannot drift apart — and it owns
+//! no colour of its own. Every token is read out of the active theme, so the
+//! flavour the user chose reaches this crate's chrome and the controls it hosts
+//! from the library in the same pass. A hex written here would be a second
+//! palette, and the two would drift the first time a flavour was added. The two
+//! colours a key can show are *data* — they are painted by a key tile and never
+//! used for a border, a label or a button.
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::theme::Theme;
+use gpui_kit::component::Colorize as _;
+use gpui_kit::component::Icon;
 use gpui_kit::{
     div, px, rgb, AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement as _,
     IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString, Stateful,
@@ -122,38 +127,15 @@ pub(crate) struct Tokens {
 
 impl Tokens {
     /// The palette for the theme in force.
-    pub(crate) fn new(theme: &Theme) -> Self {
-        if theme.mode.is_dark() {
-            Self::dark()
-        } else {
-            Self::light(theme)
-        }
-    }
-
-    /// The design's own palette.
-    fn dark() -> Self {
-        Self {
-            bg: color(0x0b0b0f),
-            surface: color(0x141419),
-            elevated: color(0x1b1b22),
-            border: color(0x26262f),
-            ink: color(0xededf0),
-            soft: color(0xa1a1ad),
-            accent: color(0x7c6cf0),
-            accent_ink: color(0xa99bff),
-            accent_tint: color(0x7c6cf0).opacity(0.16),
-            hover: color(0x1f1f28),
-            good: color(0x22c55e),
-            warn: color(0xf59e0b),
-            bad: color(0xef4444),
-        }
-    }
-
-    /// The same structure on the light theme's own colours.
     ///
-    /// The accent stays the accent; only the text tone steps darker, so it
-    /// still reads as the same brand on white and still clears AA.
-    fn light(theme: &Theme) -> Self {
+    /// Every value comes from the theme, including the accent: a flavour states
+    /// its own, and the two tones this crate derives from it — the accent as
+    /// text, and the accent as a tint — are computed here rather than stored in
+    /// each theme file, so a new flavour cannot forget them.
+    pub(crate) fn new(theme: &Theme) -> Self {
+        let accent = theme.primary;
+        let dark = theme.is_dark();
+
         Self {
             bg: theme.background,
             surface: theme.sidebar,
@@ -161,13 +143,23 @@ impl Tokens {
             border: theme.border,
             ink: theme.foreground,
             soft: theme.muted_foreground,
-            accent: color(0x7c6cf0),
-            accent_ink: color(0x5b4bd6),
-            accent_tint: color(0x7c6cf0).opacity(0.12),
+            accent,
+            // The accent itself is a fill: on a dark bed it reads as a shape, not
+            // as a letter. Text in it steps towards the light on a dark theme and
+            // towards the dark on a light one, which is the direction that keeps
+            // AA contrast without a hand-picked hex per flavour.
+            accent_ink: match dark {
+                true => accent.lighten(0.14),
+                false => accent.darken(0.18),
+            },
+            accent_tint: accent.opacity(match dark {
+                true => 0.16,
+                false => 0.12,
+            }),
             hover: theme.muted,
-            good: color(0x15803d),
-            warn: color(0xb45309),
-            bad: color(0xb91c1c),
+            good: theme.success,
+            warn: theme.warning,
+            bad: theme.danger,
         }
     }
 }
@@ -191,6 +183,33 @@ pub(crate) fn micro_label(text: impl Into<SharedString>, tokens: Tokens) -> Div 
         .text_size(px(FONT_MICRO))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(tokens.soft)
+        .child(text.into())
+}
+
+/// A bundled icon at the size the window draws it.
+///
+/// The colour is always stated: a GPUI icon paints in the window's text colour
+/// unless it is told otherwise, so an icon that inherited its parent's colour
+/// would come out near-white on a card that asked for the secondary ink.
+pub(crate) fn icon(glyph: IconName, size: f32, ink: Hsla) -> Icon {
+    Icon::new(glyph).size(px(size)).text_color(ink)
+}
+
+/// A section label: an icon, then the same micro-caps words.
+///
+/// The icon never replaces the words. It is a landmark for the eye — the same
+/// way a heading rule is — and a reader who cannot see it still has the label
+/// that names the section.
+pub(crate) fn icon_label(glyph: IconName, text: impl Into<SharedString>, tokens: Tokens) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .text_size(px(FONT_MICRO))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(tokens.soft)
+        .child(icon(glyph, FONT_MICRO + 2., tokens.soft))
         .child(text.into())
 }
 
@@ -291,6 +310,22 @@ pub(crate) fn dot(tokens: Tokens, fill: Hsla, size: f32) -> Div {
         .border_color(tokens.border)
 }
 
+/// A flavour's accent, as a filled circle with a hairline round it.
+///
+/// The hairline is what keeps a pale accent from dissolving into a light card
+/// and a dark one from dissolving into a dark one: the circle is a swatch, and a
+/// swatch has an edge.
+pub(crate) fn swatch(tokens: Tokens, accent: u32, size: f32) -> Div {
+    div()
+        .flex_none()
+        .w(px(size))
+        .h(px(size))
+        .rounded(px(RADIUS_PILL))
+        .bg(color(accent))
+        .border_1()
+        .border_color(tokens.ink.opacity(0.18))
+}
+
 /// One option of a small exclusive choice, drawn as a chip.
 ///
 /// The active option is ringed in the accent and tinted, so a two- or
@@ -376,11 +411,38 @@ mod tests {
     }
 
     #[test]
+    fn the_chrome_is_painted_from_the_theme_and_from_nowhere_else() {
+        // The whole point of the flavour work: a palette chosen by the user has
+        // to reach this crate's chrome. A hex kept here would be a second
+        // palette, and the window would keep one flavour while the buttons it
+        // hosts wore another.
+        let mut theme = Theme::default();
+        theme.mode = ThemeMode::Dark;
+        theme.background = color(0x1e1e2e);
+        theme.sidebar = color(0x181825);
+        theme.primary = color(0xcba6f7);
+
+        let tokens = Tokens::new(&theme);
+
+        assert_eq!(tokens.bg, color(0x1e1e2e));
+        assert_eq!(tokens.surface, color(0x181825));
+        assert_eq!(
+            tokens.accent,
+            color(0xcba6f7),
+            "the accent a flavour states is the accent the window draws"
+        );
+    }
+
+    #[test]
     fn the_two_modes_do_not_share_a_background() {
         let mut dark_theme = Theme::default();
         dark_theme.mode = ThemeMode::Dark;
+        dark_theme.background = color(0x1e1e2e);
+        dark_theme.foreground = color(0xcdd6f4);
         let mut light_theme = Theme::default();
         light_theme.mode = ThemeMode::Light;
+        light_theme.background = color(0xeff1f5);
+        light_theme.foreground = color(0x4c4f69);
 
         let dark = Tokens::new(&dark_theme);
         let light = Tokens::new(&light_theme);
@@ -390,11 +452,23 @@ mod tests {
             "light mode must not paint the dark palette"
         );
         assert_ne!(dark.ink, light.ink, "text must follow the theme as well");
-        assert_eq!(
-            dark.bg,
-            super::color(0x0b0b0f),
-            "the dark palette is the design's own, not the theme's default"
-        );
+    }
+
+    #[test]
+    fn the_accent_as_text_steps_away_from_the_bed_it_sits_on() {
+        // The accent is a fill, not a letter. On a dark theme the words in it
+        // have to go lighter to clear AA; on a light theme, darker.
+        let mut dark_theme = Theme::default();
+        dark_theme.mode = ThemeMode::Dark;
+        dark_theme.primary = color(0x7c6cf0);
+        let mut light_theme = dark_theme.clone();
+        light_theme.mode = ThemeMode::Light;
+
+        let dark = Tokens::new(&dark_theme);
+        let light = Tokens::new(&light_theme);
+
+        assert!(dark.accent_ink.l > dark.accent.l);
+        assert!(light.accent_ink.l < light.accent.l);
     }
 
     #[test]
@@ -409,20 +483,12 @@ mod tests {
     fn the_glyph_a_key_receives_is_the_accent_the_window_shows() {
         // The initial of a key is drawn twice — as an element on the tile and as
         // a picture for the deck — and the two have to be the same colour, or a
-        // key would change tone when it is sent.
-        let rgb = crate::icons::GLYPH_ACCENT;
-        let accent = color(u32::from_be_bytes([0, rgb[0], rgb[1], rgb[2]]));
-
-        let mut dark_theme = Theme::default();
-        dark_theme.mode = ThemeMode::Dark;
-        let mut light_theme = Theme::default();
-        light_theme.mode = ThemeMode::Light;
-
-        assert_eq!(Tokens::new(&dark_theme).accent, accent);
+        // key would change tone when it is sent. The picture is painted from the
+        // flavour's own accent, so that is what the cache starts with.
         assert_eq!(
-            Tokens::new(&light_theme).accent,
-            accent,
-            "the accent does not change with the theme"
+            crate::icons::GLYPH_ACCENT,
+            crate::flavour::default().accent_rgb(),
+            "the deck's pictures and the window must start on one accent"
         );
     }
 

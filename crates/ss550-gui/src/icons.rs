@@ -70,11 +70,14 @@ const GLYPH_SIDE: u32 = 32;
 /// and a megabyte of accent colour helps nobody.
 const GLYPH_MAX_SIDE: u32 = 512;
 
-/// The accent a glyph is drawn on, as the image encoder sees it.
+/// The accent a glyph is drawn on before a flavour states its own, as the image
+/// encoder sees it.
 ///
-/// It mirrors the window's own accent, because the tile and the deck show the
-/// same picture; the palette itself lives in [`crate::ui`], and the test there
-/// pins the two together.
+/// It is the design's own violet, and it mirrors the window's accent because the
+/// tile and the deck show the same picture: [`crate::palette`] states the accent
+/// each flavour paints with, and the test in [`crate::ui`] pins this default to
+/// the default flavour. A running window replaces it through
+/// [`IconCache::accent`] the moment the user picks another one.
 pub(crate) const GLYPH_ACCENT: [u8; 3] = [0x7c, 0x6c, 0xf0];
 
 /// The ink a glyph's initial is drawn in.
@@ -163,6 +166,12 @@ pub(crate) struct IconCache {
     /// One entry per initial, so two keys that start with the same letter share
     /// a picture instead of encoding it twice.
     glyphs: BTreeMap<char, BaseArt>,
+    /// The accent the initials are drawn on.
+    ///
+    /// A flavour states it, and the deck must not disagree with the window: a
+    /// key whose initial was painted in the old accent would keep it on the
+    /// hardware long after the window changed. Changing it drops every glyph.
+    accent: [u8; 3],
     /// One entry per (picture, words, style): the base picture with the words
     /// drawn into it, encoded for this deck.
     ///
@@ -182,7 +191,22 @@ impl IconCache {
             sites: BTreeMap::new(),
             pending: BTreeSet::new(),
             glyphs: BTreeMap::new(),
+            accent: GLYPH_ACCENT,
             titled: BTreeMap::new(),
+        }
+    }
+
+    /// States the accent the initials are drawn on.
+    ///
+    /// Called on every rebuild with the accent the window is currently painting
+    /// with. A different accent is a different picture, so every cached initial
+    /// is dropped; the rebuild that follows draws them again in the new colour,
+    /// and the deck is repainted from the same cache.
+    pub(crate) fn accent(&mut self, accent: [u8; 3]) {
+        if accent != self.accent {
+            self.accent = accent;
+            self.glyphs.clear();
+            self.titled.clear();
         }
     }
 
@@ -291,7 +315,7 @@ impl IconCache {
             if self.glyphs.contains_key(&letter) {
                 continue;
             }
-            let art = build_glyph(self.spec, letter);
+            let art = build_glyph(self.spec, letter, self.accent);
             self.glyphs.insert(letter, art);
         }
 
@@ -833,19 +857,19 @@ fn opaque(picture: &image::RgbImage) -> RgbaImage {
 }
 
 /// The initial of what a key runs, drawn on the accent colour.
-fn build_glyph(spec: Option<ImageSpec>, letter: char) -> BaseArt {
+fn build_glyph(spec: Option<ImageSpec>, letter: char, accent: [u8; 3]) -> BaseArt {
     let side = spec
         .map_or(GLYPH_SIDE, |spec| {
             u32::from(spec.width().max(spec.height())).max(1)
         })
         .min(GLYPH_MAX_SIDE);
-    let picture = glyph_image(letter, side);
+    let picture = glyph_image(letter, side, accent);
     base_art(spec, picture, "glyph")
 }
 
 /// One initial, centred on a square of accent colour.
-fn glyph_image(letter: char, side: u32) -> RgbaImage {
-    let accent = Rgba([GLYPH_ACCENT[0], GLYPH_ACCENT[1], GLYPH_ACCENT[2], 0xff]);
+fn glyph_image(letter: char, side: u32, accent: [u8; 3]) -> RgbaImage {
+    let accent = Rgba([accent[0], accent[1], accent[2], 0xff]);
     let mut picture = RgbaImage::from_pixel(side, side, accent);
 
     // The bitmap is five dots wide and seven tall, so the scale follows the
@@ -1096,9 +1120,40 @@ mod tests {
     }
 
     #[test]
+    fn a_new_accent_is_a_new_picture_for_every_initial() {
+        // The deck keeps what it was painted with, so an accent that reached
+        // only the window would leave the two showing different violets until
+        // something else forced a repaint. The cache drops its initials instead.
+        let mut cache = super::IconCache::new();
+        // A combination has no icon to read, so the key is drawn as its initial —
+        // which is the picture the accent is painted into.
+        let action = Action::keys("ctrl+m").expect("a valid combination");
+        let faces = [face(&action)];
+        let spec = deck_api::ImageSpec::new(32, 32, 4_096, deck_api::ImageFormat::Jpeg);
+
+        cache.prepare(Some(spec), &faces, None, None);
+        let before = cache
+            .tile(&action, None, &TitleStyle::default())
+            .expect("a glyph for a key with no icon")
+            .to_vec();
+
+        cache.accent([0xcb, 0xa6, 0xf7]);
+        cache.prepare(Some(spec), &faces, None, None);
+        let after = cache
+            .tile(&action, None, &TitleStyle::default())
+            .expect("a glyph drawn again in the new accent")
+            .to_vec();
+
+        assert_ne!(
+            before, after,
+            "the deck must be repainted in the new accent"
+        );
+    }
+
+    #[test]
     fn a_glyph_is_drawn_on_the_accent_and_centred() {
         let side = 32;
-        let picture = glyph_image('M', side);
+        let picture = glyph_image('M', side, GLYPH_ACCENT);
 
         assert_eq!(picture.dimensions(), (side, side));
         // The corners are the accent the deck receives.
@@ -1129,7 +1184,7 @@ mod tests {
     fn a_glyph_keeps_its_shape_on_a_decks_own_tile() {
         // The deck states a larger tile; the initial is drawn at that size so
         // it is not a scaled-up thumbnail.
-        let picture = glyph_image('A', 96);
+        let picture = glyph_image('A', 96, GLYPH_ACCENT);
         assert_eq!(picture.dimensions(), (96, 96));
         let corner = picture.get_pixel(0, 0).0;
         assert_eq!([corner[0], corner[1], corner[2]], GLYPH_ACCENT);
@@ -1207,7 +1262,7 @@ mod tests {
     fn a_title_that_is_only_spaces_is_no_title_at_all() {
         // Nothing is drawn, so nothing is darkened and no encoder pass is paid
         // for: a cleared title answers the picture it was given.
-        let base = glyph_image('O', 72);
+        let base = glyph_image('O', 72, GLYPH_ACCENT);
         for empty in ["", "   ", "\t"] {
             let composed = compose_title(&base, empty, &TitleStyle::default(), &mut engine());
             assert_eq!(composed, base, "{empty:?} changed the picture");

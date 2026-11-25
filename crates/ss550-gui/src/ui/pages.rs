@@ -16,8 +16,9 @@ use gpui_kit::{
     Styled as _,
 };
 
-use super::{card, micro_label, muted, one_line, Tokens, FONT_CAPTION, FONT_MICRO, RADIUS_SM};
+use super::{card, icon_label, muted, one_line, Tokens, FONT_CAPTION, FONT_MICRO, RADIUS_SM};
 use crate::Controller;
+use gpui_kit::assets::IconName;
 
 /// Which page row a button belongs to.
 ///
@@ -109,7 +110,7 @@ pub(crate) fn pages_card(
 
     let mut sheet = card(tokens)
         .w_full()
-        .child(micro_label("PAGES", tokens))
+        .child(icon_label(IconName::BookOpen, "PAGES", tokens))
         .child(muted(
             "A page is a folder: its own keys, its own colours. A navigation key swaps the \
              deck to it and another swaps it back. Every profile starts on the top page, so a \
@@ -132,6 +133,7 @@ pub(crate) fn pages_card(
                 .child(
                     Button::new("add-page")
                         .primary()
+                        .icon(IconName::Plus)
                         .label("ADD PAGE")
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.add_page(window, cx);
@@ -170,6 +172,7 @@ fn row(
     let mut actions = div().flex().flex_row().items_center().gap(px(4.)).child(
         Button::new(SharedString::from(format!("page-show-{label}")))
             .ghost()
+            .icon(IconName::ArrowRight)
             .label("OPEN")
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 match &shown {
@@ -187,6 +190,7 @@ fn row(
         actions = actions.child(
             Button::new(SharedString::from(format!("page-rename-{label}")))
                 .ghost()
+                .icon(IconName::Replace)
                 .label("RENAME")
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.rename_page(&renamed, window, cx);
@@ -197,6 +201,7 @@ fn row(
         actions = actions.child(
             Button::new(SharedString::from(format!("page-bind-{label}")))
                 .ghost()
+                .icon(IconName::CaseSensitive)
                 .label("BIND")
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.bind_selected_to_page(&bound, cx);
@@ -207,6 +212,7 @@ fn row(
         actions = actions.child(
             Button::new(SharedString::from(format!("page-remove-{label}")))
                 .ghost()
+                .icon(IconName::Close)
                 .label("X")
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.remove_page(&removed, cx);
