@@ -28,18 +28,24 @@
 //! a machine without RTSS simply has no frame counter, and the key that shows one
 //! says so instead of freezing on a stale number.
 
+#[cfg(windows)]
 use windows::core::PCWSTR;
+#[cfg(windows)]
 use windows::Win32::Foundation::CloseHandle;
+#[cfg(windows)]
 use windows::Win32::System::Memory::{
     MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_READ,
 };
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 /// The name RTSS gives its shared memory.
+#[cfg(windows)]
 const MAPPING: &str = "RTSSSharedMemoryV2";
 
 /// `'RTSS'` as the block spells it: the four bytes `R`, `T`, `S`, `S` read as one
 /// little-endian word.
+#[cfg(windows)]
 const SIGNATURE: u32 = 0x5254_5353;
 
 /// One application RTSS is counting frames for.
@@ -94,6 +100,7 @@ impl FrameCounter {
 ///
 /// This is what decides *whose* frames a key shows: the game the user is looking
 /// at, not every process RTSS happens to track.
+#[cfg(windows)]
 pub fn foreground_process() -> Option<u32> {
     // SAFETY: both calls take and return plain handles and out-parameters; a null
     // window (nothing in the foreground) is checked before the id is used.
@@ -107,7 +114,18 @@ pub fn foreground_process() -> Option<u32> {
     (thread != 0 && pid != 0).then_some(pid)
 }
 
+/// The process id of the window in the foreground, when there is one.
+///
+/// RTSS is a Windows program and this build reads nothing else, so on any other
+/// platform there is no frame counter to attribute and the answer is `None`
+/// rather than an owner invented from a window manager that has no RTSS.
+#[cfg(not(windows))]
+pub fn foreground_process() -> Option<u32> {
+    None
+}
+
 /// Every application RTSS is counting, or nothing when it is not running.
+#[cfg(windows)]
 pub fn frame_counters() -> Vec<FrameCounter> {
     let name = wide(MAPPING);
     // SAFETY: the string is nul-terminated, and the handle is closed below on
@@ -137,10 +155,20 @@ pub fn frame_counters() -> Vec<FrameCounter> {
     counters
 }
 
+/// Every application RTSS is counting, or nothing when it is not running.
+///
+/// RTSS is a Windows program: elsewhere the mapping does not exist, which is the
+/// same answer a Windows machine without RTSS gets.
+#[cfg(not(windows))]
+pub fn frame_counters() -> Vec<FrameCounter> {
+    Vec::new()
+}
+
 /// The entries of a mapped RTSS block, read through the header's own layout.
 ///
 /// The header states where the entries start, how large each one is and how many
 /// there are, so this never assumes a version: it walks what the block declares.
+#[cfg(windows)]
 fn read_entries(base: *const u8) -> Vec<FrameCounter> {
     // SAFETY: the block's first nine words are the header RTSS writes; each read
     // is unaligned because a mapping carries no alignment promise.
@@ -188,12 +216,14 @@ fn read_entries(base: *const u8) -> Vec<FrameCounter> {
 /// # Safety
 ///
 /// `base` must point at a mapped block, and `offset` must stay inside it.
+#[cfg(windows)]
 unsafe fn u32_at(base: *const u8, offset: usize) -> u32 {
     // SAFETY: the caller promises the offset is inside the mapping.
     unsafe { std::ptr::read_unaligned(base.add(offset).cast::<u32>()) }
 }
 
 /// The application's name: a nul-terminated ASCII string in a fixed field.
+#[cfg(windows)]
 fn read_name(base: *const u8, at: usize) -> String {
     let mut name = String::new();
     for offset in 0..260 {
@@ -209,6 +239,7 @@ fn read_name(base: *const u8, at: usize) -> String {
 }
 
 /// A string as the wide, nul-terminated form the Win32 calls take.
+#[cfg(windows)]
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
