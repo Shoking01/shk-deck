@@ -7,6 +7,18 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Decided against — a Discord voice key
+A key that mutes the microphone *and* shows whether it is muted cannot be built
+against Discord's API. Measured on a real client: the `rpc.local` commands
+(`SET_VOICE_SETTINGS_2`, the `VOICE_SETTINGS_UPDATE_2` event) are an
+application-private sandbox that neither mutes the client nor reports it, and
+the real commands need `rpc.voice.read`/`rpc.voice.write`, which `AUTHORIZE`
+refuses with `5000 invalid_scope` for an application without partner approval.
+The supported way to mute from a key is a `Keys` action sending Discord's own
+global bind (`ctrl+shift+m`, `ctrl+shift+d`), which works and cannot show the
+state. `crates/ss550-discord` keeps the pipe and three probes as the record; it
+ships nothing. `docs/actions.md` states the finding.
+
 ### Added — an FPS key, from the counter RTSS already keeps
 - A fourth plugin, **`FPS`**, shows how fast the application **in the foreground**
   is drawing. The number comes from RivaTuner Statistics Server's shared memory

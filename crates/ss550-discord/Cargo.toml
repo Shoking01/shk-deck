@@ -1,0 +1,26 @@
+[package]
+name = "ss550-discord"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "The Discord client's local pipe, kept as the record of what it will not do for this app"
+license = "MIT OR Apache-2.0"
+
+# Nothing in this crate is part of the shipped controller. It exists because the
+# local pipe is real — it opens, it frames, it handshakes — and because the two
+# probes beside it answer, in a minute, questions that otherwise cost an evening
+# of building on a wrong assumption. Read the crate docs before using any of it.
+
+[dependencies]
+# The configuration folder is the app's, and it is stated once: the probes read
+# their Application ID from the same place the window would.
+ss550-engine = { path = "../ss550-engine" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
+[dev-dependencies]
+tempfile = "3.10"
+# Only `voice_oauth` needs it: the one request that leaves this machine is the
+# code-for-token exchange, and Discord's endpoint takes form-encoded bodies only.
+ureq = "2"
