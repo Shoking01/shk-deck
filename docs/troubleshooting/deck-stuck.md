@@ -474,8 +474,12 @@ halves are fixed, and the property is pinned by an integration test that goes
 silently swallows the call.
 
 Verify it by the log, not by the code: `heartbeat: N writes in the last 300s`
-reads about 133 in five minutes once the deck is fed, and an idle session shows
-no `0x48F` at all.
+reads about 133 in five minutes once the deck is fed. Before the fix the same
+line read 65–78 — the writes a paint happened to make — and every session ended
+in a `0x48F` within minutes. After it, the first session ran nineteen minutes
+with **one** drop, which reconnected on its own in fifteen seconds. That drop is
+not explained yet: it happened with the heartbeat writing every two seconds, so
+it is not the idle reset this section is about.
 
 ### 5.3 `connect()` verified against a real boot
 
