@@ -47,11 +47,13 @@
 
 mod deck;
 mod error;
+mod heartbeat;
 mod transport;
 mod types;
 
 pub use deck::{Deck, DeckHandle};
 pub use error::{DeckError, DeckOperation, TransportError};
+pub use heartbeat::HeartbeatState;
 pub use transport::Transport;
 pub use types::{
     ButtonState, Capabilities, Geometry, ImageFormat, ImageSpec, KeyEvent, KeyId, VALUE_MAX,

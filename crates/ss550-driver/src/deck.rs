@@ -317,6 +317,12 @@ impl Deck for Ss550Deck {
             .map_err(|error| seam_error(DeckOperation::KeepAlive, error))
     }
 
+    fn heartbeat_state(&self) -> deck_api::HeartbeatState {
+        // The same policy the write itself consults, so the answer a caller
+        // logs cannot drift from what `keep_alive` actually does.
+        self.device.heartbeat_state()
+    }
+
     /// One `CRT|DIS` that must complete, before any image is offered.
     fn preflight(&mut self) -> Result<(), DeckError> {
         self.device
