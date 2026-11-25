@@ -26,10 +26,13 @@ libloading = "0.8"
 # What the machine is *playing* is WinRT — `GlobalSystemMediaTransportControls-
 # SessionManager` — and every call in it is `unsafe`. This crate is where the
 # project keeps that, so the plugin that shows a track asks a safe question here
-# instead of reaching for WinRT itself.
+# instead of reaching for WinRT itself. The frame counter reads RTSS's shared
+# memory, which is a mapped file: the same kind of platform call.
 windows = { version = "0.62", features = [
     "Media_Control",
     "Storage_Streams",
     "Win32_Foundation",
     "Win32_System_Com",
+    "Win32_System_Memory",
+    "Win32_UI_WindowsAndMessaging",
 ] }

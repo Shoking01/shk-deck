@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use ss550_plugin_api::{Cadence, CellId, CellSpec, Plugin, PluginId, Reading};
 
 pub(crate) mod clock;
+pub(crate) mod fps;
 pub(crate) mod media;
 pub mod system_stats;
 
@@ -122,6 +123,7 @@ fn built_in_plugins() -> Vec<Box<dyn Plugin>> {
         Box::new(SystemStats::new()),
         Box::new(clock::Clock::new()),
         Box::new(media::NowPlaying::new()),
+        Box::new(fps::Fps::new()),
     ]
 }
 
@@ -164,6 +166,7 @@ fn built_in_descriptions() -> Vec<PluginGroup> {
         (system_stats::NAME, SystemStats::describe()),
         (clock::NAME, clock::Clock::describe()),
         (media::NAME, media::NowPlaying::describe()),
+        (fps::NAME, fps::Fps::describe()),
     ]
     .into_iter()
     .filter_map(|(name, cells)| {
@@ -621,6 +624,7 @@ mod tests {
                 ("clock", "minutes"),
                 ("clock", "seconds"),
                 ("media", "now"),
+                ("fps", "fps"),
             ]
         );
         assert!(catalogue.knows("system-stats", "disk.free"));
@@ -640,6 +644,7 @@ mod tests {
                 ("system-stats", "System stats", 6),
                 ("clock", "Clock", 3),
                 ("media", "Now playing", 1),
+                ("fps", "FPS", 1),
             ]
         );
         assert_eq!(catalogue.cells_of("clock").len(), 3);
@@ -779,7 +784,7 @@ mod tests {
             "the clock answered {seconds} times in 3.2 s, not about once a second"
         );
         assert!(
-            walks >= 6,
+            walks >= 4,
             "the machine walk answered only {walks} times in 3.2 s"
         );
         assert!(

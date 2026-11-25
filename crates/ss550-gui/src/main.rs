@@ -3984,6 +3984,13 @@ impl Controller {
             // words on that key, so the FONT control under TITLE works on a gauge
             // and on a clock's number the same way it works on a title.
             family: self.style_for(key).family,
+            // The key's own words, if it has any: `FPS` over the number is a
+            // title like any other, and the clock keeps none.
+            title: self
+                .current_keys()
+                .and_then(|keys| keys.title(key))
+                .map(str::to_string)
+                .filter(|title| !title.trim().is_empty()),
             image,
         };
         if self.faces.submit(job) {
