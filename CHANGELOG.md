@@ -7,7 +7,25 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
-### Decided against — a Discord voice key
+### Fixed - the deck stayed black after a reconnect that had succeeded
+
+A deck that came back healthy and connected could still show nothing: the
+active profile named pictures the library no longer held, and key 1 - the
+first key the paint loop touched - failed to read its file. The loop aborted
+on the first picture failure, so no key was painted at all, and the connect
+note then replaced the error, leaving `Connected - profile 'Gaming' active.`
+over fifteen dark keys. The log held the proof: pure heartbeat writes
+(135-136 per 300 s) and no image bursts, while `hardware_gate` painted in
+0 ms.
+
+A picture the library no longer holds is now a per-key miss: `paint_page`
+records the key and its reason, paints every other key, and stops only for a
+session failure. The connect, profile-switch and page notes join the miss
+list instead of replacing it - `Could not be painted: key 1: the library
+holds no asset named "..."` - pinned by tests that go through the session
+seam with a recording deck.
+
+### Decided against - a Discord voice key
 A key that mutes the microphone *and* shows whether it is muted cannot be built
 against Discord's API. Measured on a real client: the `rpc.local` commands
 (`SET_VOICE_SETTINGS_2`, the `VOICE_SETTINGS_UPDATE_2` event) are an

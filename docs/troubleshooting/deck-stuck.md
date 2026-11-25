@@ -187,6 +187,36 @@ Two things worth knowing before you conclude anything:
   measure with a hand-run probe; let `--wait-hotplug` watch, or let the app's
   own retry catch the settled device.
 
+### 1.2 When the deck is back but the keys stay black
+
+A third state looks like a dead deck and is not: the app **connects**, the log
+counts heartbeats (`heartbeat: N writes in the last 300s`), and a gate probe
+paints in `0 ms` — yet every key on the glass stays black.
+
+Measured on 2026-11-25 (09:19 local): the active profile named pictures the
+library no longer held (`002-ARROWS_direction-back.jpg`,
+`002-ARROWS_direction-forward.jpg`, the Spotify page), and key 1 — the first
+key the paint loop touches — failed to read its file. The loop aborted on the
+first picture failure, so **no key was painted at all**, and the connect note
+then replaced the error, leaving the status line saying only
+`Connected — profile 'Gaming' active.` The heartbeat log told the truth: pure
+`DIS` writes (135-136 per 300 s), no image bursts.
+
+Both halves are fixed (`crates/ss550-gui/src/main.rs`, `paint_page`):
+
+- a picture the library no longer holds is a **per-key miss**, recorded and
+  skipped; the page paints every other key, and only a session failure stops
+  it;
+- the connect, profile-switch and page notes **join** the miss list instead of
+  replacing it, so the status line reads
+  `Connected — profile 'Gaming' active. Could not be painted: key 1: the
+  library holds no asset named "002-ARROWS_direction-back.jpg"…`.
+
+Diagnosis order for this state: read the log for `heartbeat: N writes` (the
+link is alive), run `hardware_gate` (the transport is alive), then read the
+status line — it names the keys and the files. Re-import the named pictures
+from the key's PICTURE picker, or clear them from the profile.
+
 ---
 
 ## 2. Rule out the cheap traps first
@@ -617,3 +647,7 @@ These are requirements, not suggestions:
    and the reset kills the handle. Call `Device::keepalive` once per main-loop
    frame; it is throttled internally to 2 s and never fires during an upload. An
    idle app that skips this will watch the deck die for no visible reason.
+9. **A missing picture is a per-key failure, never a page failure.** One
+   deleted file must not leave every key dark: the paint loop records the key,
+   keeps going, and the sentence that names it is joined to the connect note,
+   never replaced by it (`paint_page`, pinned by tests over a recording deck).
