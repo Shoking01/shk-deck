@@ -4,7 +4,7 @@ use crate::error::Ss550Error;
 use crate::hid_transport::HidTransport;
 use crate::image::ButtonImage;
 use crate::keys::{self, Key};
-use deck_api::Transport;
+use deck_api::{HeartbeatState, Transport};
 use hidapi::{HidApi, HidDevice};
 use ss550_protocol::{
     build_bat, build_cle_all, build_cle_key, build_dis, build_image_chunks, build_lig, build_sleep,
@@ -77,18 +77,27 @@ pub fn ensure_verified(command: Command) -> Result<(), Ss550Error> {
 /// 1025-byte report — negligible next to an image upload.
 pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Decides whether [`Device::keepalive`] must write now.
+/// What the next [`Device::keepalive`] would do, and why.
 ///
 /// Split out as a pure function so the policy is unit-testable without a
 /// device. A heartbeat never fires while an image is queued, because a `DIS`
 /// landing inside a `BAT` → chunk → `STP` transfer would corrupt it.
-fn heartbeat_due(
+fn heartbeat_state_of(
     initialized: bool,
     has_pending_images: bool,
     since_last_write: Duration,
     interval: Duration,
-) -> bool {
-    initialized && !has_pending_images && since_last_write >= interval
+) -> HeartbeatState {
+    if !initialized {
+        return HeartbeatState::Asleep;
+    }
+    if has_pending_images {
+        return HeartbeatState::ImagePending;
+    }
+    if since_last_write < interval {
+        return HeartbeatState::RecentWrite;
+    }
+    HeartbeatState::Due
 }
 
 /// How long the deck must be **continuously** present before its boot is
@@ -549,6 +558,21 @@ impl Device {
         Ok(())
     }
 
+    /// Reports what the next [`Device::keepalive`] would do, and why.
+    ///
+    /// `keepalive` answers `Ok` whether it wrote a report or declined to. A
+    /// caller watching a deck that resets itself cannot tell those apart from
+    /// the result alone, and the failure that matters — a heartbeat that stopped
+    /// being sent — leaves no other trace. This is the answer it can log.
+    pub fn heartbeat_state(&self) -> HeartbeatState {
+        heartbeat_state_of(
+            self.initialized,
+            !self.pending_images.is_empty(),
+            self.last_write.elapsed(),
+            self.heartbeat_interval,
+        )
+    }
+
     /// Sends a heartbeat if the driver has been silent for too long.
     ///
     /// **The deck resets itself when the host stops writing to it.** Measured:
@@ -567,13 +591,7 @@ impl Device {
     /// It does nothing before [`Device::initialize`]: a sleeping deck is
     /// supposed to be idle.
     pub fn keepalive(&mut self) -> Result<(), Ss550Error> {
-        let due = heartbeat_due(
-            self.initialized,
-            !self.pending_images.is_empty(),
-            self.last_write.elapsed(),
-            self.heartbeat_interval,
-        );
-        if !due {
+        if self.heartbeat_state() != HeartbeatState::Due {
             return Ok(());
         }
 
@@ -1054,12 +1072,10 @@ mod tests {
     #[test]
     fn heartbeat_is_silent_until_the_interval_elapses() {
         let interval = Duration::from_secs(2);
-        assert!(!heartbeat_due(
-            true,
-            false,
-            Duration::from_millis(1999),
-            interval
-        ));
+        assert_eq!(
+            heartbeat_state_of(true, false, Duration::from_millis(1999), interval),
+            HeartbeatState::RecentWrite
+        );
     }
 
     #[test]
@@ -1067,42 +1083,64 @@ mod tests {
         // Boundary: the deck must never be left silent for a full interval
         // without a report, so `>=` is deliberate, not incidental.
         let interval = Duration::from_secs(2);
-        assert!(heartbeat_due(true, false, interval, interval));
-        assert!(heartbeat_due(
-            true,
-            false,
-            Duration::from_secs(60),
-            interval
-        ));
+        assert_eq!(
+            heartbeat_state_of(true, false, interval, interval),
+            HeartbeatState::Due
+        );
+        assert_eq!(
+            heartbeat_state_of(true, false, Duration::from_secs(60), interval),
+            HeartbeatState::Due
+        );
     }
 
     #[test]
-    fn heartbeat_does_nothing_before_initialize() {
+    fn heartbeat_reports_asleep_before_initialize() {
         // A sleeping deck is meant to be idle; waking it with DIS would defeat
-        // `Device::sleep`.
-        assert!(!heartbeat_due(
-            false,
-            false,
-            Duration::from_secs(3600),
-            Duration::from_secs(2)
-        ));
+        // `Device::sleep`. The state has to say *why* it wrote nothing: this is
+        // the answer that used to be a silent `Ok`.
+        assert_eq!(
+            heartbeat_state_of(
+                false,
+                false,
+                Duration::from_secs(3600),
+                Duration::from_secs(2)
+            ),
+            HeartbeatState::Asleep
+        );
     }
 
     #[test]
-    fn heartbeat_never_interrupts_a_queued_upload() {
+    fn heartbeat_reports_a_queued_upload_instead_of_writing() {
         // A DIS between BAT and its chunks would corrupt the image transfer.
-        assert!(!heartbeat_due(
-            true,
-            true,
-            Duration::from_secs(3600),
-            Duration::from_secs(2)
-        ));
+        assert_eq!(
+            heartbeat_state_of(
+                true,
+                true,
+                Duration::from_secs(3600),
+                Duration::from_secs(2)
+            ),
+            HeartbeatState::ImagePending
+        );
     }
 
     #[test]
     fn zero_interval_means_every_call_heartbeats() {
         // Documented escape hatch for callers that drive the clock themselves.
-        assert!(heartbeat_due(true, false, Duration::ZERO, Duration::ZERO));
+        assert_eq!(
+            heartbeat_state_of(true, false, Duration::ZERO, Duration::ZERO),
+            HeartbeatState::Due
+        );
+    }
+
+    #[test]
+    fn every_state_that_writes_nothing_is_named_as_blocked() {
+        // The caller logs `is_blocked()`; a state that silently stops the
+        // heartbeat must never be reported as healthy.
+        assert!(!HeartbeatState::Due.is_blocked());
+        assert!(!HeartbeatState::RecentWrite.is_blocked());
+        assert!(HeartbeatState::Asleep.is_blocked());
+        assert!(HeartbeatState::ImagePending.is_blocked());
+        assert!(HeartbeatState::Unreported.is_blocked());
     }
 
     #[test]

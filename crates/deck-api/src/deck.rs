@@ -76,6 +76,20 @@ pub trait Deck {
         })
     }
 
+    /// Reports what the next [`Deck::keep_alive`] would do, and why.
+    ///
+    /// `keep_alive` answers `Ok` whether it wrote a report or declined to, and
+    /// a caller watching a deck that resets itself cannot tell those apart. That
+    /// is the gap this closes: a heartbeat that stops being sent — because the
+    /// deck was never woken, or because an upload is queued — is exactly the
+    /// failure that leaves no trace in a log.
+    ///
+    /// The default answers [`HeartbeatState::Unreported`](crate::HeartbeatState):
+    /// a deck that cannot say is not pretending to be healthy.
+    fn heartbeat_state(&self) -> crate::HeartbeatState {
+        crate::HeartbeatState::Unreported
+    }
+
     /// Proves the transport accepts one write, before a paint session starts.
     ///
     /// The runbook's sixth rule: a deck that **reads** fine and refuses a single
@@ -178,6 +192,10 @@ impl Deck for DeckHandle {
 
     fn keep_alive(&mut self) -> Result<(), DeckError> {
         self.inner.keep_alive()
+    }
+
+    fn heartbeat_state(&self) -> crate::HeartbeatState {
+        self.inner.heartbeat_state()
     }
 
     fn set_dial(&mut self, dial: u8, value: u8) -> Result<(), DeckError> {

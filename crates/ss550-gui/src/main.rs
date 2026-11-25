@@ -576,6 +576,13 @@ const POLL: Duration = Duration::from_millis(50);
 /// How often connection results, retries and the heartbeat are handled.
 const TICK: Duration = Duration::from_millis(500);
 
+/// How often a working heartbeat says so in the log.
+///
+/// A heartbeat that stops is reported at once, on the transition; this is only
+/// the proof-of-life line, so it is rare enough to read past and frequent enough
+/// that a session left overnight has a witness.
+const HEARTBEAT_REPORT: Duration = Duration::from_secs(300);
+
 /// How many frames the window records before it only records slow ones.
 ///
 /// The first frames are what startup costs, and they are worth a line each.
@@ -748,6 +755,16 @@ struct Controller {
     attempts: u32,
     /// When the connection and heartbeat work last ran.
     last_tick: Instant,
+    /// The last state that stopped the heartbeat, while it is stopped.
+    ///
+    /// The transition is what gets logged, not the state: the heartbeat runs
+    /// twice a second, and a blocked one would otherwise write 172,000 lines a
+    /// day saying the same thing.
+    heartbeat_blocked: Option<deck_api::HeartbeatState>,
+    /// Heartbeats that wrote a report since the last proof-of-life line.
+    heartbeat_writes: u32,
+    /// When the last proof-of-life line was written.
+    heartbeat_reported_at: Instant,
     /// When the current connection was adopted, while there is one.
     ///
     /// What decides whether a disconnect starts the backoff over: a deck that
@@ -1267,6 +1284,9 @@ impl Controller {
             pending: false,
             attempts: 0,
             last_tick: Instant::now(),
+            heartbeat_blocked: None,
+            heartbeat_writes: 0,
+            heartbeat_reported_at: Instant::now(),
             connected_at: None,
             reconnect_at: Instant::now(),
             store,
@@ -2370,12 +2390,54 @@ impl Controller {
     /// A deck that never resets is not asked: the capability decides, so the
     /// heartbeat is not a call the window makes and then has to explain away.
     fn heartbeat(&mut self) {
-        let result = match self.session.as_mut() {
-            Some(session) if session.capabilities().keep_alive() => session.keep_alive(),
-            _ => return,
+        let Some(session) = self.session.as_mut() else {
+            return;
         };
+        if !session.capabilities().keep_alive() {
+            return;
+        }
+        // Read before the write: afterwards the deck is `RecentWrite` by
+        // definition, and the reason it did or did not write is gone. That
+        // reason is the whole point — `keep_alive` answers `Ok` either way.
+        let state = session.heartbeat_state();
+        let wrote = state == deck_api::HeartbeatState::Due;
+        let result = session.keep_alive();
         if let Err(error) = result {
             self.report_deck(error);
+            return;
+        }
+        self.note_heartbeat(state, wrote);
+    }
+
+    /// Puts the heartbeat in the log: a transition into a state that stops it,
+    /// or one proof-of-life line every [`HEARTBEAT_REPORT`].
+    ///
+    /// A heartbeat that stops writing is the failure that leaves no trace. The
+    /// deck goes quiet, resets itself, and the log's first word on the subject
+    /// is a failed read — the symptom, hours after the cause. This line is the
+    /// cause.
+    fn note_heartbeat(&mut self, state: deck_api::HeartbeatState, wrote: bool) {
+        if wrote {
+            self.heartbeat_writes += 1;
+        }
+        if state.is_blocked() {
+            if self.heartbeat_blocked != Some(state) {
+                self.heartbeat_blocked = Some(state);
+                diagnostics::record(&format!("heartbeat not writing: {state:?}"));
+            }
+            return;
+        }
+        if self.heartbeat_blocked.take().is_some() {
+            diagnostics::record("heartbeat writing again");
+        }
+        if self.heartbeat_reported_at.elapsed() >= HEARTBEAT_REPORT {
+            diagnostics::record(&format!(
+                "heartbeat: {} writes in the last {}s",
+                self.heartbeat_writes,
+                HEARTBEAT_REPORT.as_secs()
+            ));
+            self.heartbeat_writes = 0;
+            self.heartbeat_reported_at = Instant::now();
         }
     }
 
