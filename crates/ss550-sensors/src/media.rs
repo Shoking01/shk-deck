@@ -74,6 +74,11 @@ pub struct NowPlaying {
 /// full-resolution cover can be a megabyte. Above this the key shows words: the
 /// picture would be resized to 112 pixels anyway, and the sample travels on a
 /// channel the window has to drain.
+///
+/// Windows-only, like the reader that enforces it: without `read_cover` there is
+/// no stream to bound, and an ungated constant would be dead code that `-D
+/// warnings` refuses.
+#[cfg(windows)]
 const MAX_ART: u64 = 2 * 1024 * 1024;
 
 /// The current media session's title and artist, when there is one.
@@ -132,6 +137,11 @@ pub fn now_playing() -> Option<NowPlaying> {
 }
 
 /// The bytes of one cover-art stream, when it is small enough to carry.
+///
+/// Windows-only, like the session it reads from: on any other platform this
+/// function does not exist, which is why the `windows` crate is a target-gated
+/// dependency and every other use in this file carries the same attribute.
+#[cfg(windows)]
 fn read_cover(
     reference: &windows::Storage::Streams::IRandomAccessStreamReference,
 ) -> Option<Vec<u8>> {
