@@ -134,6 +134,52 @@ no setter for it in `hidapi` 2.6.7.
 A 10 s hand-rolled `WriteFile` (`examples/raw_write.rs`) is the way to prove it
 is not a timeout problem: it reports `completed=0` and `WaitForSingleObject=258`.
 
+### 1.1 When the deck is not on the bus at all
+
+A second state exists that looks like the first from the app and is not: the
+deck **leaves the bus and does not come back**. The app reports
+`Device not found with VID 0x0200 PID 0x3000` on every attempt, for as long as
+it is left running, and no probe that filters on `VID_0200` can see anything.
+
+Measured on 2026-11-24 (local time; the app log is UTC):
+
+```text
+19:16:46  connected: 15 keys - 5 columns - 112x112 images
+19:52:46  disconnected: hid_read_timeout/GetOverlappedResult 0x48F
+          -> then "Device not found" every attempt for 61 minutes
+20:53:1x  reappears; the settle window is interrupted inside 10 s (one flicker)
+20:54:07  the app reconnects on its own
+```
+
+What distinguishes it from the failures above:
+
+| Check | This state | The halted-endpoint state |
+|---|---|---|
+| `Get-PnpDevice -PresentOnly` for `VID_0200` | **zero nodes** | present and `OK` |
+| `USB\VID_0000&PID_0002` (Code 43, §5.0) | **absent** | may be present |
+| `test_write_path` | cannot open anything | `0x1F` or `0xE5` |
+| Absence | tens of minutes | 4-5 s (§5.1) |
+
+So: no electrical enumeration at all, not a halted endpoint and not a stale
+handle. A device whose endpoint is halted still enumerates. **Nothing
+auto-recovers this** — the app retried for 61 minutes without success.
+
+The only recovery that has worked is the §3 cycle: unplug at the deck end for a
+full 60 s, reconnect on a different port. After it, `hardware_gate` (no
+`--wait-hotplug`; the deck is settled by then) must print `connected`,
+`initialized (DIS)` and both painted keys. If it does, the transport is healthy
+and the app reconnects within one backoff period.
+
+Two things worth knowing before you conclude anything:
+
+- **A reappearance inside the settle window is not a recovery.** The gate exited
+  `DeviceNotFound` with `--wait-hotplug` on this episode because the deck
+  appeared and was interrupted before the 3 s window closed. That is the settle
+  rule working, not a probe bug.
+- **The first appearance after the replug is still a boot stage.** Do not
+  measure with a hand-run probe; let `--wait-hotplug` watch, or let the app's
+  own retry catch the settled device.
+
 ---
 
 ## 2. Rule out the cheap traps first
@@ -389,6 +435,29 @@ sleeping deck stays asleep.
 that repaints constantly is already generating traffic, so the heartbeat stays
 silent; an idle app must call it or the deck will reset and the handle will die
 with `Ss550Error::TransportStalled`.
+
+**The heartbeat is necessary, not sufficient.** On 2026-11-24 the controller
+held a healthy session for 36 minutes with the window hidden in the tray and
+then lost the deck with `0x48F` on a *read* — the device left the bus, which is
+not a rejected report. The heartbeat was wired the whole time:
+`Controller::maintain` calls `heartbeat()` (`ss550-gui/src/main.rs`), which
+calls `Session::keep_alive` only when `capabilities().keep_alive()` is set, and
+the driver advertises it (`ss550-driver/src/deck.rs`, `.with_keep_alive(true)`)
+with the 2 s throttle. So the §5.2 model — "it resets when the host goes quiet,
+and a heartbeat prevents it" — did not hold here: the deck stayed away for 61
+minutes (§1.1) instead of the 4-5 s a boot re-enumeration takes.
+
+Two explanations remain open, and this episode does not separate them:
+
+- the heartbeat stops while the window is hidden, so the deck really did go
+  quiet — but then it should have returned in 4-5 s, and it did not;
+- the firmware left the bus without re-enumerating, which is a failure mode the
+  probes above never produced.
+
+Do not "fix" the heartbeat on the strength of one episode. What the episode does
+establish is that a session that dies with `0x48F` on a read is not the same
+event as a rejected write, and that the runbook's §3 cycle — not a retry — is
+what ends it.
 
 ### 5.3 `connect()` verified against a real boot
 
