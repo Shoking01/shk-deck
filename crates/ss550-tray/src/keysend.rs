@@ -194,6 +194,10 @@ fn strokes(combo: &KeyCombo) -> Result<Vec<KeyStroke>, String> {
 /// A scan code is what a keyboard sends and a virtual key is what Windows
 /// derives from it, so only the scan code survives the trip to a game. See the
 /// module documentation for why this crate never sends a bare virtual key.
+///
+/// Windows is the only platform with a table to translate into, so off Windows
+/// this type exists for its own tests and nothing else.
+#[cfg(any(windows, test))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct ScanStroke {
     /// The scan code, without its `E0` prefix.
@@ -211,6 +215,10 @@ struct ScanStroke {
 /// a keyboard sends `E0 48` for Up; sending the plain code would arrive as the
 /// keypad's `8`. These are the cluster's keys in the engine's vocabulary, taken
 /// from the set Windows itself documents as extended.
+///
+/// Windows is the only platform whose keyboard layout is asked, so off Windows
+/// this exists for the test that drives [`scan_strokes`] and nothing else.
+#[cfg(any(windows, test))]
 fn is_extended(code: u16) -> bool {
     matches!(
         code,
@@ -226,6 +234,10 @@ fn is_extended(code: u16) -> bool {
 /// translation is a plain function a test can drive. A key the table does not
 /// answer for is refused with a sentence rather than sent as scan code zero:
 /// zero is not a key any keyboard has.
+///
+/// Windows is the only platform with a table to translate into, so off Windows
+/// this exists for its own test and nothing else.
+#[cfg(any(windows, test))]
 fn scan_strokes(
     sequence: &[KeyStroke],
     lookup: impl Fn(u16) -> Option<u16>,
@@ -270,6 +282,7 @@ fn system_scan_code(code: u16) -> Option<u16> {
 /// the presses go out, the keys stay down a little over one frame at 60 Hz, and
 /// then they come back up. It is short enough to stay inside the deck's latency
 /// budget and long enough for a frame to see it.
+#[cfg(windows)]
 const HOLD: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// The platform's way of sending a keystroke to the focused window.
@@ -471,11 +484,15 @@ fn deliver(_sequence: &[KeyStroke]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::media_code;
     use super::{
-        base_code, media_code, modifier_code, named_code, punctuation_code, scan_strokes, strokes,
-        KeyStroke, ScanStroke,
+        base_code, modifier_code, named_code, punctuation_code, scan_strokes, strokes, KeyStroke,
+        ScanStroke,
     };
-    use ss550_engine::{BaseKey, KeyCombo, MediaCommand, Modifier, NamedKey};
+    #[cfg(windows)]
+    use ss550_engine::MediaCommand;
+    use ss550_engine::{BaseKey, KeyCombo, Modifier, NamedKey};
 
     fn combo(text: &str) -> KeyCombo {
         KeyCombo::parse(text).expect("the test's own combination must parse")
