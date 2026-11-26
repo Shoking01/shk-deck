@@ -87,6 +87,10 @@ impl InstalledApp {
     }
 
     /// A packaged app, named by its AppUserModelId.
+    ///
+    /// Used only where the shell is asked for its own list, which is Windows;
+    /// the attribute keeps the tests that cover it building everywhere.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn packaged(name: String, aumid: &str) -> Self {
         Self::shell(name, &format!("shell:AppsFolder\\{aumid}"), true)
     }
@@ -94,6 +98,7 @@ impl InstalledApp {
     /// An entry the shell starts from an address rather than from a file: a
     /// packaged app's `shell:AppsFolder\<id>`, or a registered URI such as
     /// `steam://rungameid/993090`.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn shell(name: String, address: &str, packaged: bool) -> Self {
         Self {
             name,
@@ -141,6 +146,7 @@ impl InstalledApp {
 /// `explorer.exe` is the shell's own front door: handed `shell:AppsFolder\<id>`
 /// it resolves the id and activates whatever registered it, which is the only
 /// way to start an app that has no executable of its own.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn explorer() -> PathBuf {
     std::env::var_os("SystemRoot")
         .map(PathBuf::from)

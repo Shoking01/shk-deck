@@ -653,7 +653,16 @@ impl Device {
     /// endpoint.
     pub fn preflight(&mut self) -> Result<(), Ss550Error> {
         let dis = build_dis();
-        self.write_pack(Command::DisplayOn, &dis)
+        self.write_pack(Command::DisplayOn, &dis)?;
+
+        // The same report [`Device::initialize`] sends, and therefore the same
+        // consequence: the deck is awake. Leaving `initialized` false here made
+        // [`Device::keepalive`] decline every call, so the deck heard silence
+        // and reset itself — measured on 2026-11-25 as `heartbeat not writing:
+        // Asleep` one second after a successful connect, then a `0x48F` every
+        // few minutes with a handle that had never written anything.
+        self.initialized = true;
+        Ok(())
     }
 
     /// Wakes the display (`CRT|DIS`).

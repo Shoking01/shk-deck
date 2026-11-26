@@ -503,31 +503,32 @@ mod tests {
     fn the_walk_keeps_its_phase_when_a_sample_takes_time() {
         // A clock is sampled like any other cell, so a schedule that pays for
         // the walk out of the interval makes its seconds slip, skip and repeat.
-        // Eight cycles are measured against the schedule's own clock: a sampler
-        // that slept *for* the interval would show interval + walk per cycle.
-        let interval = Duration::from_millis(60);
-        let walk = Duration::from_millis(20);
+        //
+        // The assertion is on the schedule's own deadline, not on elapsed wall
+        // time. A loaded CI runner can take 60 ms to sleep for 20, which pushes
+        // a walk past its whole slot, and `wait` restarts the phase from `now`
+        // on purpose when that happens — so a wall-clock bound fails on correct
+        // behaviour. Comparing deadlines is exact and measures what the doc
+        // comment states: the next walk is one interval after the slot this one
+        // occupied, never one interval after `now`.
+        let interval = Duration::from_millis(200);
+        let walk = Duration::from_millis(5);
         let stop = AtomicBool::new(false);
         let mut schedule = Schedule::new(interval);
         assert!(schedule.wait(&stop), "the first walk is due at once");
 
-        // Seven slots, each paying a walk out of its own interval.
-        let started = Instant::now();
-        for _ in 0..7 {
+        let mut previous = schedule.next;
+        for slot in 0..5 {
             std::thread::sleep(walk);
             assert!(schedule.wait(&stop), "the schedule was never stopped");
+            assert_eq!(
+                schedule.next,
+                previous + interval,
+                "slot {slot} moved the deadline by {:?}, not by the interval",
+                schedule.next - previous
+            );
+            previous = schedule.next;
         }
-        let elapsed = started.elapsed();
-
-        let slots = interval * 7;
-        assert!(
-            elapsed >= slots - Duration::from_millis(5),
-            "seven slots came early: {elapsed:?}"
-        );
-        assert!(
-            elapsed < slots + Duration::from_millis(80),
-            "the walk was added to the schedule, so its phase is walking away: {elapsed:?}"
-        );
     }
 
     #[test]
