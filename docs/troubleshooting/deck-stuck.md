@@ -134,6 +134,89 @@ no setter for it in `hidapi` 2.6.7.
 A 10 s hand-rolled `WriteFile` (`examples/raw_write.rs`) is the way to prove it
 is not a timeout problem: it reports `completed=0` and `WaitForSingleObject=258`.
 
+### 1.1 When the deck is not on the bus at all
+
+A second state exists that looks like the first from the app and is not: the
+deck **leaves the bus and does not come back**. The app reports
+`Device not found with VID 0x0200 PID 0x3000` on every attempt, for as long as
+it is left running, and no probe that filters on `VID_0200` can see anything.
+
+Measured on 2026-11-24 (local time; the app log is UTC):
+
+```text
+19:16:46  connected: 15 keys - 5 columns - 112x112 images
+19:52:46  disconnected: hid_read_timeout/GetOverlappedResult 0x48F
+          -> then "Device not found" every attempt for 61 minutes
+20:53:1x  reappears; the settle window is interrupted inside 10 s (one flicker)
+20:54:07  the app reconnects on its own
+```
+
+What distinguishes it from the failures above:
+
+| Check | This state | The halted-endpoint state |
+|---|---|---|
+| `Get-PnpDevice -PresentOnly` for `VID_0200` | **zero nodes** | present and `OK` |
+| `USB\VID_0000&PID_0002` (Code 43, §5.0) | **absent** | may be present |
+| `test_write_path` | cannot open anything | `0x1F` or `0xE5` |
+| Absence | tens of minutes | 4-5 s (§5.1) |
+
+So: no electrical enumeration at all, not a halted endpoint and not a stale
+handle. A device whose endpoint is halted still enumerates. **Nothing
+auto-recovers this** — the app retried for 61 minutes without success.
+
+> **Why it matters less than it looks.** This is the *hard* state of a softer
+> failure: an app that never feeds the deck lets it reset itself every few
+> minutes (§5.2), and one of those resets can leave the firmware off the bus
+> instead of re-enumerating. Before you power cycle, check the log for
+> `heartbeat: N writes`: a session that never wrote one is the cause, not the
+> victim, and the fix is in §5.2 rather than in the USB cable.
+
+The only recovery that has worked is the §3 cycle: unplug at the deck end for a
+full 60 s, reconnect on a different port. After it, `hardware_gate` (no
+`--wait-hotplug`; the deck is settled by then) must print `connected`,
+`initialized (DIS)` and both painted keys. If it does, the transport is healthy
+and the app reconnects within one backoff period.
+
+Two things worth knowing before you conclude anything:
+
+- **A reappearance inside the settle window is not a recovery.** The gate exited
+  `DeviceNotFound` with `--wait-hotplug` on this episode because the deck
+  appeared and was interrupted before the 3 s window closed. That is the settle
+  rule working, not a probe bug.
+- **The first appearance after the replug is still a boot stage.** Do not
+  measure with a hand-run probe; let `--wait-hotplug` watch, or let the app's
+  own retry catch the settled device.
+
+### 1.2 When the deck is back but the keys stay black
+
+A third state looks like a dead deck and is not: the app **connects**, the log
+counts heartbeats (`heartbeat: N writes in the last 300s`), and a gate probe
+paints in `0 ms` — yet every key on the glass stays black.
+
+Measured on 2026-11-25 (09:19 local): the active profile named pictures the
+library no longer held (`002-ARROWS_direction-back.jpg`,
+`002-ARROWS_direction-forward.jpg`, the Spotify page), and key 1 — the first
+key the paint loop touches — failed to read its file. The loop aborted on the
+first picture failure, so **no key was painted at all**, and the connect note
+then replaced the error, leaving the status line saying only
+`Connected — profile 'Gaming' active.` The heartbeat log told the truth: pure
+`DIS` writes (135-136 per 300 s), no image bursts.
+
+Both halves are fixed (`crates/ss550-gui/src/main.rs`, `paint_page`):
+
+- a picture the library no longer holds is a **per-key miss**, recorded and
+  skipped; the page paints every other key, and only a session failure stops
+  it;
+- the connect, profile-switch and page notes **join** the miss list instead of
+  replacing it, so the status line reads
+  `Connected — profile 'Gaming' active. Could not be painted: key 1: the
+  library holds no asset named "002-ARROWS_direction-back.jpg"…`.
+
+Diagnosis order for this state: read the log for `heartbeat: N writes` (the
+link is alive), run `hardware_gate` (the transport is alive), then read the
+status line — it names the keys and the files. Re-import the named pictures
+from the key's PICTURE picker, or clear them from the profile.
+
 ---
 
 ## 2. Rule out the cheap traps first
@@ -390,6 +473,44 @@ that repaints constantly is already generating traffic, so the heartbeat stays
 silent; an idle app must call it or the deck will reset and the handle will die
 with `Ss550Error::TransportStalled`.
 
+**The heartbeat must reach the deck, and for a while it did not.** On 2026-11-24
+the controller held a session for 36 minutes with the window hidden in the tray
+and then lost the deck with `0x48F` on a *read*. On 2026-11-25 it lost it every
+one to three minutes for a whole session, and the log finally said why:
+
+```text
+06:33:55Z connected: 15 keys — 5 columns — 112x112 images
+06:33:55Z heartbeat not writing: Asleep
+```
+
+`Asleep` is `initialized == false`, and `Device::keepalive` writes nothing in
+that state. Two defects produced it, and either one alone was enough:
+
+- `DeckHandle` in `deck-api` forwarded `keep_alive` but **not** `preflight`, so
+  the trait's default answered `Ok(())` without writing. The window's preflight
+  never reached the device — which also meant §6's sixth rule was never in force.
+- `Device::preflight` wrote that same `CRT|DIS` and left `initialized` false, so
+  even a preflight that did arrive would not have started the heartbeat.
+
+That is why it looked intermittent: `initialized` only became true as a side
+effect of a **paint**. A connect that painted something fed the deck and counted
+65–78 heartbeats in five minutes; a connect with nothing to paint preflighted
+into silence, the deck reset itself, and the handle died. Restarting reproduced
+it exactly, which is why a restart never helped.
+
+So the §5.2 model was right all along and the app simply never fed the deck. Both
+halves are fixed, and the property is pinned by an integration test that goes
+**through the handle**: a test against the driver alone passes while the seam
+silently swallows the call.
+
+Verify it by the log, not by the code: `heartbeat: N writes in the last 300s`
+reads about 133 in five minutes once the deck is fed. Before the fix the same
+line read 65–78 — the writes a paint happened to make — and every session ended
+in a `0x48F` within minutes. After it, the first session ran nineteen minutes
+with **one** drop, which reconnected on its own in fifteen seconds. That drop is
+not explained yet: it happened with the heartbeat writing every two seconds, so
+it is not the idle reset this section is about.
+
 ### 5.3 `connect()` verified against a real boot
 
 The settle rule was tested the hard way: the process was already watching the bus
@@ -511,7 +632,10 @@ These are requirements, not suggestions:
    rely on a later `flush()` to restore it; if the flush never landed, the deck
    sat dark with no signal. It no longer touches brightness at all.
 6. **Preflight the transport** before a paint session: one harmless write that
-   must complete, and a distinct error if it does not.
+   must complete, and a distinct error if it does not. A preflight that answers
+   `Ok` without writing is worse than none: it reports an endpoint it never
+   touched. It must also leave the deck **awake** — that `DIS` *is* the wake, and
+   a driver that forgets it stops feeding the heartbeat (§5.2).
 7. **Never keep a handle across the deck's boot re-enumeration.** `Device::connect`
    enforces this: it waits for [`SETTLE_TIME`] (3 s) of **continuous** presence
    before opening the handle it will use, and returns `DeviceNotFound` fast if
@@ -523,3 +647,7 @@ These are requirements, not suggestions:
    and the reset kills the handle. Call `Device::keepalive` once per main-loop
    frame; it is throttled internally to 2 s and never fires during an upload. An
    idle app that skips this will watch the deck die for no visible reason.
+9. **A missing picture is a per-key failure, never a page failure.** One
+   deleted file must not leave every key dark: the paint loop records the key,
+   keeps going, and the sentence that names it is joined to the connect note,
+   never replaced by it (`paint_page`, pinned by tests over a recording deck).

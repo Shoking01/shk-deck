@@ -393,6 +393,16 @@ pub(crate) struct DragGhost {
     tokens: Tokens,
 }
 
+impl DragGhost {
+    /// The card that rides the pointer while something is dragged.
+    ///
+    /// Built by the drag source itself, so a page that drags its own things
+    /// still rides the one ghost the window has.
+    pub(crate) fn new(label: SharedString, tokens: Tokens) -> Self {
+        Self { label, tokens }
+    }
+}
+
 impl Render for DragGhost {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()

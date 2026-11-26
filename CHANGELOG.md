@@ -7,7 +7,60 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
-### Decided against — a Discord voice key
+### Added - a key can be dragged into another key's place
+
+Dragging one key of the `Deck` page onto another now **trades their places**.
+The binding, the picture, the title and the title's style travel together to the
+other number, so a key never ends up wearing the face of something it no longer
+runs; the profile page and the bindings file are both written with the swap, and
+both keys are repainted on the deck at once. Nothing is overwritten: a key with
+no binding moves as an empty key, which means the drop can never destroy a
+binding the user made. A key dropped on itself is a no-op, a tile on a window
+with no deck starts no drag, and the palette's own drop keeps working unchanged
+on the same tiles.
+
+### Fixed - a key press reached every text field and no game
+
+A deck key bound to `Keys` typed into Notepad and did nothing in a game: no bind
+fired in American Truck Simulator, in fullscreen or in windowed mode, while the
+same combination kept working everywhere else. The keystroke was sent as a bare
+virtual key (`wScan: 0`), and Raw Input reports `MakeCode = 0x00` for that — a
+key no keyboard has. Text fields read the derived virtual key and never noticed;
+everything that reads the keyboard as a device has no key to bind.
+
+`ss550-tray` now translates every stroke to its hardware scan code
+(`MapVirtualKeyW` + `KEYEVENTF_SCANCODE`) and sends it with the `E0` prefix the
+key has on a real keyboard (`KEYEVENTF_EXTENDEDKEY`), which Windows' own table
+does not report for the navigation cluster — without it the Up arrow arrives as
+the keypad's `8`. The presses and the releases are also split into two batches
+now, with the keys held for 20 ms, so a game that samples the keyboard once per
+frame can see them; both used to go out inside one input tick. `Media` goes
+through the same path and keeps its `E0` prefix.
+
+Measured with a Raw Input listener beside the sender: `MakeCode=0x00` before,
+`MakeCode=0x76` (F24) and `MakeCode=0x48 Flags=0x02` (Up, prefixed) after —
+indistinguishable from the physical arrow keys in the same log. Pinned by tests
+that walk the whole key vocabulary, the navigation cluster and the media keys.
+
+### Fixed - the deck stayed black after a reconnect that had succeeded
+
+A deck that came back healthy and connected could still show nothing: the
+active profile named pictures the library no longer held, and key 1 - the
+first key the paint loop touched - failed to read its file. The loop aborted
+on the first picture failure, so no key was painted at all, and the connect
+note then replaced the error, leaving `Connected - profile 'Gaming' active.`
+over fifteen dark keys. The log held the proof: pure heartbeat writes
+(135-136 per 300 s) and no image bursts, while `hardware_gate` painted in
+0 ms.
+
+A picture the library no longer holds is now a per-key miss: `paint_page`
+records the key and its reason, paints every other key, and stops only for a
+session failure. The connect, profile-switch and page notes join the miss
+list instead of replacing it - `Could not be painted: key 1: the library
+holds no asset named "..."` - pinned by tests that go through the session
+seam with a recording deck.
+
+### Decided against - a Discord voice key
 A key that mutes the microphone *and* shows whether it is muted cannot be built
 against Discord's API. Measured on a real client: the `rpc.local` commands
 (`SET_VOICE_SETTINGS_2`, the `VOICE_SETTINGS_UPDATE_2` event) are an

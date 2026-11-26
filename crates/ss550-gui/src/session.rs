@@ -11,7 +11,9 @@
 
 use std::time::Duration;
 
-use deck_api::{Capabilities, Deck, DeckError, DeckHandle, Geometry, ImageSpec, KeyEvent, KeyId};
+use deck_api::{
+    Capabilities, Deck, DeckError, DeckHandle, Geometry, HeartbeatState, ImageSpec, KeyEvent, KeyId,
+};
 use jpeg_encoder::{ColorType, Encoder};
 
 /// The JPEG quality used for the key images.
@@ -209,6 +211,15 @@ impl DeckSession {
     /// Keeps the deck from resetting itself while the host is idle.
     pub fn keep_alive(&mut self) -> Result<(), DeckError> {
         self.deck.keep_alive()
+    }
+
+    /// Reports what the next keep-alive would do, and why it would do nothing.
+    ///
+    /// `keep_alive` answers `Ok` whether it wrote a report or declined to, so
+    /// this is the only thing that can tell a heartbeat feeding the deck from
+    /// one that silently stopped — the failure that leaves no other trace.
+    pub fn heartbeat_state(&self) -> HeartbeatState {
+        self.deck.heartbeat_state()
     }
 
     /// Reads every key event waiting on the deck.

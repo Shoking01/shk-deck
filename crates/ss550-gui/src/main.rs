@@ -153,6 +153,18 @@ enum PaintFailure {
     Picture(String),
 }
 
+/// One key a page paint could not finish, with the reason it could not.
+///
+/// The key is the 1-based number the window prints everywhere a key is named,
+/// and the reason is the painter's own sentence — it already says which file
+/// and what is wrong with it. The link is fine when a key is missed: what the
+/// reason names is the profile's picture, not the deck.
+#[derive(Debug)]
+struct PaintMiss {
+    key: u16,
+    reason: String,
+}
+
 /// What one key is going to be painted with.
 ///
 /// Decided from the profile, the bindings and the icon cache *before* the first
@@ -307,6 +319,136 @@ fn asset_tile(
     };
     let composed = icons::compose_title(&fitted, title, style, text);
     render::render_rgba(spec, &name.to_string(), &composed).map_err(|error| error.to_string())
+}
+
+/// What a page paint reads pictures with: the library the profile's pictures
+/// live in, the cache of tiles already encoded for this deck, and the font the
+/// titles are drawn in.
+///
+/// A struct rather than three more arguments, because a paint's inputs have
+/// names worth saying and the call site stays readable at a glance.
+struct PaintContext<'a> {
+    assets: &'a ss550_engine::AssetLibrary,
+    tiles: &'a mut Option<render::TileCache>,
+    text: &'a mut Option<titletext::TextEngine>,
+}
+
+/// Paints one page of keys over the deck, naming the ones it could not.
+///
+/// The policy this function owns is the one a missing picture exposed: a
+/// **picture** that cannot be built — a file the library no longer holds, an
+/// image the encoder refuses — must not stop the page. The key is named in the
+/// answer and the next key paints, because a profile that lost one picture
+/// still has every other key's face to show. Only a **session** failure stops
+/// the page, and for the opposite reason: after one there is no deck left to
+/// paint the rest on, and the caller must hear it as an error.
+///
+/// Reading keys are skipped — their faces arrive from the worker and are
+/// painted by `collect_faces` — and keep the slot they already had.
+fn paint_page(
+    session: &mut session::DeckSession,
+    plans: &[Tile],
+    actions: &[Option<Action>],
+    painted: &mut [Slot],
+    slot: Slot,
+    pictures: PaintContext<'_>,
+) -> Result<Vec<PaintMiss>, session::SessionError> {
+    let mut misses: Vec<PaintMiss> = Vec::new();
+    let spec = session.image_spec();
+
+    for (index, plan) in plans.iter().enumerate() {
+        // A key bound to a reading was queued by the caller and is painted
+        // when its face arrives, so its old face stays as it is until then.
+        // Nothing here can fail for it, and nothing here may stop the page
+        // for it.
+        if actions
+            .get(index)
+            .and_then(Option::as_ref)
+            .is_some_and(Action::is_reading)
+        {
+            // The caller's queue block already left this key the slot it had;
+            // the page's own paint says nothing about a reading key.
+            continue;
+        }
+
+        let result = match plan {
+            Tile::Asset { name, title, style } => {
+                match asset_tile(
+                    pictures.assets,
+                    pictures.tiles.as_mut(),
+                    Some(spec),
+                    name,
+                    title.as_deref(),
+                    style,
+                    pictures.text,
+                ) {
+                    Ok(jpeg) => Controller::paint_over_black(session, index, &jpeg),
+                    // The picture is the profile's, not the link's: the deck
+                    // is alive, and the page owes every other key its own face.
+                    Err(message) => {
+                        misses.push(PaintMiss {
+                            key: key_number(index),
+                            reason: message,
+                        });
+                        continue;
+                    }
+                }
+            }
+            Tile::Art(picture) => Controller::paint_over_black(session, index, picture),
+            Tile::TitledColour(picture) => Controller::paint_over_black(session, index, picture),
+            Tile::Colour(rgb) => session.paint(index, *rgb),
+        };
+
+        // Every arm but the handled picture miss ends here, and every error
+        // that reaches this line is the link's: the page stops so the caller
+        // can report it, instead of pushing more reports at a dead deck.
+        result?;
+        painted[index] = match plan {
+            Tile::Asset { .. } | Tile::Art(_) | Tile::TitledColour(_) => Slot::Image,
+            Tile::Colour(_) => slot,
+        };
+    }
+
+    Ok(misses)
+}
+
+/// The sentence that names the keys a paint could not finish.
+///
+/// `None` when there are none, so a page that painted everything leaves the
+/// caller's own sentence exactly as it was.
+fn misses_sentence(misses: &[PaintMiss]) -> Option<String> {
+    if misses.is_empty() {
+        return None;
+    }
+    let each: Vec<String> = misses
+        .iter()
+        .map(|miss| format!("key {}: {}", miss.key, miss.reason))
+        .collect();
+    Some(format!("Could not be painted: {}.", each.join("; ")))
+}
+
+/// The sentence a finished page paint leaves in the status line.
+///
+/// A page with no misses reads exactly as it always did. A page with misses
+/// keeps a count and adds them, because a key that stayed dark while the
+/// window showed a picture is a difference the user can see on the desk and
+/// cannot explain from the window alone.
+fn page_paint_note(shown: usize, key_count: usize, slot: Slot, misses: &[PaintMiss]) -> String {
+    if misses.is_empty() && shown == 0 {
+        return format!("All {key_count} keys painted {}.", slot_name(slot));
+    }
+    let base = if misses.is_empty() {
+        format!("{shown} of {key_count} keys show what they run.")
+    } else {
+        format!(
+            "{} of {key_count} keys painted.",
+            key_count.saturating_sub(misses.len())
+        )
+    };
+    match misses_sentence(misses) {
+        Some(misses) => format!("{base} {misses}"),
+        None => base,
+    }
 }
 
 /// Which kind of action the bindings panel is editing.
@@ -576,6 +718,13 @@ const POLL: Duration = Duration::from_millis(50);
 /// How often connection results, retries and the heartbeat are handled.
 const TICK: Duration = Duration::from_millis(500);
 
+/// How often a working heartbeat says so in the log.
+///
+/// A heartbeat that stops is reported at once, on the transition; this is only
+/// the proof-of-life line, so it is rare enough to read past and frequent enough
+/// that a session left overnight has a witness.
+const HEARTBEAT_REPORT: Duration = Duration::from_secs(300);
+
 /// How many frames the window records before it only records slow ones.
 ///
 /// The first frames are what startup costs, and they are worth a line each.
@@ -748,6 +897,16 @@ struct Controller {
     attempts: u32,
     /// When the connection and heartbeat work last ran.
     last_tick: Instant,
+    /// The last state that stopped the heartbeat, while it is stopped.
+    ///
+    /// The transition is what gets logged, not the state: the heartbeat runs
+    /// twice a second, and a blocked one would otherwise write 172,000 lines a
+    /// day saying the same thing.
+    heartbeat_blocked: Option<deck_api::HeartbeatState>,
+    /// Heartbeats that wrote a report since the last proof-of-life line.
+    heartbeat_writes: u32,
+    /// When the last proof-of-life line was written.
+    heartbeat_reported_at: Instant,
     /// When the current connection was adopted, while there is one.
     ///
     /// What decides whether a disconnect starts the backoff over: a deck that
@@ -1267,6 +1426,9 @@ impl Controller {
             pending: false,
             attempts: 0,
             last_tick: Instant::now(),
+            heartbeat_blocked: None,
+            heartbeat_writes: 0,
+            heartbeat_reported_at: Instant::now(),
             connected_at: None,
             reconnect_at: Instant::now(),
             store,
@@ -1512,7 +1674,7 @@ impl Controller {
         }
 
         // Apply the active profile on connect
-        if let Some(profile) = self.profile_store.active_profile() {
+        let misses = if let Some(profile) = self.profile_store.active_profile() {
             self.store = profile.root.bindings.clone();
             // Every key's face is decided from what it runs, so the icons of
             // those programs have to be read before the keys are painted. This
@@ -1521,21 +1683,29 @@ impl Controller {
             self.rebuild_icons();
             let slot = self.paint_from_profile(&profile, key_count);
             let default_colour = self.paint.rgb();
-            self.apply_all_appearances(slot, &profile.root.appearance, default_colour, key_count);
+            self.apply_all_appearances(slot, &profile.root.appearance, default_colour, key_count)
         } else {
             self.rebuild_icons();
             let slot = self.paint.slot();
-            self.apply_all(slot);
+            self.apply_all(slot)
         }
+        .unwrap_or_default();
 
         if self.session.is_some() {
-            self.note = match note {
-                Some(note) => note.into(),
-                None => format!(
+            // Joined, never replaced: the paint's sentence is a fact about the
+            // deck in front of the window, and the one thing it must never lose
+            // is which keys could not be painted and why. Writing "Connected"
+            // over it is how a profile that named a picture the library no
+            // longer held left every key dark behind a healthy sentence.
+            let base = note.unwrap_or_else(|| {
+                format!(
                     "Connected — profile '{}' active.",
                     self.profile_store.active_name().unwrap_or("default")
                 )
-                .into(),
+            });
+            self.note = match misses_sentence(&misses) {
+                Some(misses) => format!("{base} {misses}").into(),
+                None => base.into(),
             };
         }
 
@@ -2031,14 +2201,22 @@ impl Controller {
                 // Paint all keys according to profile colors or slot
                 let slot = self.paint_from_profile(&profile, key_count);
                 let default_colour = self.paint.rgb();
-                self.apply_all_appearances(
-                    slot,
-                    &profile.root.appearance,
-                    default_colour,
-                    key_count,
-                );
+                let misses = self
+                    .apply_all_appearances(
+                        slot,
+                        &profile.root.appearance,
+                        default_colour,
+                        key_count,
+                    )
+                    .unwrap_or_default();
 
-                self.note = format!("Switched to profile: {name}").into();
+                // The misses belong to what the switch just asked the deck to
+                // show, so they join the sentence rather than being replaced
+                // by it.
+                self.note = match misses_sentence(&misses) {
+                    Some(misses) => format!("Switched to profile: {name}. {misses}").into(),
+                    None => format!("Switched to profile: {name}").into(),
+                };
             }
         } else {
             self.note =
@@ -2179,7 +2357,7 @@ impl Controller {
     }
 
     /// Paints every key with one colour.
-    fn apply_all(&mut self, slot: Slot) {
+    fn apply_all(&mut self, slot: Slot) -> Option<Vec<PaintMiss>> {
         let colour = self.paint.rgb();
         let key_count = self.session.as_ref().map_or(0, |s| s.key_count());
         self.apply_all_appearances(slot, &BTreeMap::new(), colour, key_count)
@@ -2196,19 +2374,24 @@ impl Controller {
     /// Every face is decided before the first write, so a refusal halfway
     /// through cannot leave the window and the deck disagreeing about the keys
     /// that came after it.
+    ///
+    /// Answers the keys whose pictures could not be painted — a file the
+    /// library no longer holds, most often — in deck order, for the caller's
+    /// own sentence. `None` means the page could not be painted at all: no
+    /// session to paint on, or the link died mid-page and [`Controller::report`]
+    /// has already said so.
     fn apply_all_appearances(
         &mut self,
         slot: Slot,
         appearances: &BTreeMap<u16, ss550_engine::Appearance>,
         default_colour: [u8; 3],
         key_count: usize,
-    ) {
+    ) -> Option<Vec<PaintMiss>> {
         if self.session.is_none() {
             self.note = "Not connected. Press RECONNECT first.".into();
-            return;
+            return None;
         }
 
-        let spec = self.session.as_ref().map(session::DeckSession::image_spec);
         // The title is drawn on top of whichever face wins, so it is read from
         // the profile once, before the plans are made — as an owned value, since
         // the plan needs the cache and the font mutably.
@@ -2266,67 +2449,35 @@ impl Controller {
             *entry = self.slots.get(index).copied().unwrap_or(slot);
         }
 
-        let Some(session) = self.session.as_mut() else {
-            return;
+        let session = self.session.as_mut()?;
+
+        let misses = match paint_page(
+            session,
+            &plans,
+            &actions,
+            &mut painted,
+            slot,
+            PaintContext {
+                assets: &self.assets,
+                tiles: &mut self.tiles,
+                text: &mut self.text,
+            },
+        ) {
+            Ok(misses) => misses,
+            Err(error) => {
+                // A dead link has no page left to paint: `report` has already
+                // said what the deck's answer was, and the caller hears
+                // `None` so it keeps that sentence instead of writing its own
+                // over it.
+                self.report(error);
+                return None;
+            }
         };
 
-        let mut failure = None;
-        for (index, plan) in plans.iter().enumerate() {
-            // A key bound to a reading was queued above and is painted when its
-            // face arrives, so its old face stays as it is until then. Nothing
-            // here can fail for it, and nothing here may stop the page for it.
-            if actions
-                .get(index)
-                .and_then(Option::as_ref)
-                .is_some_and(Action::is_reading)
-            {
-                painted[index] = self.slots.get(index).copied().unwrap_or(slot);
-                continue;
-            }
-            let result = match plan {
-                Tile::Asset { name, title, style } => {
-                    let tile = asset_tile(
-                        &self.assets,
-                        self.tiles.as_mut(),
-                        spec,
-                        name,
-                        title.as_deref(),
-                        style,
-                        &mut self.text,
-                    );
-                    match tile {
-                        Ok(jpeg) => Self::paint_over_black(session, index, &jpeg),
-                        Err(message) => Err(PaintFailure::Picture(message)),
-                    }
-                }
-                Tile::Art(picture) => Self::paint_over_black(session, index, picture),
-                Tile::TitledColour(picture) => Self::paint_over_black(session, index, picture),
-                Tile::Colour(rgb) => session.paint(index, *rgb).map_err(PaintFailure::Session),
-            };
-
-            if let Err(error) = result {
-                failure = Some(error);
-                break;
-            }
-            painted[index] = match plan {
-                Tile::Asset { .. } | Tile::Art(_) | Tile::TitledColour(_) => Slot::Image,
-                Tile::Colour(_) => slot,
-            };
-        }
-
-        match failure {
-            Some(PaintFailure::Session(error)) => self.report(error),
-            Some(PaintFailure::Picture(message)) => self.note = message.into(),
-            None => {
-                let shown = painted.iter().filter(|slot| **slot == Slot::Image).count();
-                self.slots = painted;
-                self.note = if shown == 0 {
-                    format!("All {key_count} keys painted {}.", slot_name(slot)).into()
-                } else {
-                    format!("{shown} of {key_count} keys show what they run.").into()
-                };
-            }
-        }
+        let shown = painted.iter().filter(|slot| **slot == Slot::Image).count();
+        self.slots = painted;
+        self.note = page_paint_note(shown, key_count, slot, &misses).into();
+        Some(misses)
     }
 
     /// Blanks every key at once.
@@ -2370,12 +2521,54 @@ impl Controller {
     /// A deck that never resets is not asked: the capability decides, so the
     /// heartbeat is not a call the window makes and then has to explain away.
     fn heartbeat(&mut self) {
-        let result = match self.session.as_mut() {
-            Some(session) if session.capabilities().keep_alive() => session.keep_alive(),
-            _ => return,
+        let Some(session) = self.session.as_mut() else {
+            return;
         };
+        if !session.capabilities().keep_alive() {
+            return;
+        }
+        // Read before the write: afterwards the deck is `RecentWrite` by
+        // definition, and the reason it did or did not write is gone. That
+        // reason is the whole point — `keep_alive` answers `Ok` either way.
+        let state = session.heartbeat_state();
+        let wrote = state == deck_api::HeartbeatState::Due;
+        let result = session.keep_alive();
         if let Err(error) = result {
             self.report_deck(error);
+            return;
+        }
+        self.note_heartbeat(state, wrote);
+    }
+
+    /// Puts the heartbeat in the log: a transition into a state that stops it,
+    /// or one proof-of-life line every [`HEARTBEAT_REPORT`].
+    ///
+    /// A heartbeat that stops writing is the failure that leaves no trace. The
+    /// deck goes quiet, resets itself, and the log's first word on the subject
+    /// is a failed read — the symptom, hours after the cause. This line is the
+    /// cause.
+    fn note_heartbeat(&mut self, state: deck_api::HeartbeatState, wrote: bool) {
+        if wrote {
+            self.heartbeat_writes += 1;
+        }
+        if state.is_blocked() {
+            if self.heartbeat_blocked != Some(state) {
+                self.heartbeat_blocked = Some(state);
+                diagnostics::record(&format!("heartbeat not writing: {state:?}"));
+            }
+            return;
+        }
+        if self.heartbeat_blocked.take().is_some() {
+            diagnostics::record("heartbeat writing again");
+        }
+        if self.heartbeat_reported_at.elapsed() >= HEARTBEAT_REPORT {
+            diagnostics::record(&format!(
+                "heartbeat: {} writes in the last {}s",
+                self.heartbeat_writes,
+                HEARTBEAT_REPORT.as_secs()
+            ));
+            self.heartbeat_writes = 0;
+            self.heartbeat_reported_at = Instant::now();
         }
     }
 
@@ -2744,11 +2937,19 @@ impl Controller {
             _ => Slot::Off,
         };
         let default_colour = self.paint.rgb();
-        self.apply_all_appearances(slot, &keys.appearance, default_colour, key_count);
-        self.note = match self.current_page() {
-            Some(page) => format!("Showing \"{page}\".").into(),
-            None => "Showing the top page.".into(),
+        let misses = self
+            .apply_all_appearances(slot, &keys.appearance, default_colour, key_count)
+            .unwrap_or_default();
+        // The page's sentence says where the deck is; the misses say which of
+        // its keys stayed dark, and the status line has room for both.
+        let mut shown = match self.current_page() {
+            Some(page) => format!("Showing \"{page}\"."),
+            None => "Showing the top page.".to_string(),
         };
+        if let Some(misses) = misses_sentence(&misses) {
+            shown = format!("{shown} {misses}");
+        }
+        self.note = shown.into();
     }
 
     /// Surfaces any failure the action worker reported.
@@ -3258,6 +3459,72 @@ impl Controller {
                 self.load_draft(number, window, cx);
             }
         }
+    }
+
+    /// Trades the places of two keys on the page the deck is showing.
+    ///
+    /// A swap, not a copy: what key A ran and showed becomes what key B does, and
+    /// the other way round. Neither key is overwritten, and a key with nothing on
+    /// it stays a key with nothing on it — on the other number. The page is the
+    /// authority, so the profile is changed first and the bindings file is written
+    /// from it: the two files never disagree about where a key sits.
+    fn swap_keys(
+        &mut self,
+        from: KeyNumber,
+        to: KeyNumber,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.is_none() {
+            self.note = "Connect a deck to move a key.".into();
+            return;
+        }
+        if from == to {
+            return;
+        }
+        let page = self.current_page().map(str::to_string);
+        if let Err(error) = self.profile_store.swap_keys(from, to, page.as_deref()) {
+            self.note = error.into();
+            return;
+        }
+        // The page is the source of truth; the store the deck runs is written
+        // from it, so a swap applied to one and not the other cannot come apart
+        // at the next start.
+        self.store = match self.current_keys() {
+            Some(keys) => keys.bindings.clone(),
+            None => return,
+        };
+        let bindings_saved = match self.store_path.clone() {
+            Some(path) => self.store.save(&path),
+            None => Ok(()),
+        };
+        let profile_saved = self.save_profile_result();
+
+        // Both keys changed what they show, so their pictures are composed again
+        // before either is painted: the icon and the words moved with their key,
+        // and the cache is told about the new pairing.
+        self.rebuild_icons();
+        let from_key = u16::from(from.get());
+        let to_key = u16::from(to.get());
+        self.repaint_key(from_key);
+        self.repaint_key(to_key);
+
+        let mut sentence = format!("Keys #{} and #{} traded places.", from.get(), to.get());
+        if let Err(error) = bindings_saved {
+            sentence = format!("{sentence} The bindings file was not saved: {error}");
+        }
+        if let Err(error) = profile_saved {
+            sentence = format!("{sentence} {error}");
+        }
+        self.note = sentence.into();
+
+        // The editor beside the grid follows the key it is showing: the form must
+        // not keep the fields of a key that has just moved elsewhere.
+        if from == self.selected_key || to == self.selected_key {
+            self.load_draft(self.selected_key, window, cx);
+        }
+
+        cx.notify();
     }
 
     /// Binds the selected key to what the panel holds, and saves it.
@@ -3966,13 +4233,9 @@ impl Controller {
         session: &mut session::DeckSession,
         index: usize,
         jpeg: &[u8],
-    ) -> Result<(), PaintFailure> {
-        session
-            .paint(index, [0, 0, 0])
-            .map_err(PaintFailure::Session)?;
-        session
-            .paint_encoded(index, jpeg)
-            .map_err(PaintFailure::Session)
+    ) -> Result<(), session::SessionError> {
+        session.paint(index, [0, 0, 0])?;
+        session.paint_encoded(index, jpeg)
     }
 
     /// Asks the face worker for one key's face, from the newest sample.
@@ -4085,11 +4348,11 @@ impl Controller {
                     let Some(session) = self.session.as_mut() else {
                         continue;
                     };
-                    if let Err(failure) = Self::paint_over_black(session, index, &jpeg) {
-                        match failure {
-                            PaintFailure::Session(error) => self.report(error),
-                            PaintFailure::Picture(message) => self.note = message.into(),
-                        }
+                    // The face arrives as encoded pixels, so the only failure
+                    // left is the link's — and `report` is the one path that
+                    // knows what a link failure means.
+                    if let Err(error) = Self::paint_over_black(session, index, &jpeg) {
+                        self.report(error);
                         continue;
                     }
                     if let Some(entry) = self.slots.get_mut(index) {
@@ -4317,12 +4580,18 @@ impl Controller {
                     &mut self.text,
                 );
                 match tile {
-                    Ok(jpeg) => Self::paint_over_black(session, index, &jpeg),
+                    Ok(jpeg) => {
+                        Self::paint_over_black(session, index, &jpeg).map_err(PaintFailure::Session)
+                    }
                     Err(message) => Err(PaintFailure::Picture(message)),
                 }
             }
-            Tile::Art(picture) => Self::paint_over_black(session, index, picture),
-            Tile::TitledColour(picture) => Self::paint_over_black(session, index, picture),
+            Tile::Art(picture) => {
+                Self::paint_over_black(session, index, picture).map_err(PaintFailure::Session)
+            }
+            Tile::TitledColour(picture) => {
+                Self::paint_over_black(session, index, picture).map_err(PaintFailure::Session)
+            }
             Tile::Colour(rgb) => session.paint(index, *rgb).map_err(PaintFailure::Session),
         };
 
@@ -4667,14 +4936,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_clicks, apply_pick, join_notes, load_recents_at, navigate, needs_fonts, plan_tile,
-        read_deck_path_at, readings_to_repaint, record_recent_at, resolve_style, slot_for,
-        tray_text, write_deck_path_at, Link, NavOutcome, PickOutcome, PictureDialog, Slot, Tile,
+        advance_clicks, apply_pick, join_notes, load_recents_at, misses_sentence, navigate,
+        needs_fonts, page_paint_note, paint_page, plan_tile, read_deck_path_at,
+        readings_to_repaint, record_recent_at, resolve_style, slot_for, tray_text,
+        write_deck_path_at, Link, NavOutcome, PaintContext, PaintMiss, PickOutcome, PictureDialog,
+        Slot, Tile,
     };
-    use ss550_engine::{Action, AssetLibrary, Recents};
+    use ss550_engine::{Action, AssetLibrary, AssetName, Recents};
     use ss550_plugin_api::{CellId, PluginId, Reading};
     use ss550_plugins::Samples;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
 
     fn cell(id: &str) -> CellId {
         CellId::parse(id).expect("a usable cell id")
@@ -5427,5 +5699,259 @@ mod tests {
         assert!(matches!(slot_for([0, 0, 255]), Slot::White));
         assert!(matches!(slot_for([10, 20, 30]), Slot::White));
         assert!(matches!(slot_for([128, 128, 128]), Slot::White));
+    }
+
+    /// A deck that records every paint it is offered, around the six-key shape
+    /// the simulator provides: the paint policy needs to see what reached the
+    /// deck, not what the deck made of it.
+    struct Recording {
+        inner: deck_simulator::SixKeyDeck,
+        painted: Arc<Mutex<Vec<u16>>>,
+    }
+
+    impl deck_api::Deck for Recording {
+        fn geometry(&self) -> deck_api::Geometry {
+            self.inner.geometry()
+        }
+        fn image_spec(&self) -> deck_api::ImageSpec {
+            self.inner.image_spec()
+        }
+        fn capabilities(&self) -> deck_api::Capabilities {
+            self.inner.capabilities()
+        }
+        fn identity(&self) -> Result<String, deck_api::DeckError> {
+            self.inner.identity()
+        }
+        fn set_brightness(&mut self, value: u8) -> Result<(), deck_api::DeckError> {
+            self.inner.set_brightness(value)
+        }
+        fn set_key_image(
+            &mut self,
+            key: deck_api::KeyId,
+            jpeg: &[u8],
+        ) -> Result<(), deck_api::DeckError> {
+            self.painted
+                .lock()
+                .expect("the recording is never poisoned")
+                .push(key.index());
+            self.inner.set_key_image(key, jpeg)
+        }
+        fn clear_key(&mut self, key: deck_api::KeyId) -> Result<(), deck_api::DeckError> {
+            self.inner.clear_key(key)
+        }
+        fn clear_all(&mut self) -> Result<(), deck_api::DeckError> {
+            self.inner.clear_all()
+        }
+        fn sleep(&mut self) -> Result<(), deck_api::DeckError> {
+            self.inner.sleep()
+        }
+        fn set_dial(&mut self, dial: u8, value: u8) -> Result<(), deck_api::DeckError> {
+            self.inner.set_dial(dial, value)
+        }
+        fn poll_events(
+            &mut self,
+            timeout: std::time::Duration,
+        ) -> Result<Vec<deck_api::KeyEvent>, deck_api::DeckError> {
+            self.inner.poll_events(timeout)
+        }
+        fn reconnect(&mut self) -> Result<(), deck_api::DeckError> {
+            self.inner.reconnect()
+        }
+    }
+
+    /// A deck that dies on its first key: the page must stop, because every
+    /// later report would be pushed at a deck that is no longer there.
+    struct DeadOnFirstKey;
+
+    impl deck_api::Deck for DeadOnFirstKey {
+        fn geometry(&self) -> deck_api::Geometry {
+            deck_api::Geometry::new(2, 2)
+        }
+        fn image_spec(&self) -> deck_api::ImageSpec {
+            deck_api::ImageSpec::new(100, 100, 9_000, deck_api::ImageFormat::Jpeg)
+        }
+        fn capabilities(&self) -> deck_api::Capabilities {
+            deck_api::Capabilities::new()
+        }
+        fn identity(&self) -> Result<String, deck_api::DeckError> {
+            Err(deck_api::DeckError::Unsupported {
+                operation: deck_api::DeckOperation::Identity,
+            })
+        }
+        fn set_brightness(&mut self, _value: u8) -> Result<(), deck_api::DeckError> {
+            Ok(())
+        }
+        fn set_key_image(
+            &mut self,
+            key: deck_api::KeyId,
+            _jpeg: &[u8],
+        ) -> Result<(), deck_api::DeckError> {
+            if key.index() == 0 {
+                return Err(deck_api::DeckError::Transport(
+                    deck_api::TransportError::Io("the link died".to_string()),
+                ));
+            }
+            Ok(())
+        }
+        fn clear_key(&mut self, _key: deck_api::KeyId) -> Result<(), deck_api::DeckError> {
+            Ok(())
+        }
+        fn clear_all(&mut self) -> Result<(), deck_api::DeckError> {
+            Ok(())
+        }
+        fn sleep(&mut self) -> Result<(), deck_api::DeckError> {
+            Ok(())
+        }
+        fn set_dial(&mut self, _dial: u8, _value: u8) -> Result<(), deck_api::DeckError> {
+            Err(deck_api::DeckError::DialOutOfRange {
+                dial: 0,
+                dial_count: 0,
+            })
+        }
+        fn poll_events(
+            &mut self,
+            _timeout: std::time::Duration,
+        ) -> Result<Vec<deck_api::KeyEvent>, deck_api::DeckError> {
+            Ok(Vec::new())
+        }
+        fn reconnect(&mut self) -> Result<(), deck_api::DeckError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_picture_the_library_no_longer_holds_does_not_stop_the_page() {
+        // The library is empty on purpose: every name is a picture it no
+        // longer holds, which is the state the profile on the desk was in when
+        // the deck came back black.
+        let dir = scratch("paint-page-missing-asset");
+        let assets = AssetLibrary::new(dir.join("assets"));
+        let painted = Arc::new(Mutex::new(Vec::new()));
+        let mut session = crate::session::DeckSession::new(Box::new(Recording {
+            inner: deck_simulator::SixKeyDeck::new(),
+            painted: Arc::clone(&painted),
+        }));
+        let spec = session.image_spec();
+        let mut tiles = Some(crate::render::TileCache::new(spec));
+        let mut text: Option<crate::titletext::TextEngine> = None;
+
+        let missing = AssetName::parse("gone-arrow.jpg").expect("a usable name");
+        let plans = vec![
+            Tile::Asset {
+                name: missing,
+                title: None,
+                style: crate::titlestyle::TitleStyle::default(),
+            },
+            Tile::Colour([0, 200, 0]),
+        ];
+        let actions = vec![None, None];
+        let mut painted_slots = vec![Slot::Off, Slot::Off];
+
+        let misses = paint_page(
+            &mut session,
+            &plans,
+            &actions,
+            &mut painted_slots,
+            Slot::White,
+            PaintContext {
+                assets: &assets,
+                tiles: &mut tiles,
+                text: &mut text,
+            },
+        )
+        .expect("the fake deck accepts every report");
+
+        // The miss is named, with the key the user knows it by.
+        assert_eq!(misses.len(), 1, "one key missed: {misses:?}");
+        assert_eq!(misses[0].key, 1);
+        assert!(
+            misses[0].reason.contains("gone-arrow.jpg"),
+            "the reason names the file: {}",
+            misses[0].reason
+        );
+        // And it stopped nothing: the key after the miss painted.
+        let seen = painted.lock().expect("never poisoned").clone();
+        assert_eq!(seen, vec![1], "the key after the miss painted: {seen:?}");
+        // The missed key keeps the slot it had; the painted one says its colour.
+        assert_eq!(painted_slots, vec![Slot::Off, Slot::White]);
+
+        cleanup(dir);
+    }
+
+    #[test]
+    fn a_dead_link_stops_the_page_and_leaves_the_rest_unpainted() {
+        let mut session = crate::session::DeckSession::new(Box::new(DeadOnFirstKey));
+        let plans = vec![Tile::Colour([0, 0, 200]), Tile::Colour([0, 200, 0])];
+        let actions = vec![None, None];
+        let mut painted = vec![Slot::Off, Slot::Off];
+
+        let outcome = paint_page(
+            &mut session,
+            &plans,
+            &actions,
+            &mut painted,
+            Slot::Off,
+            PaintContext {
+                // Never read: both plans are flat colours, so the library
+                // has no say in this test.
+                assets: &AssetLibrary::new(std::env::temp_dir()),
+                tiles: &mut None,
+                text: &mut None,
+            },
+        );
+
+        // The link's failure is the answer, and nothing after it was tried.
+        assert!(outcome.is_err(), "a dead link is an error, not a miss");
+        assert_eq!(
+            painted,
+            vec![Slot::Off, Slot::Off],
+            "a dead link paints nothing"
+        );
+    }
+
+    #[test]
+    fn a_page_with_no_misses_keeps_the_sentence_it_always_had() {
+        // The key count is spelled as a local, not as a bare number, so the
+        // window's own guard cannot mistake this test for a claim about the
+        // deck's shape.
+        let keys = 12;
+        assert_eq!(
+            page_paint_note(0, keys, Slot::Off, &[]),
+            "All 12 keys painted off."
+        );
+        assert_eq!(
+            page_paint_note(4, keys, Slot::Off, &[]),
+            "4 of 12 keys show what they run."
+        );
+    }
+
+    #[test]
+    fn a_page_with_misses_counts_and_names_every_one() {
+        let misses = vec![
+            PaintMiss {
+                key: 1,
+                reason: "the library holds no asset named \"gone-back.jpg\"".to_string(),
+            },
+            PaintMiss {
+                key: 5,
+                reason: "the library holds no asset named \"gone-forward.jpg\"".to_string(),
+            },
+        ];
+        let note = page_paint_note(1, 12, Slot::Off, &misses);
+
+        assert!(note.contains("10 of 12 keys painted."), "{note}");
+        assert!(note.contains("key 1"), "{note}");
+        assert!(note.contains("gone-back.jpg"), "{note}");
+        assert!(note.contains("key 5"), "{note}");
+        assert!(note.contains("gone-forward.jpg"), "{note}");
+
+        // A caller writing its own sentence gets the same list, and nothing
+        // when there is nothing to list.
+        let sentence = misses_sentence(&misses).expect("two misses are a sentence");
+        assert!(
+            sentence.starts_with("Could not be painted: key 1"),
+            "{sentence}"
+        );
+        assert!(misses_sentence(&[]).is_none());
     }
 }
