@@ -66,6 +66,16 @@ impl ActionStore {
     pub fn set(&mut self, key: KeyNumber, action: Action) -> Result<(), ActionError> {
         let action = action.without_wrapping_quotes();
         action.validate()?;
+        self.place(key, action);
+        Ok(())
+    }
+
+    /// Puts an already validated action on a key, replacing what it had.
+    ///
+    /// The vector stays ordered by key, so every read that walks it — the
+    /// window's icon warm-up, the file — sees the keys in the order the deck
+    /// shows them.
+    fn place(&mut self, key: KeyNumber, action: Action) {
         match self
             .bindings
             .binary_search_by_key(&key, |binding| binding.key)
@@ -73,7 +83,32 @@ impl ActionStore {
             Ok(index) => self.bindings[index].action = action,
             Err(index) => self.bindings.insert(index, Binding { key, action }),
         }
-        Ok(())
+    }
+
+    /// Exchanges what two keys do.
+    ///
+    /// This is a swap, not an assignment: the user dragged one key onto another
+    /// to trade their places, so the key that was empty stays empty and the one
+    /// that was bound stays bound — on the other key. Nothing is copied, so a
+    /// swap never leaves two keys running the same program by accident.
+    pub fn swap(&mut self, from: KeyNumber, to: KeyNumber) {
+        if from == to {
+            return;
+        }
+        let from_action = self.get(from).cloned();
+        let to_action = self.get(to).cloned();
+        match to_action {
+            Some(action) => self.place(from, action),
+            None => {
+                self.remove(from);
+            }
+        }
+        match from_action {
+            Some(action) => self.place(to, action),
+            None => {
+                self.remove(to);
+            }
+        }
     }
 
     /// Removes the binding of a key, returning what it did.
@@ -210,6 +245,51 @@ mod tests {
         assert!(store.remove(key(3)).is_some());
         assert!(store.get(key(3)).is_none());
         assert!(store.get(key(4)).is_some());
+    }
+
+    #[test]
+    fn a_swap_trades_two_bound_keys_and_keeps_the_order() {
+        let mut store = ActionStore::new();
+        store.set(key(1), launch()).expect("valid action");
+        store.set(key(4), open_url()).expect("valid action");
+
+        store.swap(key(1), key(4));
+
+        assert_eq!(store.get(key(1)), Some(&open_url()));
+        assert_eq!(store.get(key(4)), Some(&launch()));
+        assert_eq!(store.len(), 2, "a swap invents no binding");
+        let order: Vec<u8> = store.bindings().iter().map(|b| b.key.get()).collect();
+        assert_eq!(order, [1, 4], "the bindings stay ordered by key");
+    }
+
+    #[test]
+    fn a_swap_with_an_empty_key_moves_the_binding_instead_of_copying_it() {
+        let mut store = ActionStore::new();
+        store.set(key(2), keystroke()).expect("valid action");
+
+        // The key the user drops onto is empty: it takes the action, and the
+        // key it came from keeps nothing. A copy would be two keys running one
+        // program the user only ever bound once.
+        store.swap(key(2), key(9));
+
+        assert_eq!(store.get(key(9)), Some(&keystroke()));
+        assert_eq!(
+            store.get(key(2)),
+            None,
+            "the empty key moved, it was not left behind"
+        );
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn a_swap_between_a_key_and_itself_changes_nothing() {
+        let mut store = ActionStore::new();
+        store.set(key(5), launch()).expect("valid action");
+
+        store.swap(key(5), key(5));
+
+        assert_eq!(store.get(key(5)), Some(&launch()));
+        assert_eq!(store.len(), 1);
     }
 
     #[test]

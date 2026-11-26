@@ -44,6 +44,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::appearance::Appearance;
 use crate::error::{ActionError, TitleError};
+use crate::key::KeyNumber;
 use crate::store::ActionStore;
 use crate::title::TitleStyle;
 
@@ -187,6 +188,26 @@ impl PageKeys {
         }
         self.titles.insert(key, title.to_string());
         Ok(())
+    }
+
+    /// Exchanges everything two keys do and show.
+    ///
+    /// The binding, the picture, the words and the words' style travel together,
+    /// because they are one key: a swap that moved only the binding would leave a
+    /// picture and a title naming something the key no longer runs. A key with
+    /// nothing on it moves as an absence — nothing is copied and nothing is
+    /// overwritten — so two keys trade places and both stay exactly as full as
+    /// they were.
+    pub fn swap_keys(&mut self, from: KeyNumber, to: KeyNumber) {
+        if from == to {
+            return;
+        }
+        self.bindings.swap(from, to);
+        let from = u16::from(from.get());
+        let to = u16::from(to.get());
+        swap_entry(&mut self.appearance, from, to);
+        swap_entry(&mut self.titles, from, to);
+        swap_entry(&mut self.title_styles, from, to);
     }
 
     /// The colour for a key that shows one, or `None` when it shows an image or
@@ -493,6 +514,21 @@ impl Profile {
     }
 }
 
+/// Exchanges two entries of a key-addressed map, taking absence with them.
+///
+/// A missing key is not an error here: it is how "nothing on this key" is
+/// spelled, and it is exactly what the swap has to move.
+fn swap_entry<T>(map: &mut BTreeMap<u16, T>, from: u16, to: u16) {
+    let from_value = map.remove(&from);
+    let to_value = map.remove(&to);
+    if let Some(value) = from_value {
+        map.insert(to, value);
+    }
+    if let Some(value) = to_value {
+        map.insert(from, value);
+    }
+}
+
 /// Whether `name` can address a page.
 fn page_name_is_valid(name: &str) -> bool {
     !name.is_empty()
@@ -760,6 +796,39 @@ impl ProfileStore {
             .ok_or_else(|| format!("no such page: {}", page.unwrap_or("")))?
             .set_title(key, title)
             .map_err(|error| error.to_string())
+    }
+
+    /// Exchanges two keys of one page, everything they do and show included.
+    ///
+    /// The page is the authority on what a key does and shows, so the swap is
+    /// made there and written by the caller with [`ProfileStore::save`] — the
+    /// same order [`ProfileStore::set_title`] and
+    /// [`ProfileStore::set_appearance`] follow. A page that is no longer there
+    /// is a sentence, never a silent no-op: the window would otherwise repaint
+    /// two keys that did not move.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the missing profile or page.
+    pub fn swap_keys(
+        &mut self,
+        from: KeyNumber,
+        to: KeyNumber,
+        page: Option<&str>,
+    ) -> Result<(), String> {
+        let name = self
+            .active
+            .clone()
+            .ok_or_else(|| "no active profile".to_string())?;
+        let profile = self
+            .profiles
+            .get_mut(&name)
+            .ok_or_else(|| format!("no such profile: {name}"))?;
+        profile
+            .page_mut(page)
+            .ok_or_else(|| format!("no such page: {}", page.unwrap_or("")))?
+            .swap_keys(from, to);
+        Ok(())
     }
 
     pub fn set_appearance(
@@ -1257,6 +1326,117 @@ mod tests {
             !json.contains("\"titles\""),
             "an empty titles map must not be written: {json}"
         );
+    }
+
+    #[test]
+    fn a_swap_moves_a_keys_binding_picture_and_words_together() {
+        // A key is one thing: what it runs, what it shows and what it says. A
+        // swap that moved only the binding would leave a picture and a title
+        // naming something the key no longer runs.
+        let mut keys = PageKeys::default();
+        let one = KeyNumber::new(1).expect("key 1");
+        let seven = KeyNumber::new(7).expect("key 7");
+        let mute = Action::keys("ctrl+m").expect("a combination");
+        let docs = Action::OpenUrl {
+            url: "https://example.com".to_string(),
+        };
+        keys.bindings.set(one, mute.clone()).expect("bind");
+        keys.bindings.set(seven, docs.clone()).expect("bind");
+        keys.set_title(1, Some("Mute")).expect("title");
+        keys.set_title(7, Some("Docs")).expect("title");
+        keys.appearance
+            .insert(1, Appearance::Solid { rgb: [1, 2, 3] });
+        keys.appearance
+            .insert(7, Appearance::Solid { rgb: [4, 5, 6] });
+        let loud = TitleStyle {
+            family: "Georgia".to_string(),
+            size_px: 24,
+            position: TitlePosition::Top,
+            uppercase: true,
+        };
+        keys.set_title_style(1, Some(loud.clone()));
+
+        keys.swap_keys(one, seven);
+
+        assert_eq!(keys.bindings.get(one), Some(&docs));
+        assert_eq!(keys.bindings.get(seven), Some(&mute));
+        assert_eq!(keys.title(1), Some("Docs"));
+        assert_eq!(keys.title(7), Some("Mute"));
+        assert_eq!(
+            keys.appearance_for(1),
+            Some(&Appearance::Solid { rgb: [4, 5, 6] })
+        );
+        assert_eq!(
+            keys.appearance_for(7),
+            Some(&Appearance::Solid { rgb: [1, 2, 3] })
+        );
+        assert_eq!(
+            keys.title_style(7),
+            Some(&loud.clamped()),
+            "a key's own style travels with the words it styles"
+        );
+        assert_eq!(keys.title_style(1), None, "and is not copied onto both");
+    }
+
+    #[test]
+    fn a_swap_does_not_invent_what_the_empty_key_did_not_have() {
+        let mut keys = PageKeys::default();
+        let two = KeyNumber::new(2).expect("key 2");
+        let nine = KeyNumber::new(9).expect("key 9");
+        keys.bindings
+            .set(two, Action::keys("ctrl+m").expect("a combination"))
+            .expect("bind");
+        keys.set_title(2, Some("Mute")).expect("title");
+
+        keys.swap_keys(two, nine);
+
+        assert_eq!(keys.bindings.get(two), None);
+        assert!(keys.bindings.get(nine).is_some());
+        assert_eq!(keys.title(2), None);
+        assert_eq!(keys.title(9), Some("Mute"));
+        assert_eq!(keys.bindings.len(), 1, "nothing was copied");
+    }
+
+    #[test]
+    fn a_swap_survives_a_save_and_a_load() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = ProfileStore::new();
+        let one = KeyNumber::new(1).expect("key 1");
+        let four = KeyNumber::new(4).expect("key 4");
+        {
+            let page = store
+                .active_mut()
+                .expect("the active profile")
+                .page_mut(None)
+                .expect("the root");
+            page.bindings
+                .set(one, Action::keys("ctrl+m").expect("a combination"))
+                .expect("bind");
+            page.bindings
+                .set(
+                    four,
+                    Action::OpenUrl {
+                        url: "https://example.com".to_string(),
+                    },
+                )
+                .expect("bind");
+            page.set_title(1, Some("Mute")).expect("title");
+        }
+        store.swap_keys(one, four, None).expect("swap");
+        store.save("deck", dir.path()).expect("save");
+
+        let read = ProfileStore::load("deck", dir.path()).expect("load");
+        let root = &read.active().expect("the profile").root;
+        assert_eq!(
+            root.bindings.get(one).map(Action::summary).as_deref(),
+            Some("OPEN example.com")
+        );
+        assert_eq!(
+            root.bindings.get(four).map(Action::summary).as_deref(),
+            Some("Ctrl+M")
+        );
+        assert_eq!(root.title(1), None);
+        assert_eq!(root.title(4), Some("Mute"));
     }
 
     #[test]

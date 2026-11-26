@@ -9,9 +9,9 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
-    div, px, AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, RenderImage, SharedString, StatefulInteractiveElement as _,
-    Styled as _,
+    div, px, AnyElement, AppContext as _, ClickEvent, Context, Div, FontWeight, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, RenderImage, SharedString,
+    StatefulInteractiveElement as _, Styled as _,
 };
 use std::sync::Arc;
 
@@ -260,6 +260,11 @@ fn key_card(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Contro
         )
         .child(toolbar(controller, tokens, cx))
         .child(grid(controller, tokens, cx))
+        .child(one_line(
+            "Drag one key onto another to trade their places.",
+            FONT_CAPTION,
+            tokens.soft,
+        ))
         .child(deck_actions(controller, tokens, cx))
 }
 
@@ -532,6 +537,32 @@ fn grid(controller: &mut Controller, tokens: Tokens, cx: &mut Context<Controller
         .children(built)
 }
 
+/// One key being dragged onto another key.
+///
+/// The payload carries the key numbers the store addresses, because a drag
+/// between keys is a **swap of places**, not a copy: the drop needs both ends
+/// and nothing else. `from` is an `Option` so a tile that addresses no key on
+/// this deck can still be built and still refuses to start a drag worth
+/// taking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct KeyDrag {
+    /// The key that is moving.
+    pub from: Option<ss550_engine::KeyNumber>,
+}
+
+/// Whether a key drop may land: two different keys of a connected deck.
+///
+/// A key dropped on itself is the gesture that did not go anywhere, and a deck
+/// that is not connected has no key to move: both are refusals, not empty
+/// swaps.
+pub(crate) fn keys_can_swap(
+    from: Option<ss550_engine::KeyNumber>,
+    to: Option<ss550_engine::KeyNumber>,
+    accepts: bool,
+) -> bool {
+    accepts && from.is_some() && to.is_some() && from != to
+}
+
 /// One square key: its number, what it shows, and what pressing it runs.
 ///
 /// The tile is also the palette's drop target. `can_drop` is what makes the
@@ -552,6 +583,12 @@ fn tile(
         .binding
         .clone()
         .unwrap_or_else(|| SharedString::from("NO ACTION"));
+    // What rides the pointer when this key is dragged: the key it is, and the
+    // one line that says what it runs. Built before the faces take the binding.
+    let drag_label = match cell.binding.as_ref() {
+        Some(bound) => SharedString::from(format!("#{} · {bound}", index + 1)),
+        None => SharedString::from(format!("#{}", index + 1)),
+    };
 
     let mut tile = div()
         .id(("deck-key", index))
@@ -723,6 +760,21 @@ fn tile(
         }
     }
 
+    // A tile is a drag source of its own: dragging one key onto another trades
+    // their places. gpui only starts the drag once the pointer has moved past
+    // its threshold, so a plain click still selects the key and nothing else.
+    if accepts && target.is_some() {
+        tile = tile
+            .cursor_grab()
+            .on_drag(KeyDrag { from: target }, move |drag, _, _, cx| {
+                let label = match drag.from {
+                    Some(_) => drag_label.clone(),
+                    None => SharedString::from("key"),
+                };
+                cx.new(|_| palette::DragGhost::new(label, tokens))
+            });
+    }
+
     tile.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
         // A click picks the key and nothing else. Touching a key to look at it
         // must never repaint it: keys carry actions with parameters, and a
@@ -737,9 +789,28 @@ fn tile(
     // The palette's half of the drop: `drag_over` is the look while a
     // compatible drag is over the tile, and it is only applied when `can_drop`
     // agrees, so a tile that cannot take the entry never pretends it can.
-    .can_drop(move |_, _, _| accepts && target.is_some())
+    .can_drop(move |drag, _, _| {
+        if !accepts || target.is_none() {
+            return false;
+        }
+        if drag.is::<palette::PaletteDrag>() {
+            return true;
+        }
+        // A key drop needs two different keys: a key dropped on itself is the
+        // gesture that did not go anywhere, not a swap with itself.
+        drag.downcast_ref::<KeyDrag>()
+            .is_some_and(|moving| keys_can_swap(moving.from, target, accepts))
+    })
     .drag_over::<palette::PaletteDrag>(move |style, _, _, _| {
         style.bg(tokens.accent_tint).border_color(tokens.accent)
+    })
+    .drag_over::<KeyDrag>(move |style, drag, _, _| {
+        // The same rule the drop uses, so a key never glows for a drop it would
+        // refuse: not itself, not a tile that addresses nothing.
+        match keys_can_swap(drag.from, target, accepts) {
+            true => style.bg(tokens.accent_tint).border_color(tokens.accent),
+            false => style,
+        }
     })
     .on_drop(
         cx.listener(move |this, drag: &palette::PaletteDrag, window, cx| {
@@ -750,6 +821,13 @@ fn tile(
             cx.notify();
         }),
     )
+    .on_drop(cx.listener(move |this, drag: &KeyDrag, window, cx| {
+        let (Some(from), Some(to)) = (drag.from, target) else {
+            return;
+        };
+        this.swap_keys(from, to, window, cx);
+        cx.notify();
+    }))
     .into_any_element()
 }
 
@@ -1239,8 +1317,8 @@ fn empty_card(tokens: Tokens, cx: &mut Context<Controller>) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{
-        appearance_label, face_for, grid_card_min, resolved_face, slot_colours, tile_size,
-        title_words, Face, TILE_MAX, TILE_MIN,
+        appearance_label, face_for, grid_card_min, keys_can_swap, resolved_face, slot_colours,
+        tile_size, title_words, Face, TILE_MAX, TILE_MIN,
     };
     use crate::icons::Artwork;
     use crate::titlestyle::TitleStyle;
@@ -1248,7 +1326,22 @@ mod tests {
     use crate::Slot;
     use gpui_kit::component::Theme;
     use gpui_kit::SharedString;
-    use ss550_engine::{Appearance, AssetName};
+    use ss550_engine::{Appearance, AssetName, KeyNumber};
+
+    #[test]
+    fn a_key_drop_needs_two_different_keys_on_a_connected_deck() {
+        // The three refusals the gesture has: no deck, a key that addresses
+        // nothing, and a key dropped on itself. None of them is an empty swap
+        // that still saves the page.
+        let one = KeyNumber::new(1).expect("key 1");
+        let seven = KeyNumber::new(7).expect("key 7");
+
+        assert!(keys_can_swap(Some(one), Some(seven), true));
+        assert!(!keys_can_swap(Some(one), Some(seven), false), "no deck");
+        assert!(!keys_can_swap(None, Some(seven), true), "nothing moving");
+        assert!(!keys_can_swap(Some(one), None, true), "nothing to land on");
+        assert!(!keys_can_swap(Some(one), Some(one), true), "not itself");
+    }
 
     #[test]
     fn the_window_label_says_what_the_key_says() {

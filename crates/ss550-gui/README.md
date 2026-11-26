@@ -80,6 +80,11 @@ whatever is bound to it.
 - A path pasted with its quotes — what Explorer's *Copy as path* produces —
   is accepted: the matching pair is stripped before the action is stored and
   before it runs.
+- Dragging one key tile onto another **trades their places**: the binding, the
+  picture, the title and the title's style move together to the other number,
+  and the page is saved with the swap. Neither key is overwritten — a key with
+  nothing bound moves as an empty key — and a key dropped on itself changes
+  nothing.
 
 ## Background mode
 
