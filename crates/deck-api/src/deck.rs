@@ -180,6 +180,15 @@ impl Deck for DeckHandle {
         self.inner.keep_alive()
     }
 
+    fn preflight(&mut self) -> Result<(), DeckError> {
+        // Forgetting this forward is not a small omission: the trait's default
+        // answers `Ok` without writing, so a deck that answers its reads and
+        // refuses a write is reported healthy and then fed fifteen images. It is
+        // also how the heartbeat stopped: no `DIS`, no wake, `keepalive`
+        // declining forever, and the deck resetting itself every few minutes.
+        self.inner.preflight()
+    }
+
     fn set_dial(&mut self, dial: u8, value: u8) -> Result<(), DeckError> {
         self.inner.set_dial(dial, value)
     }
