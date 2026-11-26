@@ -1,11 +1,30 @@
 //! Sending key combinations with Win32 `SendInput`.
 //!
 //! A combination is delivered the way a hand would type it: the modifiers go
-//! down in a fixed order, the key goes down and comes back up, and the
-//! modifiers are released in the reverse order. The order is fixed on purpose.
-//! `Ctrl`, `Alt`, `Shift`, `Win` is the order the system itself reports, and
-//! releasing in the reverse of the presses is what leaves no modifier stuck
-//! down when a send fails halfway.
+//! down in a fixed order, the key goes down, it is held for a moment, and then
+//! it comes back up with the modifiers released in the reverse order. The order
+//! is fixed on purpose. `Ctrl`, `Alt`, `Shift`, `Win` is the order the system
+//! itself reports, and releasing in the reverse of the presses is what leaves no
+//! modifier stuck down when a send fails halfway.
+//!
+//! ## Scan codes, not virtual keys
+//!
+//! Every event leaves here carrying a **hardware scan code** (`wScan` with
+//! `KEYEVENTF_SCANCODE`), never a bare virtual key. A scan code is what the
+//! keyboard sends and what Windows turns into a virtual key; a virtual key on
+//! its own is the derived half. Text fields read the derived key, so a bare
+//! virtual key types in Notepad — but everything that reads the keyboard *as a
+//! device* reads the scan code, and Raw Input reports `MakeCode = 0` for a
+//! virtual-key-only event. That is a key no keyboard has, and a game binding a
+//! key never sees it fire. Keys a keyboard prefixes with `E0` (the arrows, the
+//! navigation cluster, the media keys) keep that prefix as
+//! `KEYEVENTF_EXTENDEDKEY`; without it the same scan code arrives as the
+//! keypad's twin.
+//!
+//! Between the presses and the releases the keys are held for
+//! [`HOLD`]: a real key is held for tens of milliseconds, and pressing and
+//! releasing inside one input tick is invisible to a game that samples the
+//! keyboard once per frame.
 //!
 //! Everything except the `SendInput` call is a plain function over plain data,
 //! so the mapping is tested without a keyboard: the codes below are the ones
@@ -24,6 +43,9 @@
 //! | `BaseKey::Function(1..24)` | `VK_F1`..`VK_F24`, `0x70`..`0x87` |
 //! | `BaseKey::Named(..)` | the table in [`named_code`] |
 //! | `BaseKey::Punctuation(..)` | the OEM keys in [`punctuation_code`] |
+//!
+//! The virtual key is an intermediate step: [`system_scan_code`] turns it into
+//! the scan code the layout pairs with it, and that is what goes out.
 
 use ss550_engine::{BaseKey, KeyCombo, KeySender, MediaCommand, Modifier, NamedKey};
 
@@ -167,6 +189,89 @@ fn strokes(combo: &KeyCombo) -> Result<Vec<KeyStroke>, String> {
     Ok(strokes)
 }
 
+/// One key event as the system's input stack takes it: a **hardware scan code**.
+///
+/// A scan code is what a keyboard sends and a virtual key is what Windows
+/// derives from it, so only the scan code survives the trip to a game. See the
+/// module documentation for why this crate never sends a bare virtual key.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ScanStroke {
+    /// The scan code, without its `E0` prefix.
+    scan: u16,
+    /// True when a keyboard prefixes this key with `E0`.
+    extended: bool,
+    /// True when the key is released.
+    up: bool,
+}
+
+/// The virtual keys a keyboard prefixes with `E0` that `MapVirtualKey` does not
+/// report that way.
+///
+/// Windows answers the navigation cluster with a **plain** scan code even though
+/// a keyboard sends `E0 48` for Up; sending the plain code would arrive as the
+/// keypad's `8`. These are the cluster's keys in the engine's vocabulary, taken
+/// from the set Windows itself documents as extended.
+fn is_extended(code: u16) -> bool {
+    matches!(
+        code,
+        0x21..=0x28 // PageUp, PageDown, End, Home, Left, Up, Right, Down
+        | 0x2D      // Insert
+        | 0x2E // Delete
+    )
+}
+
+/// Translates the virtual keys of a sequence into the scan codes a keyboard sends.
+///
+/// `lookup` is the platform's virtual-key-to-scan-code table, passed in so the
+/// translation is a plain function a test can drive. A key the table does not
+/// answer for is refused with a sentence rather than sent as scan code zero:
+/// zero is not a key any keyboard has.
+fn scan_strokes(
+    sequence: &[KeyStroke],
+    lookup: impl Fn(u16) -> Option<u16>,
+) -> Result<Vec<ScanStroke>, String> {
+    sequence
+        .iter()
+        .map(|stroke| {
+            let packed = lookup(stroke.code).ok_or_else(|| {
+                format!(
+                    "the key 0x{:02X} has no hardware scan code on this keyboard layout",
+                    stroke.code
+                )
+            })?;
+            Ok(ScanStroke {
+                scan: packed & 0xFF,
+                // `MapVirtualKey` puts the E0 prefix in the high byte, but only
+                // for the keys it counts as extended; the navigation cluster is
+                // the documented exception.
+                extended: (packed >> 8) & 0xFF == 0xE0 || is_extended(stroke.code),
+                up: stroke.up,
+            })
+        })
+        .collect()
+}
+
+/// The scan code the keyboard layout pairs with a virtual key, E0 prefix and all.
+#[cfg(windows)]
+fn system_scan_code(code: u16) -> Option<u16> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyW, MAPVK_VK_TO_VSC_EX};
+
+    // SAFETY: `MapVirtualKeyW` only reads the keyboard layout and answers a
+    // value; it touches no memory this process owns. Zero means the layout has
+    // no scan code for this key, which is a refusal, not a key press.
+    let packed = unsafe { MapVirtualKeyW(u32::from(code), MAPVK_VK_TO_VSC_EX) };
+    u16::try_from(packed).ok().filter(|packed| *packed != 0)
+}
+
+/// How long the keys are held down between the presses and the releases.
+///
+/// A hand holds a key for tens of milliseconds. Pressing and releasing inside
+/// one tick is invisible to a game that samples the keyboard once per frame, so
+/// the presses go out, the keys stay down a little over one frame at 60 Hz, and
+/// then they come back up. It is short enough to stay inside the deck's latency
+/// budget and long enough for a frame to see it.
+const HOLD: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// The platform's way of sending a keystroke to the focused window.
 ///
 /// On Windows this is `SendInput`. Everywhere else there is no call this crate
@@ -205,32 +310,96 @@ impl KeySender for SystemKeySender {
 }
 
 /// Hands the keystrokes to the system.
+///
+/// The presses go out first, then the keys are held for [`HOLD`], then the
+/// releases go out. Every record carries a scan code; the module documentation
+/// says why.
 #[cfg(windows)]
 fn deliver(sequence: &[KeyStroke]) -> Result<(), String> {
+    let strokes = scan_strokes(sequence, system_scan_code)?;
+
+    // `strokes` is presses followed by releases, so the first release is the
+    // boundary between the two batches.
+    let split = strokes
+        .iter()
+        .position(|stroke| stroke.up)
+        .unwrap_or(strokes.len());
+    let (presses, releases) = strokes.split_at(split);
+
+    if let Err(counts) = send_batch(presses) {
+        // Whatever the system did take may have been a modifier going down, and
+        // a modifier left down is not a failed shortcut: it is a keyboard the
+        // user has to fix by hand, with Ctrl or Alt stuck and the mouse behaving
+        // like it is held. So every key this attempt could have pressed is
+        // released before the error goes back, and the release is best-effort:
+        // it cannot fail worse than the state it is repairing.
+        release_attempted(presses);
+        return Err(format!(
+            "Windows accepted {counts} key presses, so the combination was not sent"
+        ));
+    }
+
+    std::thread::sleep(HOLD);
+
+    if let Err(counts) = send_batch(releases) {
+        // The presses landed, so a key may still be down. Releasing again is
+        // best-effort, and the sentence says that is what happened.
+        release_attempted(presses);
+        return Err(format!(
+            "Windows accepted {counts} key releases; every key was released again"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Builds the `INPUT` record one scan-code stroke is sent as.
+#[cfg(windows)]
+fn input_for(stroke: &ScanStroke) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-        VIRTUAL_KEY,
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+        KEYEVENTF_SCANCODE, VIRTUAL_KEY,
     };
 
-    let inputs: Vec<INPUT> = sequence
-        .iter()
-        .map(|stroke| INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(stroke.code),
-                    wScan: 0,
-                    dwFlags: if stroke.up {
-                        KEYEVENTF_KEYUP
-                    } else {
-                        KEYBD_EVENT_FLAGS::default()
-                    },
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
+    let mut flags = KEYEVENTF_SCANCODE;
+    if stroke.extended {
+        // Without this prefix the same scan code arrives as the keypad's twin.
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    if stroke.up {
+        flags |= KEYEVENTF_KEYUP;
+    }
+
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                // A scan-code event ignores the virtual key; stating zero keeps
+                // it obvious that none was derived here.
+                wVk: VIRTUAL_KEY(0),
+                wScan: stroke.scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
             },
-        })
-        .collect();
+        },
+    }
+}
+
+/// Hands one batch of scan-code strokes to the system.
+///
+/// The error is the short count as `sent of expected`: `SendInput` refuses the
+/// rest when, for instance, the foreground window belongs to a higher-integrity
+/// process, and only the caller knows what the loss means for the combination.
+#[cfg(windows)]
+fn send_batch(strokes: &[ScanStroke]) -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT};
+
+    if strokes.is_empty() {
+        return Ok(());
+    }
+
+    let inputs: Vec<INPUT> = strokes.iter().map(input_for).collect();
 
     // SAFETY: the slice is a live array of `INPUT` records, and the size passed
     // with it is that of one record, which is what `SendInput` reads. Nothing
@@ -238,60 +407,31 @@ fn deliver(sequence: &[KeyStroke]) -> Result<(), String> {
     // is ever written or read.
     let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
 
-    // A short count means the system took some events and refused the rest -
-    // typically because the foreground window belongs to a higher-integrity
-    // process. Reporting it is the only way the window can say the keystroke
-    // did not arrive; a half-sent combination is not a success. Whatever the
-    // system did take may have been a modifier going down, and a modifier left
-    // down is not a failed shortcut: it is a keyboard the user has to fix by
-    // hand, with Ctrl or Alt stuck and the mouse behaving like it is held. So
-    // every key this attempt could have pressed is released before the error
-    // goes back, and the release is best-effort: it cannot fail worse than the
-    // state it is repairing.
     if (sent as usize) < inputs.len() {
-        release_attempted(&inputs);
-        return Err(format!(
-            "Windows accepted {sent} of {} key events, so the combination was not sent",
-            inputs.len()
-        ));
+        return Err(format!("{sent} of {}", inputs.len()));
     }
     Ok(())
 }
 
-/// Releases every key `attempted` could have left down, ignoring the outcome.
+/// Releases every key `pressed` could have left down, ignoring the outcome.
 ///
 /// The keys are released in the reverse order they were pressed in, which is the
-/// order a hand would let go of them.
+/// order a hand would let go of them, and each release carries the same scan
+/// code and `E0` prefix as the press it is undoing.
 #[cfg(windows)]
-fn release_attempted(attempted: &[windows::Win32::UI::Input::KeyboardAndMouse::INPUT]) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
-    };
-
-    let mut releases: Vec<INPUT> = attempted
+fn release_attempted(pressed: &[ScanStroke]) {
+    let mut releases: Vec<ScanStroke> = pressed
         .iter()
-        .map(|input| {
-            let code = unsafe { input.Anonymous.ki.wVk };
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VIRTUAL_KEY(code.0),
-                        wScan: 0,
-                        dwFlags: KEYEVENTF_KEYUP,
-                        time: 0,
-                        dwExtraInfo: 0,
-                    },
-                },
-            }
+        .map(|stroke| ScanStroke {
+            up: true,
+            ..*stroke
         })
         .collect();
     releases.reverse();
 
-    // SAFETY: a live array of `INPUT` records with its own length, exactly as
-    // `deliver` builds them. The result is deliberately ignored: this runs on
-    // the path that is already reporting a failure.
-    let _ = unsafe { SendInput(&releases, std::mem::size_of::<INPUT>() as i32) };
+    // The result is deliberately ignored: this runs on the path that is already
+    // reporting a failure.
+    let _ = send_batch(&releases);
 }
 
 /// The virtual key a media command presses.
@@ -308,45 +448,13 @@ fn media_code(command: MediaCommand) -> u16 {
 }
 
 /// Presses and releases one media key.
+///
+/// It goes out through the same path as a combination, so it carries the `E0`
+/// prefix the key has on a real keyboard; without it the same scan code is a
+/// different key to anything reading the device.
 #[cfg(windows)]
 fn deliver_media(code: u16) -> Result<(), String> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
-    };
-
-    let events = [false, true].map(|release| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(code),
-                wScan: 0,
-                dwFlags: match release {
-                    true => KEYEVENTF_KEYUP,
-                    false => Default::default(),
-                },
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    });
-
-    // SAFETY: `events` is a live array of `INPUT` records and its length is
-    // passed with it; the call copies what it needs before returning.
-    let sent = unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) };
-    if (sent as usize) < events.len() {
-        // The press may have landed even when the release did not, and a media
-        // key left down is a player that skips tracks until the key repeats.
-        // Releasing is best-effort: it cannot fail worse than the state it is
-        // repairing.
-        let release = [events[1]];
-        // SAFETY: as above, for the one record that matters.
-        let _ = unsafe { SendInput(&release, std::mem::size_of::<INPUT>() as i32) };
-        return Err(format!(
-            "Windows accepted {sent} of {} media key events",
-            events.len()
-        ));
-    }
-    Ok(())
+    deliver(&[KeyStroke { code, up: false }, KeyStroke { code, up: true }])
 }
 
 /// Everywhere else there is no media key to send.
@@ -363,8 +471,11 @@ fn deliver(_sequence: &[KeyStroke]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{base_code, modifier_code, named_code, punctuation_code, strokes, KeyStroke};
-    use ss550_engine::{BaseKey, KeyCombo, Modifier, NamedKey};
+    use super::{
+        base_code, media_code, modifier_code, named_code, punctuation_code, scan_strokes, strokes,
+        KeyStroke, ScanStroke,
+    };
+    use ss550_engine::{BaseKey, KeyCombo, MediaCommand, Modifier, NamedKey};
 
     fn combo(text: &str) -> KeyCombo {
         KeyCombo::parse(text).expect("the test's own combination must parse")
@@ -593,6 +704,196 @@ mod tests {
                 sequence.iter().filter(|stroke| !stroke.up).count(),
                 combo(text).modifiers().len() + 1,
                 "{text:?}"
+            );
+        }
+    }
+
+    /// A scan-code stroke, for the tests that do not care about the lookup.
+    fn scanned(scan: u16, up: bool) -> ScanStroke {
+        ScanStroke {
+            scan,
+            extended: false,
+            up,
+        }
+    }
+
+    #[test]
+    fn every_press_becomes_a_scan_code_stroke_and_nothing_else_changes() {
+        // The translation keeps the order and the press/release sides exactly as
+        // `strokes` built them: it only swaps a virtual key for a scan code.
+        let sequence = strokes(&combo("ctrl+shift+m")).expect("a sequence");
+        let translated = scan_strokes(&sequence, Some).expect("a mapping");
+
+        assert_eq!(translated.len(), sequence.len());
+        for (before, after) in sequence.iter().zip(&translated) {
+            assert_eq!(after.scan, before.code, "{before:?}");
+            assert_eq!(after.up, before.up, "{before:?}");
+        }
+        assert_eq!(
+            translated,
+            vec![
+                scanned(0x11, false), // Ctrl
+                scanned(0x10, false), // Shift
+                scanned(0x4D, false), // M
+                scanned(0x4D, true),
+                scanned(0x10, true),
+                scanned(0x11, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_e0_prefix_is_what_marks_a_key_extended() {
+        // `MapVirtualKey` answers `0xE0` in the high byte for a key a keyboard
+        // prefixes with E0. Losing that byte would send "numpad 8" where the
+        // user asked for the Up arrow.
+        let sequence = strokes(&combo("up")).expect("a sequence");
+        let translated = scan_strokes(&sequence, |_| Some(0xE0_48)).expect("a mapping");
+        assert_eq!(
+            translated,
+            vec![
+                ScanStroke {
+                    scan: 0x48,
+                    extended: true,
+                    up: false,
+                },
+                ScanStroke {
+                    scan: 0x48,
+                    extended: true,
+                    up: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_navigation_cluster_is_extended_even_when_the_table_answers_a_plain_code() {
+        // Windows answers `VK_UP` with `0x48`, the same number the keypad's `8`
+        // has; only the E0 prefix tells them apart.
+        let sequence = strokes(&combo("up")).expect("a sequence");
+        let translated = scan_strokes(&sequence, |_| Some(0x48)).expect("a mapping");
+        assert!(translated
+            .iter()
+            .all(|stroke| stroke.extended && stroke.scan == 0x48));
+    }
+
+    #[test]
+    fn a_key_without_a_scan_code_is_refused_instead_of_sent_as_zero() {
+        // The bug this replaced: a virtual key with no scan code went out as
+        // `wScan: 0`, and every window that reads the keyboard as a keyboard
+        // (a game, Raw Input, DirectInput) saw a key that does not exist while
+        // text fields still accepted the virtual key.
+        let sequence = strokes(&combo("f24")).expect("a sequence");
+        let error = scan_strokes(&sequence, |_| None).expect_err("no mapping, no send");
+        assert!(error.contains("scan code"), "{error}");
+        // `VK_F24` is `0x87`; the sentence names the key so the log can be read.
+        assert!(error.contains("0x87"), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_media_keys_keep_the_e0_prefix_a_keyboard_sends() {
+        // A media key without its prefix is a different key to a player that
+        // reads the device, so the media path is pinned here as well.
+        for command in [
+            MediaCommand::PlayPause,
+            MediaCommand::Next,
+            MediaCommand::Previous,
+            MediaCommand::Stop,
+        ] {
+            let sequence = [KeyStroke {
+                code: media_code(command),
+                up: false,
+            }];
+            let translated = scan_strokes(&sequence, super::system_scan_code)
+                .unwrap_or_else(|error| panic!("{command:?}: {error}"));
+            assert!(
+                translated[0].extended,
+                "{command:?} must keep its E0 prefix"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn every_key_the_engine_can_build_has_a_hardware_scan_code() {
+        // The promise of the fix, taken from the system itself: no key in the
+        // vocabulary may translate to zero.
+        let mut keys: Vec<BaseKey> = Vec::new();
+        for letter in 'a'..='z' {
+            keys.push(BaseKey::Letter(letter));
+        }
+        for digit in '0'..='9' {
+            keys.push(BaseKey::Digit(digit));
+        }
+        for number in 1..=24 {
+            keys.push(BaseKey::Function(number));
+        }
+        for text in [
+            "up",
+            "down",
+            "left",
+            "right",
+            "enter",
+            "escape",
+            "tab",
+            "space",
+            "backspace",
+            "delete",
+            "home",
+            "end",
+            "pageup",
+            "pagedown",
+            "insert",
+        ] {
+            match KeyCombo::parse(text)
+                .expect("the test's own name must parse")
+                .base_key()
+            {
+                BaseKey::Named(named) => keys.push(BaseKey::Named(named)),
+                other => panic!("{other:?} is not a named key"),
+            }
+        }
+        for mark in [',', '.', '/', ';', '\'', '[', ']', '\\', '-', '=', '`'] {
+            keys.push(BaseKey::Punctuation(mark));
+        }
+
+        for key in keys {
+            let code = base_code(key).expect("the vocabulary has a virtual key");
+            let packed = super::system_scan_code(code)
+                .unwrap_or_else(|| panic!("{key:?} has no hardware scan code"));
+            assert_ne!(
+                packed & 0xFF,
+                0,
+                "{key:?} maps to scan code 0, which is a key no keyboard has"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_keys_a_keyboard_prefixes_with_e0_are_marked_extended() {
+        for text in [
+            "up", "down", "left", "right", "home", "end", "pageup", "pagedown", "insert", "delete",
+        ] {
+            let sequence = strokes(&combo(text)).expect("a sequence");
+            let translated = scan_strokes(&sequence, super::system_scan_code)
+                .unwrap_or_else(|error| panic!("{text:?}: {error}"));
+            assert!(
+                translated.iter().all(|stroke| stroke.extended),
+                "{text:?} must keep its E0 prefix"
+            );
+        }
+
+        // A key that a keyboard sends without a prefix must not grow one: E0
+        // would turn it into a different key on the receiving side.
+        for text in ["a", "1", "f1", "enter", "tab", "space", "backspace"] {
+            let sequence = strokes(&combo(text)).expect("a sequence");
+            let translated = scan_strokes(&sequence, super::system_scan_code)
+                .unwrap_or_else(|error| panic!("{text:?}: {error}"));
+            assert!(
+                translated.iter().all(|stroke| !stroke.extended),
+                "{text:?} must not be prefixed"
             );
         }
     }

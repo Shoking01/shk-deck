@@ -7,6 +7,29 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Fixed - a key press reached every text field and no game
+
+A deck key bound to `Keys` typed into Notepad and did nothing in a game: no bind
+fired in American Truck Simulator, in fullscreen or in windowed mode, while the
+same combination kept working everywhere else. The keystroke was sent as a bare
+virtual key (`wScan: 0`), and Raw Input reports `MakeCode = 0x00` for that — a
+key no keyboard has. Text fields read the derived virtual key and never noticed;
+everything that reads the keyboard as a device has no key to bind.
+
+`ss550-tray` now translates every stroke to its hardware scan code
+(`MapVirtualKeyW` + `KEYEVENTF_SCANCODE`) and sends it with the `E0` prefix the
+key has on a real keyboard (`KEYEVENTF_EXTENDEDKEY`), which Windows' own table
+does not report for the navigation cluster — without it the Up arrow arrives as
+the keypad's `8`. The presses and the releases are also split into two batches
+now, with the keys held for 20 ms, so a game that samples the keyboard once per
+frame can see them; both used to go out inside one input tick. `Media` goes
+through the same path and keeps its `E0` prefix.
+
+Measured with a Raw Input listener beside the sender: `MakeCode=0x00` before,
+`MakeCode=0x76` (F24) and `MakeCode=0x48 Flags=0x02` (Up, prefixed) after —
+indistinguishable from the physical arrow keys in the same log. Pinned by tests
+that walk the whole key vocabulary, the navigation cluster and the media keys.
+
 ### Fixed - the deck stayed black after a reconnect that had succeeded
 
 A deck that came back healthy and connected could still show nothing: the

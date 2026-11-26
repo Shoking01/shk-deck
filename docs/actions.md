@@ -83,6 +83,43 @@ The runner is a thread of its own so the window never waits for a program to
 start, and every failure comes back as a sentence the status line can show —
 `take_failure()` is polled by the same loop that draws.
 
+## Why a keystroke carries a scan code
+
+A keyboard sends **scan codes** and Windows derives the virtual key from them.
+Text fields read the derived key, so a `SendInput` carrying only a virtual key
+(`wScan: 0`) types in Notepad — and is invisible where it matters most. Raw
+Input reports `MakeCode = 0x00` for such an event: a key that no keyboard has. A
+game that binds a key and watches the device never sees it fire, in fullscreen
+or in a window, while every text field on the same desktop keeps working.
+
+Measured on this machine, with a Raw Input listener beside the sender:
+
+```text
+virtual key only   RAW MakeCode=0x00 Flags=0x00 VKey=0x87
+scan code (now)    RAW MakeCode=0x76 Flags=0x00 VKey=0x87
+```
+
+So `ss550-tray` states the virtual key only long enough to translate it with
+`MapVirtualKeyW(…, MAPVK_VK_TO_VSC_EX)` and sends the scan code
+(`KEYEVENTF_SCANCODE`). Two details are not decoration:
+
+- **The `E0` prefix.** Keys such as the arrows, Home/End/PageUp/PageDown,
+  Insert/Delete, the Windows key and every media key are sent by a keyboard
+  with a `0xE0` prefix (`KEYEVENTF_EXTENDEDKEY`). Without it the same scan code
+  arrives as the keypad's twin — `0x48` with the prefix is the Up arrow, without
+  it it is the numeric keypad's `8`. Windows' own translation table only reports
+  the prefix for some of them, so the navigation cluster is stated explicitly in
+  `keysend::is_extended`.
+- **The hold.** The presses and the releases used to go out in one `SendInput`
+  call, inside a single input tick. The keys are now held for
+  `keysend::HOLD` (20 ms) between the two batches, because a game that samples
+  the keyboard once per frame cannot see a key that is pressed and released
+  between two frames.
+
+A key the layout has no scan code for is refused with a sentence instead of
+being sent as scan code zero, and the `Media` action goes out through the same
+path, so it keeps the `E0` prefix its key has on a real keyboard.
+
 ## Adding one
 
 1. A variant in `ss550_engine::Action`, with its own `serde` spelling.
