@@ -95,10 +95,15 @@ if ($CreateShortcut) {
 
 # Step 5: start the build that was just installed, so the window on screen and
 # the file at logon are the same bytes.
+#
+# `-ArgumentList` refuses an empty array on Windows PowerShell 5.1, so the two
+# shapes are stated instead of built into a list that may be empty.
 if (-not $SkipLaunch) {
-    $launchArgs = @()
-    if ($Hidden) { $launchArgs += "--hidden" }
-    Start-Process -FilePath $InstallFile -ArgumentList $launchArgs -WorkingDirectory $InstallDir
+    if ($Hidden) {
+        Start-Process -FilePath $InstallFile -ArgumentList "--hidden" -WorkingDirectory $InstallDir
+    } else {
+        Start-Process -FilePath $InstallFile -WorkingDirectory $InstallDir
+    }
     Write-Success "Started the installed copy"
 }
 
