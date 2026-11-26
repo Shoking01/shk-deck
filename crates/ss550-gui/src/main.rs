@@ -3461,6 +3461,72 @@ impl Controller {
         }
     }
 
+    /// Trades the places of two keys on the page the deck is showing.
+    ///
+    /// A swap, not a copy: what key A ran and showed becomes what key B does, and
+    /// the other way round. Neither key is overwritten, and a key with nothing on
+    /// it stays a key with nothing on it — on the other number. The page is the
+    /// authority, so the profile is changed first and the bindings file is written
+    /// from it: the two files never disagree about where a key sits.
+    fn swap_keys(
+        &mut self,
+        from: KeyNumber,
+        to: KeyNumber,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.is_none() {
+            self.note = "Connect a deck to move a key.".into();
+            return;
+        }
+        if from == to {
+            return;
+        }
+        let page = self.current_page().map(str::to_string);
+        if let Err(error) = self.profile_store.swap_keys(from, to, page.as_deref()) {
+            self.note = error.into();
+            return;
+        }
+        // The page is the source of truth; the store the deck runs is written
+        // from it, so a swap applied to one and not the other cannot come apart
+        // at the next start.
+        self.store = match self.current_keys() {
+            Some(keys) => keys.bindings.clone(),
+            None => return,
+        };
+        let bindings_saved = match self.store_path.clone() {
+            Some(path) => self.store.save(&path),
+            None => Ok(()),
+        };
+        let profile_saved = self.save_profile_result();
+
+        // Both keys changed what they show, so their pictures are composed again
+        // before either is painted: the icon and the words moved with their key,
+        // and the cache is told about the new pairing.
+        self.rebuild_icons();
+        let from_key = u16::from(from.get());
+        let to_key = u16::from(to.get());
+        self.repaint_key(from_key);
+        self.repaint_key(to_key);
+
+        let mut sentence = format!("Keys #{} and #{} traded places.", from.get(), to.get());
+        if let Err(error) = bindings_saved {
+            sentence = format!("{sentence} The bindings file was not saved: {error}");
+        }
+        if let Err(error) = profile_saved {
+            sentence = format!("{sentence} {error}");
+        }
+        self.note = sentence.into();
+
+        // The editor beside the grid follows the key it is showing: the form must
+        // not keep the fields of a key that has just moved elsewhere.
+        if from == self.selected_key || to == self.selected_key {
+            self.load_draft(self.selected_key, window, cx);
+        }
+
+        cx.notify();
+    }
+
     /// Binds the selected key to what the panel holds, and saves it.
     fn save_binding(&mut self, cx: &mut Context<Self>) {
         // A key that navigates is not edited by this form: its fields are empty

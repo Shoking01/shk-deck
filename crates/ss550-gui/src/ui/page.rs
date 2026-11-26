@@ -70,7 +70,7 @@ impl Page {
         match self {
             Page::Deck => {
                 "What every key shows right now, and the editor for the key you pick. Touching \
-                 a key never changes it."
+                 a key never changes it; dragging one onto another trades their places."
             }
             Page::Actions => {
                 "Every key as a chip, the editor for the selected one, and what is bound right \

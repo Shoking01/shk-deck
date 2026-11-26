@@ -7,6 +7,18 @@ messages; the file below is a human summary, not a substitute for
 
 ## Unreleased
 
+### Added - a key can be dragged into another key's place
+
+Dragging one key of the `Deck` page onto another now **trades their places**.
+The binding, the picture, the title and the title's style travel together to the
+other number, so a key never ends up wearing the face of something it no longer
+runs; the profile page and the bindings file are both written with the swap, and
+both keys are repainted on the deck at once. Nothing is overwritten: a key with
+no binding moves as an empty key, which means the drop can never destroy a
+binding the user made. A key dropped on itself is a no-op, a tile on a window
+with no deck starts no drag, and the palette's own drop keeps working unchanged
+on the same tiles.
+
 ### Fixed - a key press reached every text field and no game
 
 A deck key bound to `Keys` typed into Notepad and did nothing in a game: no bind
